@@ -1,0 +1,34 @@
+[build-system]
+requires = ["hatchling>=1.26"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mncs-control-mcp"
+version = "0.1.0"
+description = "Secure, provider-neutral MCP control boundary for the local MNCS laboratory"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+authors = [{ name = "MNCS Contributors" }]
+dependencies = ["mcp>=1.29,<2"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.3,<10", "ruff>=0.9"]
+
+[project.scripts]
+mncs-control-mcp = "mncs_control_mcp.server:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mncs_control_mcp"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "B", "UP"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
+pythonpath = ["src"]

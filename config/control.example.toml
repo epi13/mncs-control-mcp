@@ -1,0 +1,28 @@
+[server]
+name = "mncs-control-mcp"
+
+[mncs]
+projects_root = "/path/to/Documents/Projects"
+
+[repos]
+local_harness = "epi13-local-harness"
+fabric = "mncs-fabric"
+forge = "mncs-forge-mcp"
+language = "mncs-language"
+standard = "machine-native-complexity-standard"
+commons = "MNCS-Commons"
+reference_studies = "mncs-reference-studies"
+
+[integration]
+# Optional absolute or projects-root-relative paths.
+# harness_config = "/path/to/.config/epi13-local-harness/config.toml"
+# fabric_registry = "/path/to/.local/state/mncs-fabric/workers.json"
+# fabric_state = "/path/to/.local/state/mncs-control-mcp/fabric.jsonl"
+fabric_controller_id = "mncs-control-mcp"
+forge_config_name = "mncs-forge.toml"
+
+[limits]
+max_output_bytes = 131072
+max_response_bytes = 524288
+default_timeout_seconds = 120
+max_timeout_seconds = 600
