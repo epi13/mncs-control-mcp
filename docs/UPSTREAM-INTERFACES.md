@@ -13,12 +13,25 @@ These adapters were reviewed against the sibling sources present in `$HOME/Docum
 The adapter passes Fabric a private control-plane registry path. This avoids
 Fabric's registry lock being created below the service's read-only real home;
 the legacy registry is migrated into that path without copying lock files.
+Fabric's public client accepts validated job-plan `timeout_seconds` and its
+transport/worker configuration has bounded control and execution timeouts, but
+the checked-out client exposes no abort or polling API that Control can invoke.
+Control therefore supervises its blocking adapter call, propagates the job
+deadline into the Fabric plan, and reports `upstream_detached` when local
+cancellation cannot establish remote cancellation.
 
 The adapter does not turn a caller string into Fabric remote shell. Python scripts must exist in the selected artifact tree; pytest/cargo entrypoints are fixed task families. Fabric bundle limits and symlink rules remain authoritative. The optional MCP `model` field is reported but not used to invent model-placement semantics; Harness owns model routing.
 
 ## Forge
 
-`mncs-forge-mcp` exposes a typed operation inventory and `DEFAULT_OPERATION_REGISTRY`. `forge.status` reports the bounded public operation inventory without running an evaluation. For a project with a validated `mncs-forge.toml`, `run_mncs_evaluation` constructs a development-mode `Forge` and invokes `development.checks.run`. Forge owns candidate, evidence, lifecycle, scoring, and claim boundaries.
+`mncs-forge-mcp` exposes a typed operation inventory and `DEFAULT_OPERATION_REGISTRY`. Control
+uses the repository's canonical Forge MCP entry point for a real stdio initialize, tools/list,
+and harmless `mncs_forge_project_inspect` health probe. `forge.status` reports explicit
+configuration, reachability, protocol, version, and capability state. For a project with a
+validated `mncs-forge.toml`, `run_mncs_evaluation` still constructs a development-mode `Forge`
+and invokes `development.checks.run` through that same public typed registry; it does not copy
+Forge implementation into Control or create a second evaluator. Forge owns candidate, evidence,
+lifecycle, scoring, and claim boundaries.
 
 ## Commons
 

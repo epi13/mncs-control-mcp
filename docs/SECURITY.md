@@ -18,16 +18,29 @@ No-network commands receive a new network namespace. Network-enabled commands re
 
 The child environment is constructed from fixed essentials and configured non-secret overrides. The host environment is not copied. Secret-like override names are rejected. Generic environment inspection is not exposed.
 
+There are two deliberate environment boundaries. `run_bounded()` defaults to a
+minimal command environment containing only fixed locale/temp/path essentials;
+it does not discover the real HOME or XDG directories. Narrow, read-only host
+adapters such as Ollama, NVIDIA inventory, tool inventory, and the doctor may
+explicitly use `safe_host_probe_environment()`, which supplies controlled HOME
+and selected XDG paths after secret filtering. No API tokens, cloud credentials,
+SSH private-key data, shell startup files, or arbitrary host variables are
+forwarded.
+
 ## Process and response controls
 
 The service bounds timeout, concurrent jobs, retained stdout/stderr, file and response sizes, directory/search results, and stdin writes. Asynchronous children use dedicated process groups and are terminated on stop, timeout, and orderly server shutdown. Metadata is persisted mode 0600; prior running records become `orphaned` after restart and are not trusted as live PIDs.
 
 There is currently no per-job CPU or memory cgroup quota and no GPU device passthrough. These are explicit limitations, not claimed controls.
 
-Control jobs distinguish local terminal processes from upstream records. Fabric,
-Forge, and Harness identifiers are recorded without pretending that an upstream
-job has a local PID; status and receipts remain authoritative in the upstream
-system.
+Control jobs distinguish local terminal processes from upstream records. External
+adapter calls run behind a supervised process boundary with a real wall-clock
+deadline. `queued` can be stopped before execution, `timed_out` means Control
+terminated its adapter process, and `upstream_detached` means Control stopped
+waiting/owning the adapter while an upstream request may remain authoritative.
+Fabric, Forge, and Harness identifiers are recorded without pretending that an
+upstream job has a local PID. A restart marks incomplete upstream metadata as
+`upstream_detached` rather than guessing that work completed.
 
 ## Integration runtime state
 
@@ -35,7 +48,9 @@ Mutable integration state is not placed in the real home directory. Fabric's
 registry, lock, network ledger, and bundle staging use the private
 `~/.local/state/mncs-control-mcp/fabric/` tree, which is one of the narrowly
 allowed service write paths. A legacy Fabric registry is migrated by copying
-only its bounded JSON document; lock files are recreated in the private tree.
+only its bounded JSON document under an exclusive file lock, a unique fsynced
+temporary file, and atomic replacement; lock files are recreated in the private
+tree.
 The sandbox also has an internal runtime-mount hook restricted to control-plane
 state directories, so future approved integrations can receive one writable
 directory without making `$HOME`, `.ssh`, `.config`, or `/run/user` writable.

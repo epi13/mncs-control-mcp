@@ -65,3 +65,7 @@ fabric_state = "~/.local/state/mncs-control-mcp/fabric.jsonl"
 # This must match the controller_id recorded in the selected worker registry.
 fabric_controller_id = "epi13-local-harness"
 forge_config_name = "mncs-forge.toml"
+# Optional explicit MCP probe paths. When omitted, Control uses the Forge
+# checkout's .venv entry point and the migrated reference-studies config.
+# forge_mcp_executable = "~/Documents/Projects/mncs-forge-mcp/scripts/codex-mcp"
+# forge_mcp_config = "~/Documents/Projects/mncs-reference-studies/mncs-forge.toml"

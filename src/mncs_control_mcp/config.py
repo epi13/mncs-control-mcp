@@ -66,6 +66,8 @@ class ControlConfig:
     )
     fabric_controller_id: str = "epi13-local-harness"
     forge_config_name: str = "mncs-forge.toml"
+    forge_mcp_executable: Path | None = None
+    forge_mcp_config: Path | None = None
 
     @property
     def projects_root(self) -> Path:
@@ -83,6 +85,25 @@ class ControlConfig:
     @property
     def forge_path(self) -> Path:
         return self.workspace_root / self.repositories.get("forge", "mncs-forge-mcp")
+
+    @property
+    def forge_server_path(self) -> Path:
+        """Resolve the canonical repository-local Forge MCP entry point."""
+        if self.forge_mcp_executable is not None:
+            return self.forge_mcp_executable
+        wrapper = self.forge_path / "scripts" / "codex-mcp"
+        return wrapper if wrapper.is_file() else self.forge_path / ".venv" / "bin" / "mncs-forge-mcp"
+
+    @property
+    def forge_probe_config(self) -> Path | None:
+        """Return the configured or migrated empirical Forge project config."""
+        if self.forge_mcp_config is not None:
+            return self.forge_mcp_config
+        candidates = (
+            self.workspace_root / self.repositories.get("reference_studies", "mncs-reference-studies") / self.forge_config_name,
+            self.workspace_root / self.forge_config_name,
+        )
+        return next((candidate for candidate in candidates if candidate.is_file()), None)
 
 
 def _path(value: object, *, base: Path | None = None) -> Path:
@@ -172,6 +193,8 @@ def load_config(path: Path | str | None = None) -> ControlConfig:
         return _path(table[key]) if key in table else default.resolve()
 
     harness_value = integration.get("harness_config")
+    forge_executable = integration.get("forge_mcp_executable")
+    forge_config = integration.get("forge_mcp_config")
     return ControlConfig(
         name=str(server.get("name", "mncs-control-mcp")),
         workspace_root=root,
@@ -231,4 +254,6 @@ def load_config(path: Path | str | None = None) -> ControlConfig:
         ),
         fabric_controller_id=str(integration.get("fabric_controller_id", "epi13-local-harness")),
         forge_config_name=str(integration.get("forge_config_name", "mncs-forge.toml")),
+        forge_mcp_executable=_path(forge_executable) if forge_executable else None,
+        forge_mcp_config=_path(forge_config) if forge_config else None,
     )

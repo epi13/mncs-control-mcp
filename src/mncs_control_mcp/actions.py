@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .errors import ControlError
-from .security import bounded_text, safe_host_probe_environment
+from .security import bounded_text, filtered_environment
 
 
 @dataclass(frozen=True)
@@ -68,7 +68,9 @@ def run_bounded(
         process = subprocess.Popen(
             list(argv),
             cwd=str(cwd) if cwd else None,
-            env=dict(env if env is not None else safe_host_probe_environment()),
+            # Generic bounded commands receive only the minimal command
+            # environment. Trusted read-only probes opt into host discovery.
+            env=dict(env if env is not None else filtered_environment()),
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
