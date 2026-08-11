@@ -13,6 +13,7 @@ from .actions import ActionRegistry, ActionSpec
 from .adapters import IntegrationBundle
 from .audit import AuditLog
 from .config import ControlConfig, load_config
+from .control_plane import ControlPlaneService
 from .errors import ControlError
 from .filesystem import FileService
 from .git_adapter import GitService
@@ -70,6 +71,9 @@ def build_server(config: ControlConfig | None = None) -> Any:
     processes = ProcessManager(selected, policy, sandbox)
     projects = ProjectService(selected, policy, sandbox, git)
     inventory = ToolInventory(selected)
+    control_plane = ControlPlaneService(
+        selected, policy, sandbox, projects, git, integrations.tests, integrations, processes
+    )
 
     server = FastMCP(
         selected.name,
@@ -148,6 +152,10 @@ def build_server(config: ControlConfig | None = None) -> Any:
     @server.tool(name="project_info", description="Inspect one dynamically discovered workspace project.", annotations=ro, structured_output=True)
     def project_info(project: str) -> dict[str, object]:
         return invoke("project_info", projects.info, project)  # type: ignore[return-value]
+
+    @server.tool(name="project_review", description="Aggregate bounded project, Git, test, documentation, and integration context for agent planning.", annotations=ro, structured_output=True)
+    def project_review(project: str, depth: str = "standard") -> dict[str, object]:
+        return invoke("project_review", control_plane.review, project, depth=depth, audit_metadata={"project": project, "depth": depth})  # type: ignore[return-value]
 
     @server.tool(name="project_create", description="Create an empty, Python, Rust, or Node project inside the workspace.", annotations=mutate, structured_output=True)
     def project_create(name: str, kind: str = "empty", git_init: bool = False) -> dict[str, object]:
@@ -229,6 +237,10 @@ def build_server(config: ControlConfig | None = None) -> Any:
     def terminal_jobs() -> dict[str, object]:
         return invoke("terminal_jobs", processes.list)  # type: ignore[return-value]
 
+    @server.tool(name="control_jobs", description="List terminal jobs and completed upstream Fabric, Forge, or Harness execution records.", annotations=ro, structured_output=True)
+    def control_jobs() -> dict[str, object]:
+        return invoke("control_jobs", processes.list)  # type: ignore[return-value]
+
     @server.tool(name="git_status", description="Inspect structured status for any Git repository inside the workspace.", annotations=ro, structured_output=True)
     def git_status(repository: str) -> dict[str, object]:
         return invoke("git_status", git.status, repository)  # type: ignore[return-value]
@@ -297,6 +309,18 @@ def build_server(config: ControlConfig | None = None) -> Any:
     def tool_inventory() -> dict[str, object]:
         return invoke("tool_inventory", inventory.inventory)  # type: ignore[return-value]
 
+    @server.tool(name="control_capabilities", description="Report the structured capabilities, limits, security boundaries, and upstream ownership of this control plane.", annotations=ro, structured_output=True)
+    def control_capabilities() -> dict[str, object]:
+        return invoke("control_capabilities", control_plane.capabilities)  # type: ignore[return-value]
+
+    @server.tool(name="laboratory_status", description="Aggregate controller resources, models, Fabric workers, MNCS integrations, and running jobs.", annotations=ro, structured_output=True)
+    def laboratory_status() -> dict[str, object]:
+        return invoke("laboratory_status", control_plane.laboratory_status)  # type: ignore[return-value]
+
+    @server.tool(name="control_run", description="Run one narrow typed orchestration workflow across project review, checks, tests, Forge, Fabric, or Harness capability boundaries.", annotations=mutate, structured_output=True)
+    def control_run(workflow: str, project: str, profile: str = "standard", task_type: str | None = None, model: str | None = None, node: str | None = None, parameters: dict[str, object] | None = None) -> dict[str, object]:
+        return invoke("control_run", control_plane.run_workflow, workflow, project, profile, task_type, model, node, parameters, audit_metadata={"project": project, "workflow": workflow})  # type: ignore[return-value]
+
     @server.tool(name="system_status", description="Inspect Fedora host resources, sandbox, MCP jobs, and MNCS subsystem availability.", annotations=ro, structured_output=True)
     def system_status() -> dict[str, object]:
         return invoke(
@@ -308,10 +332,14 @@ def build_server(config: ControlConfig | None = None) -> Any:
                 "jobs": processes.list(),
                 "local_harness": integrations.harness.status(),
                 "fabric": integrations.fabric.status(),
-                "forge": {"available": selected.forge_path.is_dir(), "path": str(selected.forge_path)},
+                "forge": integrations.forge.status(),
                 "server": {"name": selected.name, "version": __version__, "transport": "stdio"},
             },
         )  # type: ignore[return-value]
+
+    @server.tool(name="audit_summary", description="Show bounded aggregate control activity from the private audit log without exposing raw commands or secrets.", annotations=ro, structured_output=True)
+    def audit_summary(limit: int = 50) -> dict[str, object]:
+        return invoke("audit_summary", audit.summary, limit=limit)  # type: ignore[return-value]
 
     @server.tool(name="list_repositories", description="List configured MNCS aliases; aliases specialize but do not authorize general workspace access.", annotations=ro, structured_output=True)
     def list_repositories() -> dict[str, object]:
@@ -334,7 +362,19 @@ def build_server(config: ControlConfig | None = None) -> Any:
     def model_status() -> dict[str, object]:
         return invoke("model_status", integrations.models.status)  # type: ignore[return-value]
 
-    @server.tool(name="run_tests", description="Run detected pytest or cargo tests for any workspace project inside the sandbox.", annotations=mutate, structured_output=True)
+    @server.tool(name="test_discover", description="Detect a bounded test workflow for a workspace project without executing it.", annotations=ro, structured_output=True)
+    def test_discover(project: str) -> dict[str, object]:
+        return invoke("test_discover", integrations.tests.discover, project, audit_metadata={"project": project})  # type: ignore[return-value]
+
+    @server.tool(name="test_run", description="Run a detected pytest, Cargo, Node, Go, or CTest workflow inside the project sandbox.", annotations=mutate, structured_output=True)
+    def test_run(project: str, test_suite: str = "repository", component: str | None = None, timeout: float | None = None) -> dict[str, object]:
+        return invoke("test_run", integrations.tests.run, project, test_suite, component, timeout, audit_metadata={"project": project})  # type: ignore[return-value]
+
+    @server.tool(name="project_check", description="Run a bounded quick, standard, or full project verification profile using detected tooling.", annotations=mutate, structured_output=True)
+    def project_check(project: str, profile: str = "standard", timeout: float | None = None) -> dict[str, object]:
+        return invoke("project_check", integrations.tests.check, project, profile, timeout, audit_metadata={"project": project, "profile": profile})  # type: ignore[return-value]
+
+    @server.tool(name="run_tests", description="Backward-compatible test workflow for any workspace project inside the sandbox.", annotations=mutate, structured_output=True)
     def run_tests(repository: str, test_suite: str = "repository", component: str | None = None, timeout: float | None = None) -> dict[str, object]:
         return invoke("run_tests", integrations.tests.run, repository, test_suite, component, timeout, audit_metadata={"project": repository})  # type: ignore[return-value]
 
@@ -343,8 +383,41 @@ def build_server(config: ControlConfig | None = None) -> Any:
         return invoke("run_mncs_evaluation", integrations.forge.evaluate, repository, case_study, model, evaluation_profile, audit_metadata={"project": repository})  # type: ignore[return-value]
 
     @server.tool(name="dispatch_fabric_job", description="Build validated Fabric plans/manifests/bundles and dispatch bounded pytest, Python, or cargo-test work through FabricClient.", annotations=network_mutate, structured_output=True)
-    def dispatch_fabric_job(task_type: str, project: str, model: str | None = None, node: str | None = None, parameters: dict[str, object] | None = None) -> dict[str, object]:
-        return invoke("dispatch_fabric_job", integrations.fabric.dispatch, task_type, project, model, node, parameters, audit_metadata={"project": project, "task_type": task_type, "node": node})  # type: ignore[return-value]
+    def dispatch_fabric_job(task_type: str, project: str, model: str | None = None, node: str | None = None, parameters: dict[str, object] | None = None, wait: bool = True) -> dict[str, object]:
+        def dispatch() -> dict[str, object]:
+            def operation() -> dict[str, object]:
+                return integrations.fabric.dispatch(task_type, project, model, node, parameters)
+            if not wait:
+                return {"status": "running", "control_job": processes.submit_external(
+                    "fabric_" + task_type,
+                    operation,
+                    project=project,
+                    node=node,
+                    model=model,
+                )}
+            result = operation()
+            result["control_job"] = processes.record_external(
+                "fabric_" + task_type,
+                project=project,
+                node=node,
+                model=model,
+                result_summary={"status": result.get("status"), "task_type": task_type, "node": node},
+            )
+            return result
+
+        return invoke("dispatch_fabric_job", dispatch, audit_metadata={"project": project, "task_type": task_type, "node": node})  # type: ignore[return-value]
+
+    @server.tool(name="control_job_status", description="Inspect a local terminal or upstream control-plane job by stable control ID.", annotations=ro, structured_output=True)
+    def control_job_status(job_id: str) -> dict[str, object]:
+        return invoke("control_job_status", processes.status, job_id)  # type: ignore[return-value]
+
+    @server.tool(name="control_job_result", description="Retrieve a completed upstream result or bounded terminal output for a control job.", annotations=ro, structured_output=True)
+    def control_job_result(job_id: str) -> dict[str, object]:
+        return invoke("control_job_result", processes.result, job_id)  # type: ignore[return-value]
+
+    @server.tool(name="control_job_stop", description="Stop a local process or request cancellation of an upstream control job; Fabric-owned work cannot be force-killed by this MCP.", annotations=destructive, structured_output=True)
+    def control_job_stop(job_id: str) -> dict[str, object]:
+        return invoke("control_job_stop", processes.stop_control, job_id)  # type: ignore[return-value]
 
     @server.tool(name="job_status", description="Backward-compatible alias for terminal_status.", annotations=ro, structured_output=True)
     def job_status(job_id: str) -> dict[str, object]:

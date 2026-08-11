@@ -279,7 +279,11 @@ class FileService:
                 self.policy.resolve(value, allow_root=False, mutation=True)
                 paths.add(value)
         if not paths:
-            raise ControlError("INVALID_PATCH", "unified patch has no file headers")
+            raise ControlError(
+                "INVALID_PATCH",
+                "unified patch has no file headers; include --- a/path and +++ b/path lines",
+                details={"expected_format": "standard unified diff with --- and +++ file headers"},
+            )
         environment = {"PATH": "/usr/bin:/bin", "HOME": str(self.config.sandbox_home), "GIT_CONFIG_NOSYSTEM": "1"}
         for args in (("git", "apply", "--check", "--whitespace=nowarn", "-"), ("git", "apply", "--whitespace=nowarn", "-")):
             process = subprocess.run(

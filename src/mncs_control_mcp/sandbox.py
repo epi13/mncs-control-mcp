@@ -107,6 +107,7 @@ class Sandbox:
         network: bool | None,
         environment: dict[str, str] | None = None,
         use_ssh_agent: bool = False,
+        runtime_mounts: tuple[tuple[Path, str], ...] = (),
     ) -> tuple[list[str], bool]:
         if not isinstance(command, str) or not command.strip() or len(command) > 131072 or "\x00" in command:
             raise ControlError("INVALID_COMMAND", "command must be non-empty bounded text")
@@ -184,6 +185,39 @@ class Sandbox:
             argv.extend(("--ro-bind", str(self.policy.root), "/workspace"))
             argv.extend(("--bind", str(resolution.host_root), f"/workspace/{resolution.project}"))
 
+        # Integrations may request narrowly scoped writable runtime mounts.  A
+        # caller cannot mount arbitrary host paths: only directories already
+        # belonging to the control-plane state tree are accepted.
+        allowed_runtime_roots = {
+            self.config.fabric_state.parent.resolve(),
+            self.config.job_state_path.parent.resolve(),
+            self.config.audit_path.parent.resolve(),
+        }
+        for source, destination in runtime_mounts:
+            source_path = Path(source).expanduser().resolve(strict=True)
+            if not source_path.is_dir() or not any(
+                _is_relative_to(source_path, root) for root in allowed_runtime_roots
+            ):
+                raise ControlError("INVALID_RUNTIME_MOUNT", "runtime mount must be a control-plane state directory")
+            destination_path = Path(destination)
+            destination_root = Path("/home/developer/.local/state")
+            if (
+                not destination_path.is_absolute()
+                or ".." in destination_path.parts
+                or not _is_relative_to(destination_path, destination_root)
+            ):
+                raise ControlError("INVALID_RUNTIME_MOUNT", "runtime mount destination must be below the sandbox state directory")
+            # Bubblewrap requires the destination's parent to exist in the
+            # namespace.  Creating only empty namespace directories does not
+            # expose any additional host data.
+            parent = Path("/")
+            existing = {"/", "/home", "/home/developer", "/run", "/tmp", "/workspace", "/opt", "/opt/mncs-tools"}
+            for part in destination_path.parent.parts[1:]:
+                parent /= part
+                if parent.as_posix() not in existing:
+                    argv.extend(("--dir", parent.as_posix()))
+            argv.extend(("--bind", str(source_path), destination_path.as_posix()))
+
         path_entries: list[str] = []
         tool_paths = self._tool_paths()
         if tool_paths:
@@ -260,6 +294,7 @@ class Sandbox:
         network: bool | None,
         environment: dict[str, str] | None = None,
         use_ssh_agent: bool = False,
+        runtime_mounts: tuple[tuple[Path, str], ...] = (),
     ) -> SandboxResult:
         if not self.config.allow_terminal:
             raise ControlError("TERMINAL_DISABLED", "terminal execution is disabled")
@@ -273,6 +308,7 @@ class Sandbox:
             network=network,
             environment=environment,
             use_ssh_agent=use_ssh_agent,
+            runtime_mounts=runtime_mounts,
         )
         started_at = utc_now()
         started = time.monotonic()
@@ -320,6 +356,14 @@ def _terminate_group(process: subprocess.Popen[bytes]) -> None:
             os.killpg(process.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
+
+
+def _is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
 
 
 def _communicate_bounded(

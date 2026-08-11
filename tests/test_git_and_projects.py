@@ -10,6 +10,7 @@ from mncs_control_mcp.tooling import ProjectService, ToolInventory
 from mncs_control_mcp.workspace import WorkspacePolicy
 
 
+@pytest.mark.requires_bwrap_namespace
 @pytest.mark.skipif(shutil.which("bwrap") is None, reason="bubblewrap is not installed")
 def test_project_discovery_creation_and_full_local_git_workflow(config) -> None:
     policy = WorkspacePolicy(config)
@@ -50,3 +51,18 @@ def test_tool_inventory_has_no_environment_dump(config, monkeypatch: pytest.Monk
     rendered = str(result)
     assert "never-return-this" not in rendered
     assert any(item["name"] == "git" and item["available"] for item in result["tools"])
+
+
+def test_tool_inventory_reports_project_local_candidate_when_system_wrapper_is_broken(config, monkeypatch: pytest.MonkeyPatch) -> None:
+    project = config.workspace_root / "fixture-repo" / ".venv" / "bin"
+    project.mkdir(parents=True)
+    candidate = project / "pytest"
+    candidate.write_text("#!/bin/sh\nprintf 'pytest 9.9.9\\n'\n", encoding="utf-8")
+    candidate.chmod(0o700)
+    original_which = shutil.which
+    monkeypatch.setattr(shutil, "which", lambda name: "/nonexistent/pytest" if name == "pytest" else original_which(name))
+    item = next(row for row in ToolInventory(config).inventory()["tools"] if row["name"] == "pytest")
+    assert item["available"] is True
+    assert item["status"] == "healthy"
+    assert item["scope"] == "project"
+    assert any(row["scope"] == "project" for row in item["candidates"])

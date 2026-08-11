@@ -80,7 +80,7 @@ Environment=PATH=%h/.local/bin:%h/Documents/Projects/mncs-control-mcp/.venv/bin:
 Environment=MNCS_CONTROL_REPOSITORY={escaped_repo}
 Environment=MNCS_CONTROL_TUNNEL_PROFILE={profile}
 ExecStart=%h/Documents/Projects/mncs-control-mcp/scripts/run-tunnel.sh
-Restart=on-failure
+Restart=always
 RestartSec=10s
 TimeoutStopSec=20s
 KillMode=control-group
@@ -135,3 +135,22 @@ def configured_runtime_key(path: Path) -> bool:
     except (OSError, UnicodeError):
         return False
     return False
+
+
+def runtime_environment(path: Path) -> dict[str, str]:
+    """Return a filtered environment with the local tunnel key for tunnel-client only."""
+    from .security import safe_host_probe_environment
+
+    value = ""
+    try:
+        for raw_line in path.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if line and not line.startswith("#") and line.startswith("CONTROL_PLANE_API_KEY="):
+                value = line.split("=", 1)[1].strip().strip("\"'")
+                break
+    except (OSError, UnicodeError):
+        pass
+    environment = safe_host_probe_environment()
+    if value:
+        environment["CONTROL_PLANE_API_KEY"] = value
+    return environment

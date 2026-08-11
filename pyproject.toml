@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mncs-control-mcp"
-version = "0.2.1"
+version = "0.4.0"
 description = "Protected Fedora developer workspace and MNCS orchestration over MCP"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -32,3 +32,6 @@ select = ["E4", "E7", "E9", "F", "I", "B", "UP"]
 addopts = "-q"
 testpaths = ["tests"]
 pythonpath = ["src"]
+markers = [
+  "requires_bwrap_namespace: test requires creating a fresh user/PID namespace and is explicitly skipped for nested self-tests",
+]

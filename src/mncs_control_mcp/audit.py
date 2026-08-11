@@ -46,3 +46,28 @@ class AuditLog:
         if value is None or isinstance(value, (bool, int, float)):
             return value
         return redact_text(str(value)[:1024])
+
+    def summary(self, limit: int = 50) -> dict[str, object]:
+        """Return aggregate recent metadata without exposing raw audit records."""
+        if limit < 1 or limit > 200:
+            limit = 50
+        counts: dict[str, int] = {}
+        failures = 0
+        recent: list[dict[str, object]] = []
+        try:
+            lines = self.path.read_text(encoding="utf-8").splitlines()[-limit:]
+        except OSError:
+            lines = []
+        for line in lines:
+            try:
+                record = json.loads(line)
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(record, dict):
+                continue
+            tool = str(record.get("tool", "unknown"))
+            counts[tool] = counts.get(tool, 0) + 1
+            if record.get("success") is False:
+                failures += 1
+            recent.append({key: record.get(key) for key in ("timestamp", "tool", "success", "error", "job_id", "project", "scope", "duration_seconds") if key in record})
+        return {"path": str(self.path), "events_considered": len(recent), "failures": failures, "tool_counts": counts, "recent": recent}

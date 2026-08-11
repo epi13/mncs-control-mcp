@@ -21,6 +21,7 @@ def _sandbox(config) -> tuple[WorkspacePolicy, Sandbox]:
     return policy, Sandbox(config, policy)
 
 
+@pytest.mark.requires_bwrap_namespace
 def test_real_bwrap_blocks_home_and_project_sibling_mutation(config) -> None:
     (config.workspace_root / "alpha").mkdir()
     (config.workspace_root / "beta").mkdir()
@@ -63,6 +64,7 @@ def test_real_bwrap_blocks_home_and_project_sibling_mutation(config) -> None:
     assert enabled is True
 
 
+@pytest.mark.requires_bwrap_namespace
 def test_workspace_scope_can_mutate_siblings_but_not_real_home(config) -> None:
     (config.workspace_root / "alpha").mkdir()
     (config.workspace_root / "beta").mkdir()
@@ -79,6 +81,7 @@ def test_workspace_scope_can_mutate_siblings_but_not_real_home(config) -> None:
     assert (config.workspace_root / "beta" / "cross.txt").read_text(encoding="utf-8") == "cross\n"
 
 
+@pytest.mark.requires_bwrap_namespace
 def test_async_job_output_input_timeout_and_stop(config) -> None:
     (config.workspace_root / "alpha").mkdir()
     policy, sandbox = _sandbox(config)

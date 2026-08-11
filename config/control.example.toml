@@ -57,7 +57,10 @@ reference_studies = "mncs-reference-studies"
 
 [integration]
 # harness_config = "~/.config/epi13-local-harness/config.toml"
-fabric_registry = "~/.local/state/mncs-fabric/workers.json"
+# Fabric state is kept under the MCP's writable private state tree.  The
+# historical ~/.local/state/mncs-fabric/workers.json path is migrated on first
+# use so ProtectHome=read-only never blocks registry locks.
+fabric_registry = "~/.local/state/mncs-control-mcp/fabric/workers.json"
 fabric_state = "~/.local/state/mncs-control-mcp/fabric.jsonl"
 # This must match the controller_id recorded in the selected worker registry.
 fabric_controller_id = "epi13-local-harness"

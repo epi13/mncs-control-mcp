@@ -59,7 +59,7 @@ class ControlConfig:
     git_use_ssh_agent: bool = True
     harness_config: Path | None = None
     fabric_registry: Path = field(
-        default_factory=lambda: Path.home() / ".local" / "state" / "mncs-fabric" / "workers.json"
+        default_factory=lambda: Path.home() / ".local" / "state" / "mncs-control-mcp" / "fabric" / "workers.json"
     )
     fabric_state: Path = field(
         default_factory=lambda: Path.home() / ".local" / "state" / "mncs-control-mcp" / "fabric.jsonl"
@@ -74,15 +74,15 @@ class ControlConfig:
 
     @property
     def harness_path(self) -> Path:
-        return self.workspace_root / self.repositories["local_harness"]
+        return self.workspace_root / self.repositories.get("local_harness", "epi13-local-harness")
 
     @property
     def fabric_path(self) -> Path:
-        return self.workspace_root / self.repositories["fabric"]
+        return self.workspace_root / self.repositories.get("fabric", "mncs-fabric")
 
     @property
     def forge_path(self) -> Path:
-        return self.workspace_root / self.repositories["forge"]
+        return self.workspace_root / self.repositories.get("forge", "mncs-forge-mcp")
 
 
 def _path(value: object, *, base: Path | None = None) -> Path:

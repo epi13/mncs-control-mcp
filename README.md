@@ -125,7 +125,7 @@ Text reads are UTF-8; binary reads use base64. File sizes, listings, trees, sear
 ### Terminal and processes
 
 - `terminal_exec`
-- `terminal_start`, `terminal_status`, `terminal_output`, `terminal_write`, `terminal_stop`, `terminal_jobs`
+- `terminal_start`, `terminal_status`, `terminal_output`, `terminal_write`, `terminal_stop`, `terminal_jobs`, `control_jobs`
 - backward-compatible `job_status`, `job_result`
 
 Synchronous results include command, sandbox cwd, scope, project, timestamps, exit code, stdout, stderr, timeout/truncation state, duration, backend, and network state. Asynchronous jobs use random service-owned IDs, process groups, incremental bounded logs, stdin, termination, configurable concurrency/time limits, shutdown cleanup, and local restart metadata. A restarted server marks previously running metadata `orphaned`; it never signals a PID merely read from disk.
@@ -142,14 +142,34 @@ Every Git command runs inside the same project sandbox, including repository hoo
 
 ### System and MNCS
 
-- `tool_inventory`, `system_status`, `list_repositories`
+- `tool_inventory`, `system_status`, `control_capabilities`, `laboratory_status`, `list_repositories`
+- `project_review`, `test_discover`, `test_run`, `project_check`, `control_run`
 - `fabric_status`, `model_status`, `run_tests`, `run_mncs_evaluation`, `dispatch_fabric_job`
+- `control_job_status`, `control_job_result`, `control_job_stop`
 
-`tool_inventory` reports safe executable paths and first-line versions for common Python, Rust, Node, C/C++, Go, Java, container, shell, search, Ollama, NVIDIA/CUDA, and sandbox tools. It does not return the environment.
+`tool_inventory` reports safe executable paths and first-line versions for common Python, Rust, Node, C/C++, Go, Java, container, shell, search, Ollama, NVIDIA/CUDA, and sandbox tools. Each entry distinguishes absent, broken, healthy, and project-local candidates; a broken global wrapper does not hide a usable project virtualenv. It does not return the environment.
 
-`run_tests` works for any immediate project and executes detected pytest or Cargo tests inside project scope. `run_mncs_evaluation` uses Forge's current typed operation registry for declared development workflows. `dispatch_fabric_job` now builds a Fabric artifact manifest, validated `mncs-fabric.job-plan.v0.1`, deterministic EA-NEXT-002 bundle, and calls `FabricClient.execute`; supported task types are `pytest`, `python`, and `cargo_test`. `artifact_path` can select a bounded artifact subtree. Fabric still owns worker discovery, admission, routing, transfer, execution, and receipts. Raw model routing is not invented at this layer; Harness remains responsible for model/agent execution.
+`project_review` provides bounded project/Git/test/CI/documentation context. `test_discover`, `test_run`, and `project_check` cover detected pytest, Cargo, Node, Go, and CTest workflows; the legacy `run_tests` name remains supported. When the control repository tests itself, Bubblewrap integration tests are marked `requires_bwrap_namespace` and reported as an explicit skip because the outer production sandbox is already the security boundary; they are not falsely reported as passing. `control_capabilities` and `laboratory_status` expose the current dependency graph and compute topology for agent planning. `control_run` composes only named workflows (`inspect_project`, `check_project`, `test_project`, `evaluate_project`, `fabric_test_project`, and the honest Harness limitation). `run_mncs_evaluation` uses Forge's current typed operation registry for declared development workflows. `dispatch_fabric_job` builds a Fabric artifact manifest, validated `mncs-fabric.job-plan.v0.1`, deterministic EA-NEXT-002 bundle, and calls `FabricClient.execute`; supported task types are `pytest`, `python`, and `cargo_test`. Fabric still owns worker discovery, admission, routing, transfer, execution, and receipts. Raw model routing is not invented at this layer; Harness remains responsible for model/agent execution.
 
 `integration.fabric_controller_id` must equal the controller identity recorded by the chosen Fabric worker registry. The example uses `epi13-local-harness`, which is the normal Harness-owned registry identity. A mismatch is reported as unavailable rather than silently assuming another controller identity.
+
+`dispatch_fabric_job` waits for the upstream receipt by default. Set `wait=false`
+for a stable `ctrl-...` job ID, then use `control_job_status` and
+`control_job_result`; `control_job_stop` can cancel work before the local
+adapter submits it, but cannot force-kill a request already owned by Fabric.
+
+Fabric's mutable registry and lock files are kept under
+`~/.local/state/mncs-control-mcp/fabric/`, which is explicitly writable by the
+user service. Existing registries at the historical
+`~/.local/state/mncs-fabric/workers.json` location are copied there on first
+use; the rest of the home directory remains read-only under the service's
+`ProtectHome=read-only` policy. Fabric's network ledger and bundle staging are
+also rooted in the private control-plane state tree.
+
+`file_patch` intentionally accepts standard Git-style unified diffs. Include
+both `--- a/path` and `+++ b/path` headers; an error response explains this
+format when they are absent. Patch paths are still validated against the
+workspace before Git applies the patch.
 
 ## Audit and limits
 

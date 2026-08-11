@@ -63,6 +63,7 @@ class StdioClient:
             self.process.communicate()
 
 
+@pytest.mark.requires_bwrap_namespace
 @pytest.mark.skipif(shutil.which("bwrap") is None, reason="bubblewrap is not installed")
 def test_stdio_mcp_end_to_end_developer_workspace(tmp_path: Path) -> None:
     pytest.importorskip("mcp")
@@ -101,6 +102,7 @@ audit_path = {str(tmp_path / 'state' / 'audit.jsonl')!r}
         assert {
             "workspace_info", "list_projects", "file_write", "file_read", "terminal_exec",
             "terminal_start", "git_status", "git_commit", "tool_inventory", "fabric_status",
+            "control_capabilities", "project_review", "control_job_status", "control_job_result",
         } <= names
         terminal = next(item for item in tools if item["name"] == "terminal_exec")
         assert terminal["annotations"]["destructiveHint"] is True
