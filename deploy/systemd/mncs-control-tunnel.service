@@ -1,0 +1,19 @@
+[Unit]
+Description=OpenAI Secure MCP Tunnel for MNCS Control
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/mncs-control-mcp/tunnel.env
+ExecStart=%h/.local/bin/tunnel-client run --profile mncs-fedora
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/Documents/Projects %h/.config %h/.local/state %h/.local/share
+
+[Install]
+WantedBy=default.target

@@ -1,10 +1,52 @@
 [server]
 name = "mncs-control-mcp"
+# Audit data is outside the exposed workspace and created mode 0600.
+audit_path = "~/.local/state/mncs-control-mcp/audit.jsonl"
 
-[mncs]
-projects_root = "/path/to/Documents/Projects"
+[workspace]
+root = "~/Documents/Projects"
+protect_root = true
+default_scope = "project"
+allow_workspace_scope = true
+allow_terminal = true
+terminal_network_default = false
+terminal_network_allowed = true
 
-[repos]
+[sandbox]
+backend = "auto"
+require_real_sandbox = true
+home = "~/.local/share/mncs-control-mcp/sandbox-home"
+# Optional additional read-only host tool trees. The default auto-detects
+# ~/.local/bin, ~/.cargo/bin, and ~/.rustup when present.
+# tool_paths = ["~/.local/bin", "~/.cargo/bin", "~/.rustup"]
+
+[terminal]
+default_timeout_seconds = 120
+max_timeout_seconds = 1800
+max_output_bytes = 1048576
+max_concurrent_jobs = 4
+job_retention_seconds = 86400
+job_state_path = "~/.local/state/mncs-control-mcp/jobs.json"
+
+# Safe non-secret overrides only. Secret-like variable names are rejected.
+[terminal.environment]
+PIP_DISABLE_PIP_VERSION_CHECK = "1"
+
+[git]
+allow_fetch = true
+allow_pull = true
+allow_push = true
+allow_clone = true
+allow_force_push = false
+use_ssh_agent = true
+
+[limits]
+max_response_bytes = 2097152
+max_file_bytes = 4194304
+max_listing_entries = 2000
+max_search_results = 500
+
+[mncs.repos]
 local_harness = "epi13-local-harness"
 fabric = "mncs-fabric"
 forge = "mncs-forge-mcp"
@@ -14,15 +56,9 @@ commons = "MNCS-Commons"
 reference_studies = "mncs-reference-studies"
 
 [integration]
-# Optional absolute or projects-root-relative paths.
-# harness_config = "/path/to/.config/epi13-local-harness/config.toml"
-# fabric_registry = "/path/to/.local/state/mncs-fabric/workers.json"
-# fabric_state = "/path/to/.local/state/mncs-control-mcp/fabric.jsonl"
-fabric_controller_id = "mncs-control-mcp"
+# harness_config = "~/.config/epi13-local-harness/config.toml"
+fabric_registry = "~/.local/state/mncs-fabric/workers.json"
+fabric_state = "~/.local/state/mncs-control-mcp/fabric.jsonl"
+# This must match the controller_id recorded in the selected worker registry.
+fabric_controller_id = "epi13-local-harness"
 forge_config_name = "mncs-forge.toml"
-
-[limits]
-max_output_bytes = 131072
-max_response_bytes = 524288
-default_timeout_seconds = 120
-max_timeout_seconds = 600

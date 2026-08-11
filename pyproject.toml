@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mncs-control-mcp"
-version = "0.1.0"
-description = "Secure, provider-neutral MCP control boundary for the local MNCS laboratory"
+version = "0.2.0"
+description = "Protected Fedora developer workspace and MNCS orchestration over MCP"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "Apache-2.0" }

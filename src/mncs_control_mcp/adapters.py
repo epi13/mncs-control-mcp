@@ -1,24 +1,25 @@
 from __future__ import annotations
 
+import hashlib
 import importlib
 import os
 import platform
 import re
+import shlex
 import shutil
 import socket
 import sys
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from .actions import ActionRegistry, CommandResult, run_bounded
+from .actions import ActionRegistry, run_bounded
 from .config import ControlConfig
 from .errors import ControlError
-from .security import (
-    public_relative_path,
-    redact_text,
-    resolve_repository,
-)
+from .sandbox import Sandbox
+from .security import redact_text, resolve_repository
+from .workspace import WorkspacePolicy
 
 
 def utc_now() -> str:
@@ -42,71 +43,28 @@ def _load_sibling_package(package: str, source_root: Path) -> Any:
                 pass
 
 
-class GitAdapter:
-    def __init__(self, config: ControlConfig, actions: ActionRegistry) -> None:
-        self.config = config
-        self.actions = actions
-
-    def status(self, repository: str) -> dict[str, object]:
-        key, root = resolve_repository(self.config, repository)
-        if not root.is_dir():
-            return {"repository": key, "path": str(root), "exists": False, "status": "missing"}
-        if not (root / ".git").exists():
-            return {"repository": key, "path": str(root), "exists": True, "status": "not_git"}
-
-        def git(*args: str) -> CommandResult:
-            self.actions.resolve("repo.status")
-            return run_bounded(
-                ("git", *args), cwd=root, timeout_seconds=15, output_limit_bytes=self.config.max_output_bytes
-            )
-
-        branch = git("branch", "--show-current")
-        head = git("rev-parse", "HEAD")
-        porcelain = git("status", "--porcelain=v1", "--untracked-files=all")
-        upstream = git("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}")
-        ahead_behind = git("rev-list", "--left-right", "--count", "HEAD...@{upstream}")
-
-        modified: list[str] = []
-        untracked: list[str] = []
-        omitted = 0
-        for line in porcelain.stdout.splitlines():
-            if len(line) < 4:
-                continue
-            state, value = line[:2], line[3:]
-            visible = public_relative_path(root, str((root / value).resolve()))
-            if visible is None:
-                omitted += 1
-                continue
-            if state == "??":
-                untracked.append(visible)
-            else:
-                modified.append(visible)
-        counts = ahead_behind.stdout.split()
-        result: dict[str, object] = {
-            "repository": key,
-            "path": str(root),
-            "exists": True,
-            "branch": branch.stdout.strip() or None,
-            "head": head.stdout.strip() or None,
-            "clean": not modified and not untracked and porcelain.returncode == 0,
-            "modified_files": sorted(modified),
-            "untracked_files": sorted(untracked),
-            "sensitive_files_omitted": omitted,
-            "upstream": upstream.stdout.strip() or None,
-            "ahead": int(counts[0]) if len(counts) == 2 and counts[0].isdigit() else None,
-            "behind": int(counts[1]) if len(counts) == 2 and counts[1].isdigit() else None,
-        }
-        if porcelain.returncode != 0:
-            result["diagnostic"] = redact_text(porcelain.stderr)
-        return result
-
-
 class TestAdapter:
     SUITES = ("repository", "pytest", "cargo")
 
-    def __init__(self, config: ControlConfig, actions: ActionRegistry) -> None:
+    def __init__(
+        self,
+        config: ControlConfig,
+        actions: ActionRegistry,
+        policy: WorkspacePolicy | None = None,
+        sandbox: Sandbox | None = None,
+    ) -> None:
         self.config = config
         self.actions = actions
+        self.policy = policy
+        self.sandbox = sandbox
+
+    def _root(self, repository: str) -> tuple[str, Path]:
+        if repository in self.config.repositories:
+            key, root = resolve_repository(self.config, repository)
+            return key, root
+        if self.policy is None:
+            raise ControlError("UNAUTHORIZED_REPOSITORY", f"repository alias is unknown: {repository}")
+        return repository, self.policy.project_path(repository)
 
     def _command(self, root: Path, suite: str, component: str | None) -> tuple[str, ...]:
         if suite not in self.SUITES:
@@ -120,7 +78,8 @@ class TestAdapter:
                 raise ControlError("TEST_SUITE_UNAVAILABLE", "no approved repository test runner was detected")
         if suite == "cargo":
             return ("cargo", "test", "--", component) if component else ("cargo", "test")
-        return (sys.executable, "-m", "pytest", component) if component else (sys.executable, "-m", "pytest")
+        interpreter = "./.venv/bin/python" if (root / ".venv" / "bin" / "python").exists() else "python"
+        return (interpreter, "-m", "pytest", component) if component else (interpreter, "-m", "pytest")
 
     def run(
         self,
@@ -129,7 +88,7 @@ class TestAdapter:
         component: str | None = None,
         timeout: float | None = None,
     ) -> dict[str, object]:
-        key, root = resolve_repository(self.config, repository)
+        key, root = self._root(repository)
         if not root.is_dir():
             raise ControlError("REPOSITORY_MISSING", f"approved repository does not exist: {key}")
         if component is not None:
@@ -140,14 +99,40 @@ class TestAdapter:
         argv = self._command(root, test_suite, component)
         self.actions.resolve(f"test.{('cargo' if argv[0] == 'cargo' else 'pytest')}")
         started = utc_now()
-        result = run_bounded(
-            argv,
-            cwd=root,
-            timeout_seconds=timeout_value,
-            output_limit_bytes=self.config.max_output_bytes,
-        )
+        if self.sandbox is not None:
+            sandbox_result = self.sandbox.run(
+                shlex.join(argv),
+                scope="project",
+                project=root.relative_to(self.config.workspace_root).parts[0],
+                cwd=Path(*root.relative_to(self.config.workspace_root).parts[1:]).as_posix()
+                if len(root.relative_to(self.config.workspace_root).parts) > 1
+                else ".",
+                timeout_seconds=timeout_value,
+                network=False,
+            )
+            returncode = sandbox_result.exit_code
+            stdout = sandbox_result.stdout
+            stderr = sandbox_result.stderr
+            timed_out = sandbox_result.timed_out
+            output_truncated = sandbox_result.output_truncated
+            duration = sandbox_result.duration_seconds
+            backend = sandbox_result.sandbox_backend
+        else:
+            result = run_bounded(
+                argv,
+                cwd=root,
+                timeout_seconds=timeout_value,
+                output_limit_bytes=self.config.max_output_bytes,
+            )
+            returncode = result.returncode
+            stdout = result.stdout
+            stderr = result.stderr
+            timed_out = result.timed_out
+            output_truncated = result.output_truncated
+            duration = result.duration_seconds
+            backend = "none"
         completed = utc_now()
-        passed = result.returncode == 0 and not result.timed_out
+        passed = returncode == 0 and not timed_out
         return {
             "repository": key,
             "test_suite": test_suite,
@@ -155,12 +140,13 @@ class TestAdapter:
             "command_identity": f"approved:{'cargo' if argv[0] == 'cargo' else 'pytest'}",
             "started_at": started,
             "completed_at": completed,
-            "exit_code": result.returncode,
-            "stdout": result.stdout,
-            "stderr": result.stderr,
-            "output_truncated": result.output_truncated,
-            "timed_out": result.timed_out,
-            "duration_seconds": round(result.duration_seconds, 3),
+            "exit_code": returncode,
+            "stdout": stdout,
+            "stderr": stderr,
+            "output_truncated": output_truncated,
+            "timed_out": timed_out,
+            "duration_seconds": round(duration, 3),
+            "sandbox_backend": backend,
             "summary": "PASS" if passed else "FAIL",
         }
 
@@ -279,8 +265,9 @@ class HarnessAdapter:
 
 
 class FabricAdapter:
-    def __init__(self, config: ControlConfig) -> None:
+    def __init__(self, config: ControlConfig, policy: WorkspacePolicy | None = None) -> None:
         self.config = config
+        self.policy = policy
 
     def _module(self) -> Any:
         try:
@@ -305,6 +292,111 @@ class FabricAdapter:
             }
         except Exception as exc:
             return {"available": False, "status": "unavailable", "known_nodes": [], "diagnostic": redact_text(str(exc))}
+
+    def dispatch(
+        self,
+        task_type: str,
+        project: str,
+        model: str | None = None,
+        node: str | None = None,
+        parameters: dict[str, object] | None = None,
+    ) -> dict[str, object]:
+        """Construct current public Fabric artifacts for bounded task families."""
+        if self.policy is None:
+            raise ControlError("FABRIC_UNAVAILABLE", "workspace policy is unavailable")
+        if task_type not in {"pytest", "python", "cargo_test"}:
+            raise ControlError("INVALID_INPUT", "task_type must be pytest, python, or cargo_test")
+        root = self.policy.project_path(project)
+        values = parameters or {}
+        if not isinstance(values, dict):
+            raise ControlError("INVALID_INPUT", "parameters must be an object")
+        artifact_path = str(values.get("artifact_path", "."))
+        relative = self.policy.normalize_relative(artifact_path)
+        artifact_root = root.joinpath(*relative.parts).resolve(strict=True)
+        try:
+            artifact_root.relative_to(root)
+        except ValueError as exc:
+            raise ControlError("PATH_ESCAPE", "Fabric artifact path escapes project") from exc
+        if not artifact_root.is_dir() or artifact_root.is_symlink():
+            raise ControlError("INVALID_INPUT", "artifact_path must be a real directory")
+        arguments = values.get("arguments", [])
+        if not isinstance(arguments, list) or len(arguments) > 64 or not all(
+            isinstance(item, str) and item and len(item) <= 4096 and "\x00" not in item for item in arguments
+        ):
+            raise ControlError("INVALID_INPUT", "parameters.arguments must be a bounded string array")
+        if task_type == "pytest":
+            argv = ["@python", "-m", "pytest", *arguments]
+            capabilities = ["python"]
+        elif task_type == "cargo_test":
+            argv = ["/usr/bin/cargo", "test", *arguments]
+            capabilities = ["cargo"]
+        else:
+            script = str(values.get("script", ""))
+            script_path = self.policy.normalize_relative(script, allow_root=False).as_posix()
+            candidate_script = artifact_root / script_path
+            if not candidate_script.is_file() or candidate_script.is_symlink():
+                raise ControlError("INVALID_INPUT", "python task script must be a regular artifact file")
+            argv = ["@python", script_path, *arguments]
+            capabilities = ["python"]
+        timeout = float(values.get("timeout_seconds", self.config.default_timeout_seconds))
+        timeout = min(max(timeout, 0.05), self.config.max_timeout_seconds)
+        result_paths = values.get("result_paths", [])
+        if not isinstance(result_paths, list) or not all(isinstance(item, str) for item in result_paths):
+            raise ControlError("INVALID_INPUT", "result_paths must be a string array")
+        network = bool(values.get("network", False))
+        try:
+            fabric = self._module()
+            artifacts = importlib.import_module("mncs_fabric.artifacts")
+            bundles = importlib.import_module("mncs_fabric.bundles")
+            models = importlib.import_module("mncs_fabric.models")
+            manifest = artifacts.build_manifest(artifact_root)
+            job_suffix = hashlib.sha256(
+                f"{project}:{task_type}:{manifest['manifest_identity']}:{time.time_ns()}".encode()
+            ).hexdigest()[:20]
+            plan = models.validate_job_plan(
+                {
+                    "schema_version": "mncs-fabric.job-plan.v0.1",
+                    "job_id": f"mncs-control:{job_suffix}",
+                    "candidate_identity": manifest["manifest_identity"],
+                    "evaluator_identity": None,
+                    "artifact_manifest_identity": manifest["manifest_identity"],
+                    "argv": argv,
+                    "working_directory": ".",
+                    "timeout_seconds": timeout,
+                    "output_limit_bytes": self.config.max_output_bytes,
+                    "environment": {},
+                    "required_capabilities": capabilities,
+                    "result_paths": result_paths,
+                    "network_policy": "UNRESTRICTED" if network else "DECLARED_OFFLINE",
+                }
+            )
+            archive = self.config.fabric_state.parent / "bundles" / f"{job_suffix}.zip"
+            bundle_report = bundles.build_bundle_archive(artifact_root, archive).as_dict()
+            client = fabric.FabricClient(self.config.fabric_controller_id, self.config.fabric_state)
+            registry_report = client.load_registry(self.config.fabric_registry) if self.config.fabric_registry.exists() else None
+            results = client.execute(
+                plan,
+                manifest,
+                worker_id=node,
+                execution_bundle_archive=archive,
+            )
+            return {
+                "status": "completed",
+                "task_type": task_type,
+                "project": project,
+                "model": model,
+                "model_routing": "not-applicable-to-raw-fabric-execution" if model else None,
+                "node": node,
+                "plan": plan,
+                "manifest_identity": manifest["manifest_identity"],
+                "bundle": bundle_report,
+                "registry": registry_report,
+                "results": results,
+            }
+        except ControlError:
+            raise
+        except Exception as exc:
+            raise ControlError("FABRIC_DISPATCH_FAILED", redact_text(str(exc))) from exc
 
     @staticmethod
     def _public_worker(worker: dict[str, Any]) -> dict[str, object]:
@@ -337,8 +429,9 @@ class ModelAdapter:
 
 
 class ForgeAdapter:
-    def __init__(self, config: ControlConfig) -> None:
+    def __init__(self, config: ControlConfig, policy: WorkspacePolicy | None = None) -> None:
         self.config = config
+        self.policy = policy
 
     def evaluate(
         self,
@@ -347,7 +440,12 @@ class ForgeAdapter:
         model: str | None = None,
         evaluation_profile: str | None = None,
     ) -> dict[str, object]:
-        _, root = resolve_repository(self.config, repository)
+        if repository in self.config.repositories:
+            _, root = resolve_repository(self.config, repository)
+        elif self.policy is not None:
+            root = self.policy.project_path(repository)
+        else:
+            raise ControlError("UNAUTHORIZED_REPOSITORY", f"repository alias is unknown: {repository}")
         forge_config_path = root / self.config.forge_config_name
         if not forge_config_path.is_file():
             return {"status": "not_supported_yet", "reason": "repository has no Forge configuration", "forge_config": str(forge_config_path)}
@@ -372,14 +470,19 @@ class ForgeAdapter:
 
 
 class IntegrationBundle:
-    def __init__(self, config: ControlConfig, actions: ActionRegistry) -> None:
+    def __init__(
+        self,
+        config: ControlConfig,
+        actions: ActionRegistry,
+        policy: WorkspacePolicy | None = None,
+        sandbox: Sandbox | None = None,
+    ) -> None:
         ollama = OllamaAdapter(config, actions)
-        fabric = FabricAdapter(config)
-        self.git = GitAdapter(config, actions)
-        self.tests = TestAdapter(config, actions)
+        fabric = FabricAdapter(config, policy)
+        self.tests = TestAdapter(config, actions, policy, sandbox)
         self.ollama = ollama
         self.system = SystemAdapter(config, actions, ollama)
         self.harness = HarnessAdapter(config)
         self.fabric = fabric
         self.models = ModelAdapter(config, ollama, fabric)
-        self.forge = ForgeAdapter(config)
+        self.forge = ForgeAdapter(config, policy)
