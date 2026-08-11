@@ -48,7 +48,7 @@ def test_deployment_paths_and_unit_rendering(tmp_path: Path) -> None:
     assert paths.mcp_executable == tmp_path / "mncs-control-mcp" / ".venv" / "bin" / "mncs-control-mcp"
     unit = render_user_service(repository=paths.repository)
     assert "ExecStart=%h/Documents/Projects/mncs-control-mcp/scripts/run-tunnel.sh" in unit
-    assert "Restart=on-failure" in unit
+    assert "Restart=always" in unit
     assert "EnvironmentFile=-%h/.config/mncs-control-mcp/tunnel.env" in unit
     assert "ProtectHome=read-only" in unit
     assert "ReadWritePaths=%h/Documents/Projects" in unit

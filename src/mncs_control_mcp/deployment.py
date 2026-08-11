@@ -80,7 +80,7 @@ Environment=PATH=%h/.local/bin:%h/Documents/Projects/mncs-control-mcp/.venv/bin:
 Environment=MNCS_CONTROL_REPOSITORY={escaped_repo}
 Environment=MNCS_CONTROL_TUNNEL_PROFILE={profile}
 ExecStart=%h/Documents/Projects/mncs-control-mcp/scripts/run-tunnel.sh
-Restart=on-failure
+Restart=always
 RestartSec=10s
 TimeoutStopSec=20s
 KillMode=control-group
