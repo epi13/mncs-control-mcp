@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import platform
 import shutil
 from pathlib import Path
@@ -47,25 +48,93 @@ class ToolInventory:
             "XDG_DATA_HOME": str(self.config.sandbox_home / ".local" / "share"),
             "XDG_STATE_HOME": str(self.config.sandbox_home / ".local" / "state"),
         })
+        project_candidates = self._project_candidates()
         tools = []
         for name, args in _TOOLS:
-            executable = shutil.which(name)
-            if executable is None:
-                tools.append({"name": name, "available": False})
+            candidates: list[dict[str, object]] = []
+            system = shutil.which(name)
+            if system:
+                candidates.append(self._probe(name, Path(system), args, environment, "system"))
+            for path in project_candidates.get(name, ()):
+                if not system or Path(system).resolve() != path.resolve():
+                    candidates.append(self._probe(name, path, args, environment, "project"))
+            healthy = next((item for item in candidates if item["health"] == "healthy"), None)
+            project_present = any(item["scope"] == "project" and item["exists"] for item in candidates)
+            selected = healthy or next((item for item in candidates if item["exists"]), None)
+            if selected is None:
+                tools.append({"name": name, "available": False, "status": "absent", "candidates": []})
                 continue
-            result = run_bounded(
-                (executable, *args), timeout_seconds=5, output_limit_bytes=4096, env=environment
-            )
-            first = (result.stdout or result.stderr).splitlines()
             tools.append(
                 {
                     "name": name,
-                    "available": result.returncode == 0,
-                    "path": executable,
-                    "version": first[0][:500] if first else None,
+                    # A project-local executable is a usable discovery result
+                    # even when an unrelated broken system wrapper exists.
+                    "available": bool(healthy or project_present),
+                    "status": "healthy" if healthy else "project_local" if project_present else "broken",
+                    "path": selected["path"],
+                    "version": selected["version"],
+                    "version_status": selected["version_status"],
+                    "diagnostic": selected.get("diagnostic"),
+                    "scope": selected["scope"],
+                    "candidates": candidates,
                 }
             )
         return {"platform": platform.platform(), "tools": tools}
+
+    def _project_candidates(self) -> dict[str, list[Path]]:
+        """Find bounded per-project executables without executing them."""
+
+        result: dict[str, list[Path]] = {}
+        root = self.config.workspace_root
+        if not root.is_dir():
+            return result
+        try:
+            projects = sorted(
+                (child for child in root.iterdir() if child.is_dir() and not child.is_symlink()),
+                key=lambda item: item.name.casefold(),
+            )[:200]
+        except OSError:
+            return result
+        for project in projects:
+            bin_dir = project / ".venv" / "bin"
+            if not bin_dir.is_dir():
+                continue
+            for name, _args in _TOOLS:
+                candidate = bin_dir / name
+                if candidate.is_file() and os_access_executable(candidate):
+                    result.setdefault(name, []).append(candidate)
+        return result
+
+    @staticmethod
+    def _probe(
+        name: str,
+        executable: Path,
+        args: tuple[str, ...],
+        environment: dict[str, str],
+        scope: str,
+    ) -> dict[str, object]:
+        exists = executable.is_file() and os_access_executable(executable)
+        item: dict[str, object] = {
+            "path": str(executable),
+            "scope": scope,
+            "exists": exists,
+            "health": "absent",
+            "version": None,
+            "version_status": "unknown",
+        }
+        if not exists:
+            return item
+        result = run_bounded((str(executable), *args), timeout_seconds=5, output_limit_bytes=4096, env=environment)
+        first = (result.stdout or result.stderr).splitlines()
+        item["version"] = first[0][:500] if first else None
+        item["health"] = "healthy" if result.returncode == 0 else "invocation_failed"
+        if result.returncode != 0:
+            item["diagnostic"] = (result.stderr or result.stdout or "command failed")[:500]
+        elif not first or first[0].strip().endswith("0.0.0"):
+            item["version_status"] = "unknown"
+        else:
+            item["version_status"] = "reported"
+        return item
 
 
 class ProjectService:
@@ -176,3 +245,7 @@ def os_access(path: Path) -> bool:
     import os
 
     return os.access(path, os.W_OK | os.X_OK)
+
+
+def os_access_executable(path: Path) -> bool:
+    return os.access(path, os.X_OK)

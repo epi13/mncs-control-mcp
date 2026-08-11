@@ -41,8 +41,7 @@ class ControlPlaneService:
     def capabilities(self) -> dict[str, object]:
         fabric = self.integrations.fabric.status()
         harness = self.integrations.harness.status()
-        forge_path = self.config.workspace_root / self.config.repositories.get("forge", "mncs-forge-mcp")
-        forge = {"available": forge_path.is_dir(), "path": str(forge_path)}
+        forge = self.integrations.forge.status()
         commons_path = self.config.workspace_root / self.config.repositories.get("commons", "MNCS-Commons")
         return {
             "workspace": {
@@ -58,7 +57,7 @@ class ControlPlaneService:
             "terminal": {
                 "available": self.sandbox.available,
                 "version": self.sandbox.backend,
-                "supported_operations": ["exec", "start", "status", "output", "stdin", "stop"],
+                "supported_operations": ["exec", "start", "status", "output", "stdin", "stop", "bounded upstream jobs"],
                 "limitations": ["Bubblewrap required", "project scope is default", "bounded jobs and output"],
                 "security_boundary": "Bubblewrap namespace with /workspace and dedicated HOME",
                 "mutation": True,
@@ -87,7 +86,7 @@ class ControlPlaneService:
             },
             "harness": self._integration_capability(harness, ["status", "models", "bounded analysis"], "local model execution remains upstream-owned"),
             "fabric": self._integration_capability(fabric, ["status", "worker discovery", "validated dispatch"], "Fabric remains authoritative for routing and admission"),
-            "forge": self._integration_capability(forge, ["configured evaluation"], "Forge remains authoritative for scoring and evidence"),
+            "forge": self._integration_capability(forge, ["capability inventory", "configured evaluation"], "Forge remains authoritative for scoring and evidence"),
             "commons": {
                 "available": commons_path.is_dir(),
                 "version": None,
@@ -101,7 +100,7 @@ class ControlPlaneService:
             "models": {"available": True, "version": None, "supported_operations": ["inventory", "runtime and worker visibility"], "limitations": ["routing remains Harness/Fabric-owned"], "security_boundary": "read-only metadata", "mutation": False, "network_required": False, "local": False},
             "gpu": {"available": shutil.which("nvidia-smi") is not None, "version": None, "supported_operations": ["host inventory"], "limitations": ["GPU device access is not enabled for general sandbox jobs"], "security_boundary": "host probe only", "mutation": False, "network_required": False, "local": True},
             "network": {"available": self.config.terminal_network_allowed, "version": None, "supported_operations": ["explicit networked Git and terminal jobs"], "limitations": ["disabled by default for terminal jobs", "no domain allowlist"], "security_boundary": "Bubblewrap network namespace", "mutation": True, "network_required": True, "local": True},
-            "resources": {"available": True, "version": None, "supported_operations": ["wall-clock timeout", "output quota", "concurrency quota", "process-group cleanup"], "limitations": ["per-job CPU, memory, and disk cgroup quotas are not yet enforced"], "security_boundary": "Bubblewrap plus service-level bounded jobs", "mutation": False, "network_required": False, "local": True},
+            "resources": {"available": True, "version": None, "supported_operations": ["wall-clock timeout", "output quota", "concurrency quota", "process-group cleanup", "stable control job IDs"], "limitations": ["per-job CPU, memory, and disk cgroup quotas are not yet enforced"], "security_boundary": "Bubblewrap plus service-level bounded jobs", "mutation": False, "network_required": False, "local": True},
         }
 
     @staticmethod
@@ -194,7 +193,7 @@ class ControlPlaneService:
             "models": models,
             "fabric": fabric,
             "harness": self.integrations.harness.status(),
-            "forge": {"available": (self.config.workspace_root / self.config.repositories.get("forge", "mncs-forge-mcp")).is_dir(), "path": str(self.config.workspace_root / self.config.repositories.get("forge", "mncs-forge-mcp"))},
+            "forge": self.integrations.forge.status(),
             "commons": {"available": (self.config.workspace_root / self.config.repositories.get("commons", "MNCS-Commons")).is_dir()},
             "jobs": self.processes.list(),
         }

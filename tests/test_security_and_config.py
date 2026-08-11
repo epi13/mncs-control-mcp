@@ -15,10 +15,11 @@ from mncs_control_mcp.adapters import (
     OllamaAdapter,
     SystemAdapter,
 )
-from mncs_control_mcp.config import load_config
+from mncs_control_mcp.config import ControlConfig, load_config
 from mncs_control_mcp.errors import ControlError
 from mncs_control_mcp.filesystem import FileService
 from mncs_control_mcp.git_adapter import GitService
+from mncs_control_mcp.runtime import effective_fabric_registry, prepare_fabric_runtime
 from mncs_control_mcp.sandbox import Sandbox
 from mncs_control_mcp.security import filtered_environment, resolve_repository, validate_environment
 from mncs_control_mcp.workspace import WorkspacePolicy
@@ -113,6 +114,95 @@ def test_file_round_trip_search_patch_move_copy_and_delete(config) -> None:
     assert "demo/moved.txt" in files.glob("demo/*.txt")["matches"]
     files.delete("demo/moved.txt")
     assert not (config.workspace_root / "demo" / "moved.txt").exists()
+
+
+def test_patch_error_explains_required_unified_headers(config) -> None:
+    with pytest.raises(ControlError) as error:
+        FileService(config, WorkspacePolicy(config)).patch("@@ -1 +1 @@\n-old\n+new\n")
+    assert error.value.code == "INVALID_PATCH"
+    assert "--- a/path" in error.value.message
+    assert error.value.details["expected_format"].startswith("standard unified")
+
+
+def test_legacy_fabric_registry_is_migrated_into_private_control_state(tmp_path: Path) -> None:
+    legacy = tmp_path / ".local" / "state" / "mncs-fabric" / "workers.json"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text('{"schema_version":"test"}\n', encoding="utf-8")
+    config = ControlConfig(
+        workspace_root=tmp_path / "projects",
+        fabric_registry=legacy,
+        fabric_state=tmp_path / "control-state" / "fabric.jsonl",
+        job_state_path=tmp_path / "control-state" / "jobs.json",
+        audit_path=tmp_path / "control-state" / "audit.jsonl",
+    )
+    target = effective_fabric_registry(config)
+    assert target != legacy
+    assert target.parent == tmp_path / "control-state" / "fabric"
+    assert prepare_fabric_runtime(config) == target
+    assert target.read_text(encoding="utf-8") == legacy.read_text(encoding="utf-8")
+    assert (target.parent.stat().st_mode & 0o777) == 0o700
+    assert (target.stat().st_mode & 0o777) == 0o600
+
+
+@pytest.mark.skipif(shutil.which("bwrap") is None, reason="bubblewrap is not installed")
+def test_runtime_mount_accepts_only_control_state_and_keeps_home_unmounted(config, tmp_path: Path) -> None:
+    policy = WorkspacePolicy(config)
+    sandbox = Sandbox(config, policy)
+    runtime = config.fabric_state.parent / "fabric"
+    runtime.mkdir(parents=True)
+    argv, _ = sandbox.command_argv(
+        "touch /home/developer/should-not-exist; touch /home/developer/.local/state/fabric/ok",
+        policy.resolve_scope(scope="workspace", project=None, cwd="."),
+        network=False,
+        runtime_mounts=((runtime, "/home/developer/.local/state/fabric"),),
+    )
+    assert "--bind" in argv
+    assert str(runtime) in argv
+    with pytest.raises(ControlError) as error:
+        sandbox.command_argv(
+            "true",
+            policy.resolve_scope(scope="workspace", project=None, cwd="."),
+            network=False,
+            runtime_mounts=((tmp_path, "/home/developer/.local/state/other"),),
+        )
+    assert error.value.code == "INVALID_RUNTIME_MOUNT"
+
+
+def test_fabric_status_uses_migrated_registry_lock_in_private_state(tmp_path: Path) -> None:
+    legacy = tmp_path / ".local" / "state" / "mncs-fabric" / "workers.json"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text("{}", encoding="utf-8")
+    config = ControlConfig(
+        workspace_root=tmp_path / "projects",
+        repositories={"fabric": "mncs-fabric"},
+        fabric_registry=legacy,
+        fabric_state=tmp_path / "control-state" / "fabric.jsonl",
+        job_state_path=tmp_path / "control-state" / "jobs.json",
+        audit_path=tmp_path / "control-state" / "audit.jsonl",
+    )
+
+    class FakeClient:
+        def __init__(self, _controller: str, _state: Path) -> None:
+            pass
+
+        def load_registry(self, path: Path) -> dict[str, object]:
+            lock = path.with_name(path.name + ".lock")
+            lock.touch()
+            return {"outcome": "PASS", "registry_path": str(path)}
+
+        def workers(self) -> list[dict[str, object]]:
+            return []
+
+    class FakeFabric:
+        FabricClient = FakeClient
+        __version__ = "test"
+
+    adapter = FabricAdapter(config)
+    adapter._module = lambda: FakeFabric  # type: ignore[method-assign]
+    result = adapter.status()
+    assert result["available"] is True
+    assert result["registry_path"].endswith("control-state/fabric/workers.json")
+    assert Path(str(result["registry_path"] + ".lock")).is_file()
 
 
 def test_approved_mncs_alias_remains_specialization_not_general_authorization(config) -> None:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import shutil
+import time
 
 import pytest
 
@@ -44,3 +45,18 @@ def test_typed_workflow_rejects_unknown_workflow(config) -> None:
     plane = _plane(config)
     with pytest.raises(ControlError):
         plane.run_workflow("unknown", "missing")
+
+
+def test_external_control_job_has_stable_lifecycle(config) -> None:
+    policy = WorkspacePolicy(config)
+    sandbox = Sandbox(config, policy)
+    manager = ProcessManager(config, policy, sandbox)
+    job = manager.submit_external("fabric_test", lambda: {"status": "completed", "receipt": "r1"}, project="fixture")
+    assert job["job_id"].startswith("ctrl-")
+    deadline = time.monotonic() + 5
+    while manager.status(job["job_id"])["status"] == "running" and time.monotonic() < deadline:
+        time.sleep(0.01)
+    result = manager.result(job["job_id"])
+    assert result["ready"] is True
+    assert result["result"]["receipt"] == "r1"
+    manager.cleanup()

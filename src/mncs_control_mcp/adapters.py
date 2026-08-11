@@ -17,6 +17,7 @@ from typing import Any
 from .actions import ActionRegistry, run_bounded
 from .config import ControlConfig
 from .errors import ControlError
+from .runtime import prepare_fabric_runtime
 from .sandbox import Sandbox
 from .security import redact_text, resolve_repository, safe_host_probe_environment
 from .workspace import WorkspacePolicy
@@ -370,6 +371,30 @@ class HarnessAdapter:
                 "package_version": getattr(package, "__version__", "unknown"),
                 "config_path": str(path or "default"),
                 "fabric_enabled": bool(harness_config.fabric.enabled),
+                "providers": sorted({model.provider for model in harness_config.models.values()}),
+                "models": [
+                    {
+                        "role": role,
+                        "name": model.name,
+                        "provider": model.provider,
+                        "worker": getattr(model, "worker", None),
+                        "execution_device": model.execution_device,
+                        "required_capabilities": list(model.required_capabilities),
+                        "tools": list(model.tools),
+                    }
+                    for role, model in sorted(harness_config.models.items())
+                ],
+                "router": {
+                    "mode": harness_config.router.mode,
+                    "backend": harness_config.router.backend,
+                    "enabled": harness_config.router.enable_semantic_routing,
+                    "device": harness_config.router.device,
+                },
+                "fabric_workers_configured": len(harness_config.fabric.workers),
+                "policy": {
+                    "approval_mode": harness_config.policy.approval_mode,
+                    "allowed_executables": list(harness_config.policy.allowed_executables),
+                },
             }
         except Exception as exc:
             return {"available": False, "status": "unavailable", "diagnostic": redact_text(str(exc))}
@@ -389,15 +414,19 @@ class FabricAdapter:
     def status(self) -> dict[str, object]:
         try:
             fabric = self._module()
+            registry_path = prepare_fabric_runtime(self.config)
             client = fabric.FabricClient(self.config.fabric_controller_id, self.config.fabric_state)
             registry_report: dict[str, object] | None = None
-            if self.config.fabric_registry.exists():
-                registry_report = client.load_registry(self.config.fabric_registry)
+            if registry_path.exists():
+                registry_report = client.load_registry(registry_path)
             workers = client.workers()
             return {
                 "available": True,
                 "status": "available" if workers else "empty",
                 "version": getattr(fabric, "__version__", "unknown"),
+                "registry_path": str(registry_path),
+                "state_path": str(self.config.fabric_state),
+                "state_policy": "private-control-plane-runtime",
                 "registry": registry_report,
                 "known_nodes": [self._public_worker(worker) for worker in workers],
             }
@@ -457,6 +486,7 @@ class FabricAdapter:
         network = bool(values.get("network", False))
         try:
             fabric = self._module()
+            registry_path = prepare_fabric_runtime(self.config)
             artifacts = importlib.import_module("mncs_fabric.artifacts")
             bundles = importlib.import_module("mncs_fabric.bundles")
             models = importlib.import_module("mncs_fabric.models")
@@ -484,7 +514,7 @@ class FabricAdapter:
             archive = self.config.fabric_state.parent / "bundles" / f"{job_suffix}.zip"
             bundle_report = bundles.build_bundle_archive(artifact_root, archive).as_dict()
             client = fabric.FabricClient(self.config.fabric_controller_id, self.config.fabric_state)
-            registry_report = client.load_registry(self.config.fabric_registry) if self.config.fabric_registry.exists() else None
+            registry_report = client.load_registry(registry_path) if registry_path.exists() else None
             results = client.execute(
                 plan,
                 manifest,
@@ -543,6 +573,32 @@ class ForgeAdapter:
     def __init__(self, config: ControlConfig, policy: WorkspacePolicy | None = None) -> None:
         self.config = config
         self.policy = policy
+
+    def status(self) -> dict[str, object]:
+        """Report Forge's public operation surface without evaluating a project."""
+
+        if not self.config.forge_path.is_dir():
+            return {"available": False, "status": "not_installed", "operations": []}
+        try:
+            _load_sibling_package("mncs_forge", self.config.forge_path)
+            operations = importlib.import_module("mncs_forge.operations")
+            registry = getattr(operations, "DEFAULT_OPERATION_REGISTRY", None)
+            inventory = registry.inventory() if registry and hasattr(registry, "inventory") else {}
+            names = sorted(
+                str(item.get("operation_id"))
+                for item in inventory.get("operations", [])
+                if isinstance(item, dict) and item.get("operation_id")
+            )
+            return {
+                "available": True,
+                "status": "available",
+                "version": getattr(importlib.import_module("mncs_forge"), "__version__", "unknown"),
+                "operations": names[:200],
+                "operation_count": len(names),
+                "authority": "Forge owns evaluation semantics, evidence, scoring, and claims",
+            }
+        except Exception as exc:
+            return {"available": False, "status": "unavailable", "operations": [], "diagnostic": redact_text(str(exc))}
 
     def evaluate(
         self,

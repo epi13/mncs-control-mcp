@@ -332,7 +332,7 @@ def build_server(config: ControlConfig | None = None) -> Any:
                 "jobs": processes.list(),
                 "local_harness": integrations.harness.status(),
                 "fabric": integrations.fabric.status(),
-                "forge": {"available": selected.forge_path.is_dir(), "path": str(selected.forge_path)},
+                "forge": integrations.forge.status(),
                 "server": {"name": selected.name, "version": __version__, "transport": "stdio"},
             },
         )  # type: ignore[return-value]
@@ -383,9 +383,19 @@ def build_server(config: ControlConfig | None = None) -> Any:
         return invoke("run_mncs_evaluation", integrations.forge.evaluate, repository, case_study, model, evaluation_profile, audit_metadata={"project": repository})  # type: ignore[return-value]
 
     @server.tool(name="dispatch_fabric_job", description="Build validated Fabric plans/manifests/bundles and dispatch bounded pytest, Python, or cargo-test work through FabricClient.", annotations=network_mutate, structured_output=True)
-    def dispatch_fabric_job(task_type: str, project: str, model: str | None = None, node: str | None = None, parameters: dict[str, object] | None = None) -> dict[str, object]:
+    def dispatch_fabric_job(task_type: str, project: str, model: str | None = None, node: str | None = None, parameters: dict[str, object] | None = None, wait: bool = True) -> dict[str, object]:
         def dispatch() -> dict[str, object]:
-            result = integrations.fabric.dispatch(task_type, project, model, node, parameters)
+            def operation() -> dict[str, object]:
+                return integrations.fabric.dispatch(task_type, project, model, node, parameters)
+            if not wait:
+                return {"status": "running", "control_job": processes.submit_external(
+                    "fabric_" + task_type,
+                    operation,
+                    project=project,
+                    node=node,
+                    model=model,
+                )}
+            result = operation()
             result["control_job"] = processes.record_external(
                 "fabric_" + task_type,
                 project=project,
@@ -396,6 +406,18 @@ def build_server(config: ControlConfig | None = None) -> Any:
             return result
 
         return invoke("dispatch_fabric_job", dispatch, audit_metadata={"project": project, "task_type": task_type, "node": node})  # type: ignore[return-value]
+
+    @server.tool(name="control_job_status", description="Inspect a local terminal or upstream control-plane job by stable control ID.", annotations=ro, structured_output=True)
+    def control_job_status(job_id: str) -> dict[str, object]:
+        return invoke("control_job_status", processes.status, job_id)  # type: ignore[return-value]
+
+    @server.tool(name="control_job_result", description="Retrieve a completed upstream result or bounded terminal output for a control job.", annotations=ro, structured_output=True)
+    def control_job_result(job_id: str) -> dict[str, object]:
+        return invoke("control_job_result", processes.result, job_id)  # type: ignore[return-value]
+
+    @server.tool(name="control_job_stop", description="Stop a local process or request cancellation of an upstream control job; Fabric-owned work cannot be force-killed by this MCP.", annotations=destructive, structured_output=True)
+    def control_job_stop(job_id: str) -> dict[str, object]:
+        return invoke("control_job_stop", processes.stop_control, job_id)  # type: ignore[return-value]
 
     @server.tool(name="job_status", description="Backward-compatible alias for terminal_status.", annotations=ro, structured_output=True)
     def job_status(job_id: str) -> dict[str, object]:

@@ -29,6 +29,19 @@ Forge, and Harness identifiers are recorded without pretending that an upstream
 job has a local PID; status and receipts remain authoritative in the upstream
 system.
 
+## Integration runtime state
+
+Mutable integration state is not placed in the real home directory. Fabric's
+registry, lock, network ledger, and bundle staging use the private
+`~/.local/state/mncs-control-mcp/fabric/` tree, which is one of the narrowly
+allowed service write paths. A legacy Fabric registry is migrated by copying
+only its bounded JSON document; lock files are recreated in the private tree.
+The sandbox also has an internal runtime-mount hook restricted to control-plane
+state directories, so future approved integrations can receive one writable
+directory without making `$HOME`, `.ssh`, `.config`, or `/run/user` writable.
+Podman and other tools that require host daemon sockets may remain degraded
+until an explicit, least-privilege adapter exists.
+
 ## Audit
 
 Audit JSONL lives outside the workspace, mode 0600 under a 0700 directory. It contains bounded/redacted metadata, not full file contents or environment data. Generic workspace tools cannot address it.

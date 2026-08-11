@@ -8,6 +8,8 @@ import signal
 import subprocess
 import threading
 import time
+from collections.abc import Callable
+from concurrent.futures import CancelledError, Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import BinaryIO
 
@@ -99,6 +101,9 @@ class ProcessManager:
         self.policy = policy
         self.sandbox = sandbox
         self._jobs: dict[str, TerminalJob] = {}
+        self._external_futures: dict[str, Future[object]] = {}
+        self._external_results: dict[str, object] = {}
+        self._external_executor = ThreadPoolExecutor(max_workers=config.max_concurrent_jobs, thread_name_prefix="mncs-control")
         self._lock = threading.RLock()
         self._load_metadata()
         atexit.register(self.cleanup)
@@ -333,6 +338,105 @@ class ProcessManager:
             self._persist()
         return job.public()
 
+    def submit_external(
+        self,
+        kind: str,
+        operation: Callable[[], object],
+        *,
+        project: str | None = None,
+        node: str | None = None,
+        model: str | None = None,
+        network: bool = True,
+    ) -> dict[str, object]:
+        """Run a bounded upstream operation with a stable control-plane ID.
+
+        The callable is supplied by a trusted adapter, never by an MCP caller.
+        Cancellation is honest: a local Future can be cancelled before it
+        starts, while a running Fabric request remains owned by Fabric.
+        """
+        if not callable(operation):
+            raise ControlError("INVALID_JOB", "external operation is not callable")
+        if not kind or len(kind) > 80 or any(char not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-" for char in kind):
+            raise ControlError("INVALID_INPUT", "external job kind is invalid")
+        with self._lock:
+            running = sum(job.status == "running" for job in self._jobs.values())
+            if running >= self.config.max_concurrent_jobs:
+                raise ControlError("JOB_LIMIT", "maximum concurrent jobs reached")
+            now = utc_now()
+            job = TerminalJob(
+                job_id="ctrl-" + secrets.token_hex(12),
+                command="[upstream execution]",
+                cwd="/workspace",
+                scope="project" if project else "workspace",
+                project=project,
+                network=network,
+                sandbox_backend="upstream",
+                timeout_seconds=self.config.max_timeout_seconds,
+                process=None,
+                status="running",
+                created_at=now,
+                started_at=now,
+                kind=kind,
+            )
+            self._jobs[job.job_id] = job
+            future = self._external_executor.submit(operation)
+            self._external_futures[job.job_id] = future
+            self._persist()
+        future.add_done_callback(lambda completed: self._finish_external(job.job_id, completed))
+        return job.public()
+
+    def _finish_external(self, job_id: str, future: Future[object]) -> None:
+        try:
+            result = future.result()
+            status = "completed"
+            summary = result if isinstance(result, dict) else {"result": str(result)}
+        except CancelledError:
+            result = {"cancelled": True}
+            status = "stopped"
+            summary = result
+        except Exception as exc:
+            result = {"error": redact_text(str(exc))}
+            status = "failed"
+            summary = result
+        encoded = json.dumps(summary, default=str)
+        if len(encoded.encode("utf-8")) > self.config.max_response_bytes:
+            summary = {"output_truncated": True, "result_type": type(result).__name__}
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None:
+                return
+            job.status = status
+            job.completed_at = utc_now()
+            job.result_summary = summary if isinstance(summary, dict) else {"summary": str(summary)}
+            self._external_results[job_id] = result
+            self._external_futures.pop(job_id, None)
+            self._persist()
+
+    def result(self, job_id: str) -> dict[str, object]:
+        job = self._get(job_id)
+        if job.process is not None:
+            return self.output(job_id)
+        if job.status == "running":
+            return {"job": job.public(), "ready": False}
+        return {"job": job.public(), "ready": True, "result": self._external_results.get(job_id, job.result_summary)}
+
+    def stop_control(self, job_id: str) -> dict[str, object]:
+        job = self._get(job_id)
+        if job.process is not None:
+            return self.stop(job_id)
+        future = self._external_futures.get(job_id)
+        if future is None or job.status != "running":
+            return job.public()
+        if future.cancel():
+            job.stopped = True
+            job.status = "stopped"
+            job.completed_at = utc_now()
+            self._persist()
+            return job.public()
+        job.result_summary = {"cancel_requested": True, "cancellation": "upstream operation cannot be force-killed by MCP"}
+        self._persist()
+        return job.public()
+
     def cleanup(self) -> None:
         with self._lock:
             running = [job for job in self._jobs.values() if job.status == "running"]
@@ -349,3 +453,6 @@ class ProcessManager:
                 process.wait(timeout=remaining)
             except subprocess.TimeoutExpired:
                 self._signal(job, signal.SIGKILL)
+        for future in tuple(self._external_futures.values()):
+            future.cancel()
+        self._external_executor.shutdown(wait=False, cancel_futures=True)

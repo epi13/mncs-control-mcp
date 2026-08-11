@@ -84,6 +84,11 @@ the required tool set. It reports missing tunnel-client, missing keys, profile
 doctor failures, SSH-agent state, Fabric/Harness/Forge, Ollama, CUDA, and the
 systemd unit without printing secrets.
 
+Fabric registry locks are stored at
+`~/.local/state/mncs-control-mcp/fabric/workers.json.lock`, not under the
+read-only legacy home path. `fabric_status` should therefore show the registered
+workers even when the service runs with `ProtectHome=read-only`.
+
 Convenience commands are available through:
 
 ```bash
@@ -143,6 +148,11 @@ service health as OK:
 8. Then test: `Use MNCS Control and list my projects.`
 9. Then test: `Use MNCS Control and run system_status.`
 10. Finally create a disposable project and perform a harmless write/read test.
+
+For a useful orchestration smoke test, ask the app to `review mncs-language`,
+`show laboratory_status`, or run a bounded `dispatch_fabric_job` with
+`wait=false`; retrieve its `ctrl-...` result using `control_job_status` and
+`control_job_result`.
 
 If the tunnel is not listed, verify the workspace association and Tunnels Read +
 Use permission. If discovery fails, confirm the service is active and rerun

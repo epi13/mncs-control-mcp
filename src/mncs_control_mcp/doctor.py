@@ -13,6 +13,7 @@ from typing import Any
 
 from .config import ControlConfig, load_config
 from .deployment import DeploymentPaths, configured_runtime_key, runtime_environment
+from .runtime import effective_fabric_registry
 from .security import redact_text, safe_host_probe_environment
 
 _REQUIRED_TOOLS = {
@@ -258,7 +259,8 @@ def run_doctor(config_path: Path, *, profile: str = "mncs-fedora", json_output: 
     checks.append(Check("SSH agent", ssh_status, ssh_detail))
 
     if config is not None:
-        checks.append(Check("Fabric registry", "OK" if config.fabric_registry.is_file() else "WARNING", str(config.fabric_registry)))
+        registry_path = effective_fabric_registry(config)
+        checks.append(Check("Fabric registry", "OK" if registry_path.is_file() else "WARNING", str(registry_path)))
         checks.append(Check("Harness", "OK" if config.harness_path.is_dir() else "WARNING", str(config.harness_path)))
         checks.append(Check("Forge", "OK" if config.forge_path.is_dir() else "WARNING", str(config.forge_path)))
         ollama = shutil.which("ollama")
