@@ -29,6 +29,9 @@ def test_real_bwrap_blocks_home_and_project_sibling_mutation(config) -> None:
     command = (
         "id -u; echo own > own.txt; "
         "(echo sibling > ../beta/escape.txt) 2>/dev/null || echo sibling-blocked; "
+        "(cd .. && (echo sibling > beta/from-parent.txt)) 2>/dev/null || echo parent-readonly; "
+        "test -r /etc/passwd && echo passwd-readable; "
+        "(echo mutation >> /etc/passwd) 2>/dev/null || echo etc-readonly; "
         f"test ! -e {real_home}/.ssh && echo ssh-hidden; "
         "test \"$HOME\" = /home/developer && echo dedicated-home; "
         'python -c "from pathlib import Path; '
@@ -40,11 +43,15 @@ def test_real_bwrap_blocks_home_and_project_sibling_mutation(config) -> None:
     assert result.exit_code == 0, result.stderr
     assert str(os.getuid()) in result.stdout
     assert "sibling-blocked" in result.stdout
+    assert "parent-readonly" in result.stdout
+    assert "passwd-readable" in result.stdout
+    assert "etc-readonly" in result.stdout
     assert "ssh-hidden" in result.stdout
     assert "python-hidden True" in result.stdout
     assert "key-hidden" in result.stdout
     assert "subprocess-ok" in result.stdout
     assert not (config.workspace_root / "beta" / "escape.txt").exists()
+    assert not (config.workspace_root / "beta" / "from-parent.txt").exists()
     assert (config.workspace_root / "alpha" / "own.txt").is_file()
     argv, enabled = sandbox.command_argv("true", policy.resolve_scope(scope="project", project="alpha", cwd="."), network=False)
     assert "--unshare-net" in argv

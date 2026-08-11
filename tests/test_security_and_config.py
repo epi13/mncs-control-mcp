@@ -68,7 +68,15 @@ def test_workspace_policy_rejects_traversal_absolute_and_symlink_escape(config, 
     (config.workspace_root / "escape").symlink_to(outside, target_is_directory=True)
     (config.workspace_root / "project" / "nested").symlink_to(outside, target_is_directory=True)
 
-    for value in ("../outside/secret", "/etc/passwd", "project/../../outside", "escape/secret", "project/nested/secret"):
+    for value in (
+        "../outside/secret",
+        "/etc/passwd",
+        "project/../../outside",
+        "escape/secret",
+        "project/nested/secret",
+        "project\\windows-style",
+        "project/secret\x00suffix",
+    ):
         with pytest.raises(ControlError) as error:
             policy.resolve(value, must_exist=True)
         assert error.value.code in {"PATH_ESCAPE", "INVALID_PATH"}
@@ -86,6 +94,9 @@ def test_file_service_blocks_root_deletion_and_symlink_writes(config, tmp_path: 
     assert outside.read_text(encoding="utf-8") == "original"
     with pytest.raises(ControlError) as error:
         files.delete(".", recursive=True)
+    assert error.value.code == "WORKSPACE_ROOT_PROTECTED"
+    with pytest.raises(ControlError) as error:
+        files.move(".", "renamed-workspace")
     assert error.value.code == "WORKSPACE_ROOT_PROTECTED"
 
 
