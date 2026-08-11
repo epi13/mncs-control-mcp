@@ -1,19 +1,31 @@
 [Unit]
 Description=OpenAI Secure MCP Tunnel for MNCS Control
-After=network-online.target
+Documentation=https://developers.openai.com/api/docs/guides/secure-mcp-tunnels
+After=network-online.target graphical-session.target
 Wants=network-online.target
+StartLimitIntervalSec=10min
+StartLimitBurst=10
 
 [Service]
 Type=simple
-EnvironmentFile=%h/.config/mncs-control-mcp/tunnel.env
-ExecStart=%h/.local/bin/tunnel-client run --profile mncs-fedora
+EnvironmentFile=-%h/.config/mncs-control-mcp/tunnel.env
+Environment=HOME=%h
+Environment=PATH=%h/.local/bin:%h/Documents/Projects/mncs-control-mcp/.venv/bin:%h/.cargo/bin:/usr/local/bin:/usr/bin:/bin
+Environment=MNCS_CONTROL_REPOSITORY=%h/Documents/Projects/mncs-control-mcp
+Environment=MNCS_CONTROL_TUNNEL_PROFILE=mncs-fedora
+ExecStart=%h/Documents/Projects/mncs-control-mcp/scripts/run-tunnel.sh
 Restart=on-failure
-RestartSec=5s
+RestartSec=10s
+TimeoutStopSec=20s
+KillMode=control-group
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=%h/Documents/Projects %h/.config %h/.local/state %h/.local/share
+ReadWritePaths=%h/Documents/Projects %h/.config/mncs-control-mcp %h/.config/tunnel-client %h/.local/state/mncs-control-mcp %h/.local/state/tunnel-client %h/.local/share/mncs-control-mcp %h/.local/share/tunnel-client
+UMask=0077
+StandardOutput=journal
+StandardError=journal
 
 [Install]
 WantedBy=default.target

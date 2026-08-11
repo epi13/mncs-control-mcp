@@ -33,27 +33,27 @@ Fedora needs Bubblewrap and normal developer tools installed by the operator. No
 
 ```bash
 cd ~/Documents/Projects/mncs-control-mcp
-python -m venv .venv
-source .venv/bin/activate
-python -m pip install -e '.[dev]'
-
-cp config/control.example.toml control.toml
-pytest
-ruff check .
-
-mncs-control-mcp --config control.toml
+./scripts/install-user-service.sh --no-start
+./scripts/doctor.sh
 ```
 
-With `uv`:
+The installer creates or updates `.venv`, installs the editable package, preserves an existing `control.toml`, creates private state/config directories, installs the user unit under `~/.config/systemd/user/`, and enables it. It is safe to rerun after `git pull`.
+
+For a normal operator setup, install the official `tunnel-client`, put `CONTROL_PLANE_API_KEY` in `~/.config/mncs-control-mcp/tunnel.env` with mode 0600, create a real tunnel in Platform settings, and initialize the profile:
 
 ```bash
-uv venv
-source .venv/bin/activate
-uv pip install -e '.[dev]'
-pytest
+./scripts/install-user-service.sh --tunnel-id tunnel_...
 ```
 
-The server uses stdio and does not open a listener. `MNCS_CONTROL_WORKSPACE_ROOT` overrides configuration; the older `MNCS_PROJECTS_ROOT` remains supported at lower precedence.
+The server uses stdio and does not open a listener. `MNCS_CONTROL_WORKSPACE_ROOT` overrides configuration; the older `MNCS_PROJECTS_ROOT` remains supported at lower precedence. See [docs/CHATGPT-SETUP.md](docs/CHATGPT-SETUP.md) for persistent service, SSH-agent, reboot, and browser setup.
+
+Service operation:
+
+```bash
+systemctl --user status mncs-control-tunnel.service
+journalctl --user -u mncs-control-tunnel.service -f
+./scripts/service.sh restart
+```
 
 ## Workspace and scope model
 
@@ -176,7 +176,7 @@ tunnel-client run --profile mncs-fedora
 
 Keep the runtime key out of this repository. In ChatGPT, create a developer-mode app, choose **Tunnel** as the connection, and select the associated tunnel. The official guide is: <https://developers.openai.com/api/docs/guides/secure-mcp-tunnels>.
 
-Example user-systemd templates are in `deploy/systemd/`. Copy and edit them manually; installation is not automatic.
+The checked-in user-systemd unit is installed automatically by the installer. The environment template is `deploy/systemd/tunnel.env.example`; never commit the real key. The current OpenAI instructions use the Platform download or latest official `openai/tunnel-client` release rather than an arbitrary third-party binary: <https://developers.openai.com/api/docs/guides/secure-mcp-tunnels>.
 
 ## Tests
 
@@ -185,6 +185,8 @@ pytest
 ruff check .
 python -m compileall -q src
 ```
+
+The operational tests also cover unit rendering, private environment-file permissions and preservation, idempotent deployment helpers, and the real local MCP stdio doctor handshake. The installer itself can be rerun safely; it returns a nonzero doctor result until required tunnel credentials and profile configuration exist.
 
 The suite uses temporary workspaces. Bubblewrap integration tests skip cleanly where the binary is absent. Coverage includes path and nested-symlink escapes, root protection, file operations, output/time bounds, secret environment filtering, real project/workspace mounts, Bash/Python/subprocess home probes, asynchronous input/output/stop, local Git branch/add/commit/diff/log, dynamic discovery, annotations, and a full stdio MCP workflow.
 

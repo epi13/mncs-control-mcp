@@ -1,0 +1,161 @@
+# ChatGPT and Secure MCP Tunnel setup
+
+This repository runs a private stdio MCP server. The persistent Fedora unit runs
+`tunnel-client`, and the tunnel client owns the MCP child process. No inbound HTTP
+listener is opened.
+
+The current official reference is the [Secure MCP Tunnel guide](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels).
+It requires a real `tunnel_id`, a runtime API key, and an MCP command reachable
+over stdio. Tunnel permissions and ChatGPT Developer Mode access are separate.
+
+## Fedora setup
+
+From the repository:
+
+```bash
+cd ~/Documents/Projects/mncs-control-mcp
+./scripts/install-user-service.sh --no-start
+```
+
+The installer is idempotent. It creates or updates `.venv`, installs the editable
+package, preserves an existing `control.toml`, installs the user unit, creates
+private state/config directories, and imports the current `SSH_AUTH_SOCK` when one
+is available.
+
+If Bubblewrap is missing, install it as an operator and rerun:
+
+```bash
+sudo dnf install bubblewrap
+```
+
+Install `tunnel-client` only from the download link in OpenAI Platform tunnel
+settings or the latest official `openai/tunnel-client` release. The repository
+does not download an unverified binary. Place it at:
+
+```text
+~/.local/bin/tunnel-client
+```
+
+Create the runtime environment file with mode 0600:
+
+```bash
+nano ~/.config/mncs-control-mcp/tunnel.env
+```
+
+Set only:
+
+```text
+CONTROL_PLANE_API_KEY=<runtime-key>
+```
+
+Do not put the key in Git, `control.toml`, the tunnel profile command, or a shell
+argument. The installer never prints an existing key.
+
+Create or manage the tunnel in Platform tunnel settings, associate the target
+Platform organization and ChatGPT workspace, then initialize the local profile:
+
+```bash
+./scripts/install-user-service.sh --tunnel-id tunnel_...
+```
+
+This uses the official local stdio profile shape:
+
+```bash
+tunnel-client init \
+  --sample sample_mcp_stdio_local \
+  --profile mncs-fedora \
+  --tunnel-id tunnel_... \
+  --mcp-command "$HOME/Documents/Projects/mncs-control-mcp/.venv/bin/mncs-control-mcp --config $HOME/Documents/Projects/mncs-control-mcp/control.toml"
+```
+
+Existing profiles are preserved. Use `--repair-profile --tunnel-id tunnel_...`
+only when you intentionally want to regenerate the named profile.
+
+## Health and service operation
+
+```bash
+./scripts/doctor.sh
+systemctl --user status mncs-control-tunnel.service
+journalctl --user -u mncs-control-tunnel.service -f
+```
+
+The doctor performs a real MCP `initialize` and `tools/list` exchange and checks
+the required tool set. It reports missing tunnel-client, missing keys, profile
+doctor failures, SSH-agent state, Fabric/Harness/Forge, Ollama, CUDA, and the
+systemd unit without printing secrets.
+
+Convenience commands are available through:
+
+```bash
+./scripts/service.sh status
+./scripts/service.sh restart
+./scripts/service.sh logs
+./scripts/service.sh doctor
+```
+
+The service is enabled for `default.target`, uses absolute paths, restarts on
+failure, and retries after temporary network loss through tunnel-client's own
+reconnection behavior. If the MCP or tunnel process exits, systemd restarts the
+service chain. A missing configuration or executable fails clearly in the
+journal.
+
+## SSH agent behavior
+
+The service does not create a competing SSH agent or mount private keys. It
+inherits/imports the session `SSH_AUTH_SOCK`; the wrapper also recognizes the
+standard Fedora session socket at `/run/user/<uid>/ssh-agent.socket`. If no agent
+exists, the tunnel still starts, but authenticated remote Git operations may
+fail. Loading a passphrase-protected key may still require an interactive login.
+
+Optional hardening includes short key lifetimes or confirmation mode:
+
+```bash
+ssh-add -c -t 8h ~/.ssh/<github-key>
+```
+
+## Reboot and lingering
+
+With the normal graphical login, the user unit starts from `default.target` after
+the user manager is available. The current workstation reports `Linger=no`, so
+the service is not expected to run before login. To start user services at boot,
+an operator may enable lingering:
+
+```bash
+sudo loginctl enable-linger "$USER"
+```
+
+Lingering does not manufacture an SSH agent or unlock a private key. Fully
+unattended remote Git authentication therefore still depends on the chosen agent
+and key policy.
+
+## ChatGPT browser steps
+
+After `./scripts/doctor.sh` reports tunnel-client, runtime key, profile, and
+service health as OK:
+
+1. Ensure ChatGPT Developer Mode is enabled for the account/workspace. Availability and write-tool permissions depend on the ChatGPT plan/workspace policy.
+2. Open the ChatGPT developer-mode app/plugin creation flow.
+3. Choose **Tunnel** under **Connection**.
+4. Select the tunnel associated with the correct ChatGPT workspace, or provide the valid tunnel ID.
+5. Name the app **MNCS Control**.
+6. Save/discover the MCP tools and enable the app in a chat.
+7. Test with: `Use MNCS Control and call workspace_info.`
+8. Then test: `Use MNCS Control and list my projects.`
+9. Then test: `Use MNCS Control and run system_status.`
+10. Finally create a disposable project and perform a harmless write/read test.
+
+If the tunnel is not listed, verify the workspace association and Tunnels Read +
+Use permission. If discovery fails, confirm the service is active and rerun
+`tunnel-client doctor --profile mncs-fedora --explain`.
+
+## Updates
+
+```bash
+cd ~/Documents/Projects/mncs-control-mcp
+git pull
+./scripts/install-user-service.sh
+```
+
+The update flow preserves `control.toml`, `tunnel.env`, and the existing tunnel
+profile, reloads the user manager, restarts only when prerequisites are present,
+and reruns the doctor. It does not commit or overwrite secrets.
