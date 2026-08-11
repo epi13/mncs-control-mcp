@@ -18,7 +18,7 @@ from .actions import ActionRegistry, run_bounded
 from .config import ControlConfig
 from .errors import ControlError
 from .sandbox import Sandbox
-from .security import redact_text, resolve_repository
+from .security import redact_text, resolve_repository, safe_host_probe_environment
 from .workspace import WorkspacePolicy
 
 
@@ -44,7 +44,7 @@ def _load_sibling_package(package: str, source_root: Path) -> Any:
 
 
 class TestAdapter:
-    SUITES = ("repository", "pytest", "cargo")
+    SUITES = ("repository", "pytest", "ruff", "cargo", "node", "go", "cmake")
 
     def __init__(
         self,
@@ -66,20 +66,79 @@ class TestAdapter:
             raise ControlError("UNAUTHORIZED_REPOSITORY", f"repository alias is unknown: {repository}")
         return repository, self.policy.project_path(repository)
 
+    def _detected_suite(self, root: Path) -> str | None:
+        if (root / "Cargo.toml").is_file():
+            return "cargo"
+        if (root / "pyproject.toml").is_file() or (root / "pytest.ini").is_file() or (root / "tests").is_dir():
+            return "pytest"
+        if (root / "package.json").is_file():
+            return "node"
+        if (root / "go.mod").is_file():
+            return "go"
+        if (root / "CMakeLists.txt").is_file():
+            return "cmake"
+        return None
+
+    def discover(self, repository: str) -> dict[str, object]:
+        key, root = self._root(repository)
+        if not root.is_dir():
+            raise ControlError("REPOSITORY_MISSING", f"approved repository does not exist: {key}")
+        detected = self._detected_suite(root)
+        commands: list[dict[str, object]] = []
+        if detected == "pytest":
+            commands.append({"suite": "pytest", "command": ["python", "-m", "pytest"]})
+        elif detected == "cargo":
+            commands.append({"suite": "cargo", "command": ["cargo", "test"]})
+        elif detected == "node":
+            commands.append({"suite": "node", "command": ["npm", "test", "--"]})
+        elif detected == "go":
+            commands.append({"suite": "go", "command": ["go", "test", "./..."]})
+        elif detected == "cmake":
+            commands.append({"suite": "cmake", "command": ["ctest", "--test-dir", "build"]})
+        return {
+            "repository": key,
+            "path": str(root),
+            "detected_suite": detected,
+            "supported_suites": list(self.SUITES),
+            "commands": commands,
+            "test_directories": [name for name in ("tests", "test", "spec") if (root / name).is_dir()],
+        }
+
     def _command(self, root: Path, suite: str, component: str | None) -> tuple[str, ...]:
         if suite not in self.SUITES:
             raise ControlError("INVALID_TEST_SUITE", f"test suite must be one of {self.SUITES}")
         if suite == "repository":
-            if (root / "Cargo.toml").is_file():
-                suite = "cargo"
-            elif (root / "pyproject.toml").is_file() or (root / "tests").is_dir():
-                suite = "pytest"
-            else:
+            suite = self._detected_suite(root) or ""
+            if not suite:
                 raise ControlError("TEST_SUITE_UNAVAILABLE", "no approved repository test runner was detected")
         if suite == "cargo":
             return ("cargo", "test", "--", component) if component else ("cargo", "test")
-        interpreter = "./.venv/bin/python" if (root / ".venv" / "bin" / "python").exists() else "python"
-        return (interpreter, "-m", "pytest", component) if component else (interpreter, "-m", "pytest")
+        if suite == "pytest":
+            return ("python", "-m", "pytest", component) if component else ("python", "-m", "pytest")
+        if suite == "ruff":
+            return ("ruff", "check", component or ".")
+        if suite == "node":
+            return ("npm", "test", "--", component) if component else ("npm", "test", "--")
+        if suite == "go":
+            return ("go", "test", component or "./...")
+        if suite == "cmake":
+            return ("ctest", "--test-dir", component or "build")
+        raise ControlError("INVALID_TEST_SUITE", f"test suite must be one of {self.SUITES}")
+
+    @staticmethod
+    def _summary(suite: str, stdout: str, stderr: str) -> dict[str, object]:
+        text = f"{stdout}\n{stderr}"
+        patterns = {
+            "passed": r"(?i)(?:passed|tests? passed)[\s:=]+(\d+)",
+            "failed": r"(?i)(?:failed|tests? failed)[\s:=]+(\d+)",
+            "skipped": r"(?i)(?:skipped|tests? skipped)[\s:=]+(\d+)",
+        }
+        result: dict[str, object] = {}
+        for name, pattern in patterns.items():
+            match = re.search(pattern, text)
+            if match:
+                result[name] = int(match.group(1))
+        return result
 
     def run(
         self,
@@ -97,11 +156,20 @@ class TestAdapter:
         timeout_value = self.config.default_timeout_seconds if timeout is None else float(timeout)
         timeout_value = min(timeout_value, self.config.max_timeout_seconds)
         argv = self._command(root, test_suite, component)
-        self.actions.resolve(f"test.{('cargo' if argv[0] == 'cargo' else 'pytest')}")
+        self.actions.resolve(f"test.{('cargo' if argv[0] == 'cargo' else 'pytest')}") if argv[0] in {"cargo", "python"} else None
+        self_test = root.name == "mncs-control-mcp"
+        command = shlex.join(argv)
+        security_skips: list[dict[str, str]] = []
+        if self_test and argv[:3] == ("python", "-m", "pytest"):
+            command += " -m 'not requires_bwrap_namespace'"
+            security_skips.append({
+                "marker": "requires_bwrap_namespace",
+                "reason": "the MCP invocation already runs inside the production Bubblewrap boundary; nested user namespaces are unavailable",
+            })
         started = utc_now()
         if self.sandbox is not None:
             sandbox_result = self.sandbox.run(
-                shlex.join(argv),
+                command,
                 scope="project",
                 project=root.relative_to(self.config.workspace_root).parts[0],
                 cwd=Path(*root.relative_to(self.config.workspace_root).parts[1:]).as_posix()
@@ -109,6 +177,7 @@ class TestAdapter:
                 else ".",
                 timeout_seconds=timeout_value,
                 network=False,
+                environment={"MNCS_CONTROL_SELF_TEST": "1"} if self_test else None,
             )
             returncode = sandbox_result.exit_code
             stdout = sandbox_result.stdout
@@ -148,6 +217,46 @@ class TestAdapter:
             "duration_seconds": round(duration, 3),
             "sandbox_backend": backend,
             "summary": "PASS" if passed else "FAIL",
+            "test_counts": self._summary(test_suite, stdout, stderr),
+            "security_tests_skipped": security_skips,
+            "self_test_mode": self_test,
+        }
+
+    def check(self, repository: str, profile: str = "standard", timeout: float | None = None) -> dict[str, object]:
+        if profile not in {"quick", "standard", "full"}:
+            raise ControlError("INVALID_INPUT", "profile must be quick, standard, or full")
+        key, root = self._root(repository)
+        if not root.is_dir():
+            raise ControlError("REPOSITORY_MISSING", f"approved repository does not exist: {key}")
+        checks: list[tuple[str, str, str]] = []
+        if (root / "pyproject.toml").is_file() or (root / "tests").is_dir():
+            if profile != "quick" and shutil.which("ruff"):
+                checks.append(("lint", "ruff", "ruff check ."))
+            checks.append(("tests", "pytest", "python -m pytest"))
+        elif (root / "Cargo.toml").is_file():
+            checks.append(("tests", "cargo", "cargo test"))
+            if profile == "full":
+                checks.append(("check", "cargo", "cargo check"))
+        elif (root / "package.json").is_file():
+            checks.append(("tests", "node", "npm test --"))
+        elif (root / "go.mod").is_file():
+            checks.append(("tests", "go", "go test ./..."))
+        elif (root / "CMakeLists.txt").is_file():
+            checks.append(("build", "cmake", "cmake --build build"))
+        if not checks:
+            return {"repository": key, "profile": profile, "status": "not_supported", "checks": []}
+        results = []
+        for name, suite, _ in checks:
+            result = self.run(key, suite, timeout=timeout)
+            result["check"] = name
+            results.append(result)
+            if result["summary"] != "PASS":
+                break
+        return {
+            "repository": key,
+            "profile": profile,
+            "status": "PASS" if all(item["summary"] == "PASS" for item in results) else "FAIL",
+            "checks": results,
         }
 
 
@@ -162,7 +271,8 @@ class OllamaAdapter:
             return {"available": False, "status": "not_installed", "models": []}
         self.actions.resolve("model.ollama_list")
         result = run_bounded(
-            (executable, "list"), timeout_seconds=15, output_limit_bytes=self.config.max_output_bytes
+            (executable, "list"), timeout_seconds=15, output_limit_bytes=self.config.max_output_bytes,
+            env=safe_host_probe_environment(),
         )
         models: list[dict[str, object]] = []
         for line in result.stdout.splitlines()[1:]:
@@ -205,6 +315,7 @@ class SystemAdapter:
             (executable, "--query-gpu=name,driver_version,memory.total", "--format=csv,noheader,nounits"),
             timeout_seconds=10,
             output_limit_bytes=32 * 1024,
+            env=safe_host_probe_environment(),
         )
         gpus = []
         driver = None
@@ -214,7 +325,7 @@ class SystemAdapter:
                 driver = driver or (fields[1] if len(fields) > 1 else None)
                 gpus.append({"name": fields[0], "driver": fields[1] if len(fields) > 1 else None, "vram_mib": fields[2] if len(fields) > 2 else None})
         cuda = None
-        version = run_bounded((executable,), timeout_seconds=10, output_limit_bytes=16 * 1024)
+        version = run_bounded((executable,), timeout_seconds=10, output_limit_bytes=16 * 1024, env=safe_host_probe_environment())
         match = re.search(r"CUDA Version:\s*([\d.]+)", version.stdout + version.stderr)
         if match:
             cuda = match.group(1)

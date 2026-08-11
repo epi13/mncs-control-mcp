@@ -5,16 +5,21 @@ import os
 import select
 import shutil
 import subprocess
+import sys
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
 from .config import ControlConfig, load_config
-from .deployment import DeploymentPaths, configured_runtime_key
-from .security import redact_text
+from .deployment import DeploymentPaths, configured_runtime_key, runtime_environment
+from .security import redact_text, safe_host_probe_environment
 
-_REQUIRED_TOOLS = {"workspace_info", "list_projects", "file_read", "terminal_exec", "git_status", "system_status", "fabric_status"}
+_REQUIRED_TOOLS = {
+    "workspace_info", "list_projects", "file_read", "terminal_exec", "git_status",
+    "system_status", "fabric_status", "control_capabilities", "project_review",
+    "project_check", "laboratory_status",
+}
 
 
 @dataclass(frozen=True)
@@ -29,7 +34,9 @@ class Check:
         return self.status == "OK"
 
 
-def _capture(argv: list[str], *, timeout: float = 8.0, env: dict[str, str] | None = None) -> tuple[int, str]:
+def _capture(
+    argv: list[str], *, timeout: float = 8.0, env: dict[str, str] | None = None, max_chars: int = 1000
+) -> tuple[int, str]:
     try:
         result = subprocess.run(
             argv,
@@ -37,12 +44,12 @@ def _capture(argv: list[str], *, timeout: float = 8.0, env: dict[str, str] | Non
             text=True,
             timeout=timeout,
             check=False,
-            env=env,
+            env=env if env is not None else safe_host_probe_environment(),
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         return 127, redact_text(str(exc))
     output = (result.stdout or result.stderr or "").strip()
-    return result.returncode, redact_text(output[:1000])
+    return result.returncode, redact_text(output[:max_chars])
 
 
 def _first_line(value: str) -> str:
@@ -77,18 +84,26 @@ def _read_json_response(stream: Any, process: subprocess.Popen[str], request_id:
 def probe_mcp_stdio(executable: Path, config_path: Path, *, timeout: float = 20.0) -> dict[str, Any]:
     """Perform a real initialize/tools-list exchange against the local executable."""
 
-    environment = {
-        "HOME": str(Path.home()),
-        "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
-        "LANG": os.environ.get("LANG", "C.UTF-8"),
-    }
+    environment = safe_host_probe_environment()
+    if executable.is_file():
+        command = [str(executable), "--config", str(config_path)]
+        cwd = None
+    else:
+        # A project test can run inside /workspace where the host's .venv path
+        # is not mounted.  Use the interpreter that is actually executing the
+        # probe and expose the checked-out source, rather than inventing a
+        # host/sandbox path.
+        command = [sys.executable, "-m", "mncs_control_mcp", "--config", str(config_path)]
+        cwd = Path.cwd()
+        environment["PYTHONPATH"] = str(cwd / "src")
     process = subprocess.Popen(
-        [str(executable), "--config", str(config_path)],
+        command,
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
         env=environment,
+        cwd=cwd,
         start_new_session=True,
     )
     try:
@@ -145,6 +160,23 @@ def _service_state() -> tuple[str, str]:
     return "WARNING", f"enabled={enabled or 'unknown'}, active={active or 'unknown'}"
 
 
+def _tunnel_process_running(profile: str) -> bool:
+    """Detect an already-running profile without exposing its environment."""
+    try:
+        for entry in Path("/proc").iterdir():
+            if not entry.name.isdigit():
+                continue
+            try:
+                command = (entry / "cmdline").read_bytes().replace(b"\x00", b" ").decode(errors="ignore")
+            except OSError:
+                continue
+            if "tunnel-client" in command and " run " in f" {command} " and f"--profile {profile}" in command:
+                return True
+    except OSError:
+        pass
+    return False
+
+
 def _ssh_state() -> tuple[str, str]:
     candidates = []
     if os.environ.get("SSH_AUTH_SOCK"):
@@ -153,7 +185,7 @@ def _ssh_state() -> tuple[str, str]:
     socket = next((candidate for candidate in candidates if candidate.is_socket()), None)
     if socket is None:
         return "WARNING", "SSH_AUTH_SOCK is not available"
-    code, output = _capture(["ssh-add", "-l"], env={"HOME": str(Path.home()), "SSH_AUTH_SOCK": str(socket), "PATH": os.environ.get("PATH", "/usr/bin:/bin")})
+    code, output = _capture(["ssh-add", "-l"], env=safe_host_probe_environment({"SSH_AUTH_SOCK": str(socket)}))
     if code == 0:
         return "OK", f"socket={socket} (key metadata available; private keys remain agent-only)"
     return "WARNING", f"socket={socket}, no loaded identities"
@@ -212,9 +244,11 @@ def run_doctor(config_path: Path, *, profile: str = "mncs-fedora", json_output: 
         checks.append(Check("Runtime key", "FAIL", f"CONTROL_PLANE_API_KEY is not configured in {paths.tunnel_environment}", required=True))
 
     if tunnel is not None and key_configured:
-        code, output = _capture([str(tunnel), "doctor", "--profile", profile, "--explain"], timeout=30)
+        code, output = _capture([str(tunnel), "doctor", "--profile", profile, "--explain"], timeout=30, env=runtime_environment(paths.tunnel_environment), max_chars=8000)
         if code == 0:
             checks.append(Check("Tunnel profile", "OK", f"{profile}; { _first_line(output) or 'doctor passed'}", required=True))
+        elif "health_listener" in output and "address already in use" in output and _tunnel_process_running(profile):
+            checks.append(Check("Tunnel profile", "OK", f"{profile}; an existing tunnel-client already owns the health listener", required=True))
         else:
             checks.append(Check("Tunnel profile", "FAIL", f"{profile}; {_first_line(output) or 'doctor failed'}", required=True))
     else:

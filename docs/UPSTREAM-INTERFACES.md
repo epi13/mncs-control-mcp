@@ -19,3 +19,11 @@ The adapter does not turn a caller string into Fabric remote shell. Python scrip
 ## Commons
 
 Commons remains transport-neutral and evidence-preserving. This MCP does not turn Commons content, reproduction instructions, or suggested actions into commands. Any future publication adapter must use Commons' public boundary and preserve PASS/FAIL/UNKNOWN distinctions.
+
+## Control-plane ownership
+
+`control_capabilities`, `project_review`, `laboratory_status`, and `control_run`
+are planning/orchestration views. They aggregate adapter results but do not
+replace upstream routing, model selection, evaluation, evidence, or Commons
+protocol semantics. `control_jobs` records upstream execution summaries without
+claiming local process ownership.

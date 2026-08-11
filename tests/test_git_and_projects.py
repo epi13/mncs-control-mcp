@@ -10,6 +10,7 @@ from mncs_control_mcp.tooling import ProjectService, ToolInventory
 from mncs_control_mcp.workspace import WorkspacePolicy
 
 
+@pytest.mark.requires_bwrap_namespace
 @pytest.mark.skipif(shutil.which("bwrap") is None, reason="bubblewrap is not installed")
 def test_project_discovery_creation_and_full_local_git_workflow(config) -> None:
     policy = WorkspacePolicy(config)

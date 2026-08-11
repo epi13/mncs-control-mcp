@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from mncs_control_mcp.actions import CommandResult
 from mncs_control_mcp.deployment import (
     DeploymentPaths,
     configured_runtime_key,
@@ -14,6 +15,32 @@ from mncs_control_mcp.deployment import (
     render_user_service,
 )
 from mncs_control_mcp.doctor import probe_mcp_stdio, run_doctor
+from mncs_control_mcp.security import safe_host_probe_environment
+
+
+def test_safe_host_probe_environment_has_home_without_secrets(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("HOME", raising=False)
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "must-not-forward")
+    environment = safe_host_probe_environment()
+    assert environment["HOME"]
+    assert "AWS_SECRET_ACCESS_KEY" not in environment
+    assert environment["PATH"]
+
+
+def test_ollama_probe_receives_safe_home(monkeypatch: pytest.MonkeyPatch, config) -> None:
+    import mncs_control_mcp.adapters as adapters
+
+    captured: dict[str, str] = {}
+    monkeypatch.setattr(adapters.shutil, "which", lambda name: "/usr/bin/ollama" if name == "ollama" else None)
+
+    def fake_run(*args: object, **kwargs: object) -> object:
+        captured.update(kwargs["env"])
+        return CommandResult(("ollama", "list"), 0, "NAME\n", "", False, False, 0.0)
+
+    monkeypatch.setattr(adapters, "run_bounded", fake_run)
+    adapters.OllamaAdapter(config, __import__("mncs_control_mcp.server", fromlist=["_register_actions"])._register_actions()).status()
+    assert captured["HOME"]
+    assert "AWS_SECRET_ACCESS_KEY" not in captured
 
 
 def test_deployment_paths_and_unit_rendering(tmp_path: Path) -> None:
@@ -57,6 +84,7 @@ def test_installer_help_is_safe_and_idempotence_contract_is_documented() -> None
     assert "--no-start" in result.stdout
 
 
+@pytest.mark.requires_bwrap_namespace
 @pytest.mark.skipif(shutil.which("bwrap") is None, reason="bubblewrap is not installed")
 def test_doctor_mcp_probe_performs_real_stdio_handshake(tmp_path: Path) -> None:
     repository_executable = Path(__file__).parents[1] / ".venv" / "bin" / "mncs-control-mcp"

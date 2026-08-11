@@ -125,7 +125,7 @@ Text reads are UTF-8; binary reads use base64. File sizes, listings, trees, sear
 ### Terminal and processes
 
 - `terminal_exec`
-- `terminal_start`, `terminal_status`, `terminal_output`, `terminal_write`, `terminal_stop`, `terminal_jobs`
+- `terminal_start`, `terminal_status`, `terminal_output`, `terminal_write`, `terminal_stop`, `terminal_jobs`, `control_jobs`
 - backward-compatible `job_status`, `job_result`
 
 Synchronous results include command, sandbox cwd, scope, project, timestamps, exit code, stdout, stderr, timeout/truncation state, duration, backend, and network state. Asynchronous jobs use random service-owned IDs, process groups, incremental bounded logs, stdin, termination, configurable concurrency/time limits, shutdown cleanup, and local restart metadata. A restarted server marks previously running metadata `orphaned`; it never signals a PID merely read from disk.
@@ -142,12 +142,13 @@ Every Git command runs inside the same project sandbox, including repository hoo
 
 ### System and MNCS
 
-- `tool_inventory`, `system_status`, `list_repositories`
+- `tool_inventory`, `system_status`, `control_capabilities`, `laboratory_status`, `list_repositories`
+- `project_review`, `test_discover`, `test_run`, `project_check`, `control_run`
 - `fabric_status`, `model_status`, `run_tests`, `run_mncs_evaluation`, `dispatch_fabric_job`
 
 `tool_inventory` reports safe executable paths and first-line versions for common Python, Rust, Node, C/C++, Go, Java, container, shell, search, Ollama, NVIDIA/CUDA, and sandbox tools. It does not return the environment.
 
-`run_tests` works for any immediate project and executes detected pytest or Cargo tests inside project scope. `run_mncs_evaluation` uses Forge's current typed operation registry for declared development workflows. `dispatch_fabric_job` now builds a Fabric artifact manifest, validated `mncs-fabric.job-plan.v0.1`, deterministic EA-NEXT-002 bundle, and calls `FabricClient.execute`; supported task types are `pytest`, `python`, and `cargo_test`. `artifact_path` can select a bounded artifact subtree. Fabric still owns worker discovery, admission, routing, transfer, execution, and receipts. Raw model routing is not invented at this layer; Harness remains responsible for model/agent execution.
+`project_review` provides bounded project/Git/test/CI/documentation context. `test_discover`, `test_run`, and `project_check` cover detected pytest, Cargo, Node, Go, and CTest workflows; the legacy `run_tests` name remains supported. When the control repository tests itself, Bubblewrap integration tests are marked `requires_bwrap_namespace` and reported as an explicit skip because the outer production sandbox is already the security boundary; they are not falsely reported as passing. `control_capabilities` and `laboratory_status` expose the current dependency graph and compute topology for agent planning. `control_run` composes only named workflows (`inspect_project`, `check_project`, `test_project`, `evaluate_project`, `fabric_test_project`, and the honest Harness limitation). `run_mncs_evaluation` uses Forge's current typed operation registry for declared development workflows. `dispatch_fabric_job` builds a Fabric artifact manifest, validated `mncs-fabric.job-plan.v0.1`, deterministic EA-NEXT-002 bundle, and calls `FabricClient.execute`; supported task types are `pytest`, `python`, and `cargo_test`. Fabric still owns worker discovery, admission, routing, transfer, execution, and receipts. Raw model routing is not invented at this layer; Harness remains responsible for model/agent execution.
 
 `integration.fabric_controller_id` must equal the controller identity recorded by the chosen Fabric worker registry. The example uses `epi13-local-harness`, which is the normal Harness-owned registry identity. A mismatch is reported as unavailable rather than silently assuming another controller identity.
 

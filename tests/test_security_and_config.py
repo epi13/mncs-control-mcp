@@ -152,6 +152,7 @@ def test_optional_integrations_fail_gracefully(config) -> None:
     assert ForgeAdapter(config).evaluate("missing", "case")["status"] == "not_supported_yet"
 
 
+@pytest.mark.requires_bwrap_namespace
 @pytest.mark.skipif(shutil.which("bwrap") is None, reason="bubblewrap is not installed")
 def test_repo_status_uses_only_approved_alias(tmp_path: Path, config) -> None:
     repo = config.workspace_root / "fixture-repo"

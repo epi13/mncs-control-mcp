@@ -22,6 +22,34 @@ _ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
 _SAFE_HOST_ENVIRONMENT = frozenset({"PATH", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "TMPDIR"})
 
 
+def safe_host_probe_environment(overrides: Mapping[str, str] | None = None) -> dict[str, str]:
+    """Build the minimal environment used by trusted, read-only host probes.
+
+    A number of otherwise harmless developer utilities (notably Ollama) assume
+    ``HOME`` exists.  Host probes must not inherit the full service environment,
+    so we add a controlled HOME and XDG locations while retaining the existing
+    secret filtering rules.
+    """
+    home = Path.home()
+    result = {
+        "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
+        "HOME": str(home),
+        "LANG": os.environ.get("LANG", "C.UTF-8"),
+        "LC_ALL": os.environ.get("LC_ALL", os.environ.get("LANG", "C.UTF-8")),
+        "TMPDIR": os.environ.get("TMPDIR", "/tmp"),
+        "XDG_CONFIG_HOME": str(home / ".config"),
+        "XDG_CACHE_HOME": str(home / ".cache"),
+        "XDG_DATA_HOME": str(home / ".local" / "share"),
+        "XDG_STATE_HOME": str(home / ".local" / "state"),
+    }
+    runtime_dir = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
+    if Path(runtime_dir).is_dir():
+        result["XDG_RUNTIME_DIR"] = runtime_dir
+    if overrides:
+        result.update(validate_environment(overrides))
+    return result
+
+
 def canonical_projects_root(config: ControlConfig) -> Path:
     return config.workspace_root.expanduser().resolve()
 
@@ -57,7 +85,12 @@ def public_relative_path(root: Path, value: str) -> str | None:
 
 
 def filtered_environment() -> dict[str, str]:
-    return {key: value for key, value in os.environ.items() if key in _SAFE_HOST_ENVIRONMENT}
+    # This environment is for sandboxed commands.  HOME is deliberately the
+    # dedicated sandbox home and never the real host home.
+    result = {key: value for key, value in os.environ.items() if key in _SAFE_HOST_ENVIRONMENT}
+    result.setdefault("PATH", "/usr/local/bin:/usr/bin:/bin")
+    result.setdefault("LANG", "C.UTF-8")
+    return result
 
 
 def validate_environment(overrides: Mapping[str, str]) -> dict[str, str]:

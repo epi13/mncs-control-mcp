@@ -64,6 +64,10 @@ class TerminalJob:
     stopped: bool = False
     stdout: _LogBuffer | None = None
     stderr: _LogBuffer | None = None
+    kind: str = "terminal"
+    upstream_id: str | None = None
+    result_summary: dict[str, object] | None = None
+    artifacts: list[dict[str, object]] = field(default_factory=list)
 
     def public(self) -> dict[str, object]:
         return {
@@ -82,6 +86,10 @@ class TerminalJob:
             "exit_code": self.exit_code,
             "timed_out": self.timed_out,
             "stopped": self.stopped,
+            "kind": self.kind,
+            "upstream_id": self.upstream_id,
+            "result_summary": self.result_summary,
+            "artifacts": self.artifacts,
         }
 
 
@@ -121,6 +129,10 @@ class ProcessManager:
                 exit_code=item.get("exit_code") if isinstance(item.get("exit_code"), int) else None,
                 timed_out=bool(item.get("timed_out", False)),
                 stopped=bool(item.get("stopped", False)),
+                kind=str(item.get("kind", "terminal")),
+                upstream_id=item.get("upstream_id") if isinstance(item.get("upstream_id"), str) else None,
+                result_summary=item.get("result_summary") if isinstance(item.get("result_summary"), dict) else None,
+                artifacts=item.get("artifacts") if isinstance(item.get("artifacts"), list) else [],
             )
             self._jobs[job.job_id] = job
 
@@ -280,6 +292,46 @@ class ProcessManager:
         with self._lock:
             jobs = [job.public() for job in sorted(self._jobs.values(), key=lambda item: item.created_at, reverse=True)]
         return {"jobs": jobs[:100], "running": sum(item["status"] == "running" for item in jobs)}
+
+    def record_external(
+        self,
+        kind: str,
+        *,
+        project: str | None = None,
+        node: str | None = None,
+        model: str | None = None,
+        status: str = "completed",
+        upstream_id: str | None = None,
+        result_summary: dict[str, object] | None = None,
+        artifacts: list[dict[str, object]] | None = None,
+    ) -> dict[str, object]:
+        """Record an upstream Fabric/Forge/Harness execution without faking a PID."""
+        if not kind or len(kind) > 80 or any(char not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-" for char in kind):
+            raise ControlError("INVALID_INPUT", "external job kind is invalid")
+        now = utc_now()
+        job = TerminalJob(
+            job_id="ctrl-" + secrets.token_hex(12),
+            command="[upstream execution]",
+            cwd="/workspace",
+            scope="project" if project else "workspace",
+            project=project,
+            network=True,
+            sandbox_backend="upstream",
+            timeout_seconds=0,
+            process=None,
+            status=status,
+            created_at=now,
+            started_at=now,
+            completed_at=now,
+            kind=kind,
+            upstream_id=upstream_id or node,
+            result_summary=result_summary,
+            artifacts=list(artifacts or []),
+        )
+        with self._lock:
+            self._jobs[job.job_id] = job
+            self._persist()
+        return job.public()
 
     def cleanup(self) -> None:
         with self._lock:

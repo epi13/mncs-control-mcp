@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import platform
 import shutil
 from pathlib import Path
@@ -10,6 +9,7 @@ from .config import ControlConfig
 from .errors import ControlError
 from .git_adapter import GitService
 from .sandbox import Sandbox
+from .security import safe_host_probe_environment
 from .workspace import WorkspacePolicy
 
 _TOOLS: tuple[tuple[str, tuple[str, ...]], ...] = (
@@ -40,15 +40,13 @@ class ToolInventory:
 
     def inventory(self) -> dict[str, object]:
         self.config.sandbox_home.mkdir(mode=0o700, parents=True, exist_ok=True)
-        environment = {
-            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        environment = safe_host_probe_environment({
             "HOME": str(self.config.sandbox_home),
             "XDG_CACHE_HOME": str(self.config.sandbox_home / ".cache"),
             "XDG_CONFIG_HOME": str(self.config.sandbox_home / ".config"),
             "XDG_DATA_HOME": str(self.config.sandbox_home / ".local" / "share"),
             "XDG_STATE_HOME": str(self.config.sandbox_home / ".local" / "state"),
-            "LANG": os.environ.get("LANG", "C.UTF-8"),
-        }
+        })
         tools = []
         for name, args in _TOOLS:
             executable = shutil.which(name)

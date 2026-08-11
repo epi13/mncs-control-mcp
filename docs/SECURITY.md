@@ -24,6 +24,11 @@ The service bounds timeout, concurrent jobs, retained stdout/stderr, file and re
 
 There is currently no per-job CPU or memory cgroup quota and no GPU device passthrough. These are explicit limitations, not claimed controls.
 
+Control jobs distinguish local terminal processes from upstream records. Fabric,
+Forge, and Harness identifiers are recorded without pretending that an upstream
+job has a local PID; status and receipts remain authoritative in the upstream
+system.
+
 ## Audit
 
 Audit JSONL lives outside the workspace, mode 0600 under a 0700 directory. It contains bounded/redacted metadata, not full file contents or environment data. Generic workspace tools cannot address it.

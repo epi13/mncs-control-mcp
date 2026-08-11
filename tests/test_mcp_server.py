@@ -63,6 +63,7 @@ class StdioClient:
             self.process.communicate()
 
 
+@pytest.mark.requires_bwrap_namespace
 @pytest.mark.skipif(shutil.which("bwrap") is None, reason="bubblewrap is not installed")
 def test_stdio_mcp_end_to_end_developer_workspace(tmp_path: Path) -> None:
     pytest.importorskip("mcp")
