@@ -105,8 +105,7 @@ def test_network_policy_can_disable_opt_in(config) -> None:
     from dataclasses import replace
 
     locked = replace(config, terminal_network_allowed=False)
-    policy = WorkspacePolicy(locked)
-    sandbox = Sandbox(locked, policy)
+    policy, sandbox = _sandbox(locked)
     with pytest.raises(ControlError) as error:
         sandbox.command_argv(
             "true", policy.resolve_scope(scope="project", project="alpha", cwd="."), network=True
