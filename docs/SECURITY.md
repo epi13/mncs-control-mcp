@@ -28,6 +28,24 @@ There is currently no per-job CPU or memory cgroup quota and no GPU device passt
 
 Audit JSONL lives outside the workspace, mode 0600 under a 0700 directory. It contains bounded/redacted metadata, not full file contents or environment data. Generic workspace tools cannot address it.
 
+## Persistent service boundary
+
+The user service runs `tunnel-client`, which owns the MCP stdio child. It uses
+absolute repository/virtualenv paths, a filtered PATH, `ProtectSystem=strict`,
+`ProtectHome=read-only`, `PrivateTmp`, `NoNewPrivileges`, a control-group kill
+boundary, and narrowly scoped writable paths for the workspace, MCP state, and
+tunnel-client state. The service environment file is
+outside the workspace and must be mode 0600. The service wrapper never prints the
+runtime key and only discovers an existing `SSH_AUTH_SOCK`; it does not create an
+agent or mount private keys.
+
+The installer deliberately does not download an unverified tunnel binary, invent
+a tunnel ID, enable lingering, or run `sudo`. It creates/enables the user unit and
+reports the exact operator action for missing Bubblewrap, tunnel-client, keys,
+profiles, or lingering. A service can start at login without an SSH agent; remote
+Git authentication is an optional capability and is reported separately by the
+doctor.
+
 ## Demonstrated test properties
 
 The automated tests exercise direct `..` and absolute paths, direct and nested symlink escapes, write-through-symlink refusal, root deletion, project sibling redirection, real-home and SSH-key probes from Bash and Python, subprocess inheritance, workspace-scope cross-project writes, asynchronous process groups, and the actual Bubblewrap backend when available.

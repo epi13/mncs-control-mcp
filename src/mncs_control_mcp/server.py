@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import sys
 import time
 from collections.abc import Callable
 from typing import Any
@@ -358,6 +359,11 @@ def build_server(config: ControlConfig | None = None) -> Any:
 
 
 def main(argv: list[str] | None = None) -> int:
+    selected_argv = list(sys.argv[1:] if argv is None else argv)
+    if selected_argv and selected_argv[0] == "doctor":
+        from .doctor import doctor_main
+
+        return doctor_main(selected_argv[1:])
     parser = argparse.ArgumentParser(prog="mncs-control-mcp")
     parser.add_argument("--config", help="path to a control TOML configuration")
     args = parser.parse_args(argv)
