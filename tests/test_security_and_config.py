@@ -269,6 +269,8 @@ def test_fabric_status_uses_migrated_registry_lock_in_private_state(tmp_path: Pa
     )
 
     class FakeClient:
+        refresh_calls = 0
+
         def __init__(self, _controller: str, _state: Path) -> None:
             pass
 
@@ -278,6 +280,10 @@ def test_fabric_status_uses_migrated_registry_lock_in_private_state(tmp_path: Pa
             return {"outcome": "PASS", "registry_path": str(path)}
 
         def workers(self) -> list[dict[str, object]]:
+            return []
+
+        def refresh_workers(self) -> list[dict[str, object]]:
+            FakeClient.refresh_calls += 1
             return []
 
     class FakeFabric:
@@ -290,6 +296,7 @@ def test_fabric_status_uses_migrated_registry_lock_in_private_state(tmp_path: Pa
     assert result["available"] is True
     assert result["registry_path"].endswith("control-state/fabric/workers.json")
     assert Path(str(result["registry_path"] + ".lock")).is_file()
+    assert FakeClient.refresh_calls == 1
 
 
 def test_approved_mncs_alias_remains_specialization_not_general_authorization(config) -> None:

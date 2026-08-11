@@ -90,7 +90,9 @@ read-only legacy home path. Mutable controller-side Fabric trust ledgers
 referenced by a migrated legacy registry are also copied into
 `~/.local/state/mncs-control-mcp/fabric/trust/` and the private registry is
 rewritten to use those copies. `fabric_status` should therefore show registered
-workers even when the service runs with `ProtectHome=read-only`.
+workers even when the service runs with `ProtectHome=read-only`; each status call
+also performs an authenticated worker refresh so availability and resource
+observations are current rather than registry-only.
 
 Convenience commands are available through:
 
