@@ -432,6 +432,7 @@ class FabricAdapter:
             registry_report: dict[str, object] | None = None
             if registry_path.exists():
                 registry_report = client.load_registry(registry_path)
+            client.refresh_workers()
             workers = client.workers()
             return {
                 "available": True,

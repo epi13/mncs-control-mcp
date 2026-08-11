@@ -86,8 +86,13 @@ systemd unit without printing secrets.
 
 Fabric registry locks are stored at
 `~/.local/state/mncs-control-mcp/fabric/workers.json.lock`, not under the
-read-only legacy home path. `fabric_status` should therefore show the registered
-workers even when the service runs with `ProtectHome=read-only`.
+read-only legacy home path. Mutable controller-side Fabric trust ledgers
+referenced by a migrated legacy registry are also copied into
+`~/.local/state/mncs-control-mcp/fabric/trust/` and the private registry is
+rewritten to use those copies. `fabric_status` should therefore show registered
+workers even when the service runs with `ProtectHome=read-only`; each status call
+also performs an authenticated worker refresh so availability and resource
+observations are current rather than registry-only.
 
 Convenience commands are available through:
 
@@ -117,6 +122,23 @@ Optional hardening includes short key lifetimes or confirmation mode:
 ```bash
 ssh-add -c -t 8h ~/.ssh/<github-key>
 ```
+
+For GitHub, host `gh auth` may legitimately use the desktop keyring, but that token
+is intentionally unavailable inside MCP sandboxes. Register the public key that is
+already loaded in the session agent, switch the repository remote to SSH, and verify
+the same agent-backed path:
+
+```bash
+gh auth refresh -h github.com -s admin:public_key
+gh ssh-key add ~/.ssh/id_ed25519.pub --title "fedora mncs-control"
+git remote set-url origin git@github.com:OWNER/REPOSITORY.git
+ssh -T git@github.com
+```
+
+This keeps private keys in the agent and avoids placing tokens in `tunnel.env`, Git
+configuration, the workspace, or MCP sandbox state. If `gh ssh-key add` reports a
+missing scope, complete the one-time browser/device authorization requested by
+`gh auth refresh` and retry it.
 
 ## Reboot and lingering
 
@@ -153,6 +175,23 @@ For a useful orchestration smoke test, ask the app to `review mncs-language`,
 `show laboratory_status`, or run a bounded `dispatch_fabric_job` with
 `wait=false`; retrieve its `ctrl-...` result using `control_job_status` and
 `control_job_result`.
+
+For the physical worker/model path, refresh the Harness inventory from the host and
+use an exact pin so unavailable workers fail closed:
+
+```bash
+~/Documents/Projects/epi13-local-harness/.venv/bin/elh fabric refresh
+~/Documents/Projects/epi13-local-harness/.venv/bin/elh models --worker collamore02-windows --json
+~/Documents/Projects/epi13-local-harness/.venv/bin/elh ask \
+  'Compute 17 + 25 and reply with RESULT=42 plus one short explanation.' \
+  --worker collamore02-windows --model-name gemma4:e4b
+~/Documents/Projects/epi13-local-harness/.venv/bin/elh residency status
+```
+
+The expected evidence is `AVAILABLE`, a current worker observation, the selected
+worker/model, `execution_source=remote`, Fabric request/record/receipt identities,
+and residency still reporting `gemma4:e4b` loaded. Do not add
+`--allow-fallback` for an exact routing smoke test.
 
 If the tunnel is not listed, verify the workspace association and Tunnels Read +
 Use permission. If discovery fails, confirm the service is active and rerun

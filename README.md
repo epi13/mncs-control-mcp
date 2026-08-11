@@ -111,6 +111,25 @@ ssh -T git@github.com
 git remote set-url origin git@github.com:OWNER/REPOSITORY.git
 ```
 
+The normal host-side GitHub CLI login is compatible with host Git, but its keyring
+token is deliberately not mounted into MCP sandboxes. To authorize the agent-backed
+path, register the matching public key once through GitHub CLI (the account login
+may require the `admin:public_key` scope), then use SSH remotes:
+
+```bash
+gh auth status
+gh auth refresh -h github.com -s admin:public_key
+gh ssh-key add ~/.ssh/id_ed25519.pub --title "fedora mncs-control"
+git remote set-url origin git@github.com:OWNER/REPOSITORY.git
+ssh -T git@github.com
+```
+
+Only the session `SSH_AUTH_SOCK` is made available to the authorized networked Git
+sandbox; private key files and GitHub tokens are never copied into control-plane
+state or repository files. The user service recognizes Fedora's
+`/run/user/<uid>/ssh-agent.socket` and reports missing agent identities without
+weakening the service sandbox.
+
 ## MCP tools
 
 ### Workspace and files
