@@ -16,3 +16,4 @@ control.toml
 !.env.example
 workspace/
 .joern-analysis/
+.joern-agent/
