@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import shutil
+
 import pytest
 
 from mncs_control_mcp.adapters import IntegrationBundle
@@ -11,6 +13,8 @@ from mncs_control_mcp.sandbox import Sandbox
 from mncs_control_mcp.server import _register_actions
 from mncs_control_mcp.tooling import ProjectService
 from mncs_control_mcp.workspace import WorkspacePolicy
+
+pytestmark = pytest.mark.skipif(shutil.which("bwrap") is None, reason="control-plane integration requires Bubblewrap")
 
 
 def _plane(config) -> ControlPlaneService:
