@@ -317,7 +317,7 @@ def build_server(config: ControlConfig | None = None) -> Any:
     def laboratory_status() -> dict[str, object]:
         return invoke("laboratory_status", control_plane.laboratory_status)  # type: ignore[return-value]
 
-    @server.tool(name="control_run", description="Run one narrow typed orchestration workflow across project review, checks, tests, Forge, Fabric, or Harness capability boundaries.", annotations=mutate, structured_output=True)
+    @server.tool(name="control_run", description="Run one named bounded workflow: inspect_project, check_project, test_project, evaluate_project, fabric_test_project, review_and_check_project, review_check_and_fabric_test, or the honest Harness limitation.", annotations=mutate, structured_output=True)
     def control_run(workflow: str, project: str, profile: str = "standard", task_type: str | None = None, model: str | None = None, node: str | None = None, parameters: dict[str, object] | None = None) -> dict[str, object]:
         return invoke("control_run", control_plane.run_workflow, workflow, project, profile, task_type, model, node, parameters, audit_metadata={"project": project, "workflow": workflow})  # type: ignore[return-value]
 
@@ -394,6 +394,11 @@ def build_server(config: ControlConfig | None = None) -> Any:
                     project=project,
                     node=node,
                     model=model,
+                    timeout_seconds=(
+                        float(parameters["timeout_seconds"])
+                        if isinstance(parameters, dict) and parameters.get("timeout_seconds") is not None
+                        else None
+                    ),
                 )}
             result = operation()
             result["control_job"] = processes.record_external(

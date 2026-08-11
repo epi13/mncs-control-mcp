@@ -3,6 +3,9 @@ from __future__ import annotations
 import os
 import platform
 import shutil
+import sys
+import tomllib
+from dataclasses import dataclass
 from pathlib import Path
 
 from .actions import run_bounded
@@ -33,6 +36,112 @@ _INDICATORS = {
     "package.json": "node", "go.mod": "go", "CMakeLists.txt": "cmake",
     "Makefile": "make", "Dockerfile": "container",
 }
+
+
+@dataclass(frozen=True)
+class Toolchain:
+    ecosystem: str
+    executable: str | None
+    source: str
+    version: str | None = None
+    diagnostic: str | None = None
+
+    def public(self) -> dict[str, object]:
+        return {
+            "ecosystem": self.ecosystem,
+            "executable": self.executable,
+            "source": self.source,
+            "version": self.version,
+            "diagnostic": self.diagnostic,
+        }
+
+
+class ToolchainResolver:
+    """Resolve fixed runner identities without executing repository-provided code."""
+
+    _SYSTEM_TOOLS = {
+        "python": "python3",
+        "rust": "cargo",
+        "node": "npm",
+        "go": "go",
+        "cmake": "ctest",
+        "ruff": "ruff",
+    }
+
+    def resolve(self, root: Path, ecosystem: str) -> Toolchain:
+        root = root.resolve()
+        configured = self._configured(root, ecosystem)
+        candidates: list[tuple[Path, str]] = []
+        if configured is not None:
+            candidates.append((configured, "project_config"))
+        if ecosystem == "python":
+            candidates.extend((root / ".venv" / "bin" / name, "project_venv") for name in ("python", "python3"))
+        if ecosystem == "ruff":
+            candidates.append((root / ".venv" / "bin" / "ruff", "project_venv"))
+        system_name = self._SYSTEM_TOOLS.get(ecosystem, ecosystem)
+        approved_system = self._approved_system(system_name, root)
+        if approved_system:
+            candidates.append((Path(approved_system), "system"))
+        rejected: list[str] = []
+        for candidate, source in candidates:
+            if not self._safe_executable(candidate, root, approved_system):
+                if candidate.exists():
+                    rejected.append(f"{candidate}: rejected path or executable")
+                continue
+            return Toolchain(ecosystem, str(candidate), source)
+        diagnostic = f"no approved {ecosystem} toolchain is available"
+        if rejected:
+            diagnostic += "; " + "; ".join(rejected[:2])
+        return Toolchain(ecosystem, None, "unavailable", diagnostic=diagnostic)
+
+    @staticmethod
+    def _approved_system(name: str, root: Path) -> str | None:
+        """Find a system executable without mistaking the controller venv for it."""
+        active_prefix = Path(sys.prefix).resolve()
+        base_prefix = Path(sys.base_prefix).resolve()
+        for directory in os.environ.get("PATH", "").split(os.pathsep):
+            if not directory:
+                continue
+            candidate = Path(directory) / name
+            try:
+                resolved = candidate.resolve(strict=True)
+            except OSError:
+                continue
+            if not resolved.is_file() or not os_access_executable(resolved):
+                continue
+            if resolved == root / name or root in resolved.parents:
+                continue
+            if active_prefix != base_prefix and (resolved == active_prefix or active_prefix in resolved.parents):
+                continue
+            return str(resolved)
+        return None
+
+    @staticmethod
+    def _configured(root: Path, ecosystem: str) -> Path | None:
+        path = root / "pyproject.toml"
+        if not path.is_file() or path.stat().st_size > 256 * 1024:
+            return None
+        try:
+            raw = tomllib.loads(path.read_text(encoding="utf-8"))
+            value = raw.get("tool", {}).get("mncs-control", {}).get("toolchain", {}).get(ecosystem)
+        except (OSError, ValueError, AttributeError):
+            return None
+        if not isinstance(value, str) or not value or Path(value).is_absolute() or ".." in Path(value).parts:
+            return None
+        return root / value
+
+    @staticmethod
+    def _safe_executable(candidate: Path, root: Path, approved_system: str | None) -> bool:
+        if not candidate.is_file() or not os_access_executable(candidate) or candidate.is_symlink() and not approved_system:
+            return False
+        try:
+            resolved = candidate.resolve(strict=True)
+            if resolved == Path(approved_system).resolve() if approved_system else False:
+                return True
+            resolved.relative_to(root)
+            return True
+        except (OSError, ValueError):
+            return False
 
 
 class ToolInventory:
@@ -76,6 +185,7 @@ class ToolInventory:
                     "version_status": selected["version_status"],
                     "diagnostic": selected.get("diagnostic"),
                     "scope": selected["scope"],
+                    "source": "project_venv" if selected["scope"] == "project" else selected["scope"],
                     "candidates": candidates,
                 }
             )
@@ -101,7 +211,8 @@ class ToolInventory:
                 continue
             for name, _args in _TOOLS:
                 candidate = bin_dir / name
-                if candidate.is_file() and os_access_executable(candidate):
+                system = shutil.which(name)
+                if candidate.is_file() and os_access_executable(candidate) and ToolchainResolver._safe_executable(candidate, project, system):
                     result.setdefault(name, []).append(candidate)
         return result
 

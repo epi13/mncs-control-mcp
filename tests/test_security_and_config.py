@@ -3,6 +3,7 @@ from __future__ import annotations
 import shutil
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -142,6 +143,47 @@ def test_legacy_fabric_registry_is_migrated_into_private_control_state(tmp_path:
     assert target.read_text(encoding="utf-8") == legacy.read_text(encoding="utf-8")
     assert (target.parent.stat().st_mode & 0o777) == 0o700
     assert (target.stat().st_mode & 0o777) == 0o600
+
+
+def test_fabric_registry_migration_is_idempotent_under_concurrency(tmp_path: Path) -> None:
+    legacy = tmp_path / ".local" / "state" / "mncs-fabric" / "workers.json"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text('{"workers": [1, 2]}\n', encoding="utf-8")
+    config = ControlConfig(
+        workspace_root=tmp_path / "projects",
+        fabric_registry=legacy,
+        fabric_state=tmp_path / "control-state" / "fabric.jsonl",
+        job_state_path=tmp_path / "control-state" / "jobs.json",
+        audit_path=tmp_path / "control-state" / "audit.jsonl",
+    )
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(lambda _item: prepare_fabric_runtime(config), range(8)))
+    assert all(item == results[0] for item in results)
+    assert results[0].read_text(encoding="utf-8") == legacy.read_text(encoding="utf-8")
+    assert not (results[0].parent / "workers.json.lock").exists()
+
+
+@pytest.mark.parametrize("kind", ["source_symlink", "target_symlink"])
+def test_fabric_registry_migration_rejects_symlinks(tmp_path: Path, kind: str) -> None:
+    legacy = tmp_path / ".local" / "state" / "mncs-fabric" / "workers.json"
+    legacy.parent.mkdir(parents=True)
+    outside = tmp_path / "outside.json"
+    outside.write_text("{}", encoding="utf-8")
+    if kind == "source_symlink":
+        legacy.symlink_to(outside)
+    config = ControlConfig(
+        workspace_root=tmp_path / "projects",
+        fabric_registry=legacy,
+        fabric_state=tmp_path / "control-state" / "fabric.jsonl",
+        job_state_path=tmp_path / "control-state" / "jobs.json",
+        audit_path=tmp_path / "control-state" / "audit.jsonl",
+    )
+    if kind == "target_symlink":
+        target = effective_fabric_registry(config)
+        target.parent.mkdir(parents=True)
+        target.symlink_to(outside)
+    with pytest.raises(ControlError):
+        prepare_fabric_runtime(config)
 
 
 @pytest.mark.skipif(shutil.which("bwrap") is None, reason="bubblewrap is not installed")

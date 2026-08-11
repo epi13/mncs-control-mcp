@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import shutil
+import time
 from pathlib import Path
 
 from .adapters import IntegrationBundle, TestAdapter
@@ -10,7 +11,8 @@ from .config import ControlConfig
 from .errors import ControlError
 from .git_adapter import GitService
 from .processes import ProcessManager
-from .sandbox import Sandbox
+from .sandbox import Sandbox, utc_now
+from .security import redact_text
 from .tooling import ProjectService
 from .workspace import WorkspacePolicy
 
@@ -105,7 +107,7 @@ class ControlPlaneService:
 
     @staticmethod
     def _integration_capability(status: dict[str, object], operations: list[str], limitation: str) -> dict[str, object]:
-        return {
+        result: dict[str, object] = {
             "available": bool(status.get("available")),
             "version": status.get("version") or status.get("package_version"),
             "supported_operations": operations,
@@ -115,6 +117,19 @@ class ControlPlaneService:
             "network_required": "dispatch" in operations,
             "local": True,
         }
+        for key in (
+            "configured",
+            "reachable",
+            "protocol",
+            "health_status",
+            "executable",
+            "config",
+            "capabilities",
+            "missing_capabilities",
+        ):
+            if key in status:
+                result[key] = status[key]
+        return result
 
     def review(self, project: str, depth: str = "standard") -> dict[str, object]:
         if depth not in {"summary", "standard", "deep"}:
@@ -208,24 +223,104 @@ class ControlPlaneService:
         node: str | None = None,
         parameters: dict[str, object] | None = None,
     ) -> dict[str, object]:
-        """Execute one of the intentionally narrow orchestration workflows."""
-        if workflow not in {"inspect_project", "check_project", "test_project", "evaluate_project", "fabric_test_project", "harness_analyze_project"}:
-            raise ControlError("INVALID_WORKFLOW", "workflow is not an approved control workflow")
-        if workflow == "inspect_project":
-            return {"workflow": workflow, "status": "completed", "result": self.review(project, profile if profile in {"summary", "standard", "deep"} else "standard")}
-        if workflow == "check_project":
-            return {"workflow": workflow, "status": "completed", "result": self.tests.check(project, profile)}
-        if workflow == "test_project":
-            return {"workflow": workflow, "status": "completed", "result": self.tests.run(project, task_type or "repository")}
-        if workflow == "evaluate_project":
-            case_study = str((parameters or {}).get("case_study", ""))
-            if not case_study:
-                raise ControlError("INVALID_INPUT", "evaluate_project requires parameters.case_study")
-            return {"workflow": workflow, "status": "completed", "result": self.integrations.forge.evaluate(project, case_study, model, profile)}
-        if workflow == "fabric_test_project":
-            return {"workflow": workflow, "status": "completed", "result": self.integrations.fabric.dispatch(task_type or "pytest", project, model, node, parameters)}
-        return {
-            "workflow": workflow,
-            "status": "not_supported",
-            "result": {"reason": "Harness exposes status and routing APIs, but no bounded project-run contract is currently public"},
+        """Execute a named, bounded workflow of approved typed operations."""
+        approved = {
+            "inspect_project": ("project_review",),
+            "check_project": ("project_check",),
+            "test_project": ("test_run",),
+            "evaluate_project": ("forge_evaluation",),
+            "fabric_test_project": ("fabric_dispatch",),
+            "harness_analyze_project": ("harness_status",),
+            "review_and_check_project": ("project_review", "test_discover", "project_check"),
+            "review_check_and_fabric_test": ("project_review", "test_discover", "project_check", "fabric_dispatch"),
         }
+        if workflow not in approved:
+            raise ControlError("INVALID_WORKFLOW", "workflow is not an approved control workflow")
+        values = parameters or {}
+        if not isinstance(values, dict) or len(values) > 32:
+            raise ControlError("INVALID_INPUT", "workflow parameters must be a bounded object")
+        workflow_id = "ctrl-run-" + str(int(time.time_ns()))
+        started_mono = time.monotonic()
+        started = utc_now()
+        records: list[dict[str, object]] = []
+        results: list[object] = []
+        failed = False
+        for index, operation in enumerate(approved[workflow], start=1):
+            step_id = f"step-{index}-{operation}"
+            step_started = utc_now()
+            step: dict[str, object] = {
+                "step_id": step_id,
+                "operation": operation,
+                "dependencies": [records[-1]["step_id"]] if records else [],
+                "status": "running",
+                "started_at": step_started,
+                "input_summary": {"project": project, "profile": profile, "task_type": task_type} if index == 1 else {"project": project},
+            }
+            if failed:
+                step.update({"status": "skipped", "skip_reason": "dependency failed", "completed_at": utc_now()})
+                records.append(step)
+                continue
+            if operation == "fabric_dispatch" and workflow == "review_check_and_fabric_test" and values.get("request_fabric") is not True:
+                step.update({"status": "skipped", "skip_reason": "Fabric dispatch requires parameters.request_fabric=true", "completed_at": utc_now()})
+                records.append(step)
+                continue
+            try:
+                timeout = values.get("timeout")
+                if operation == "project_review":
+                    result = self.review(project, profile if profile in {"summary", "standard", "deep"} else "standard")
+                elif operation == "test_discover":
+                    result = self.tests.discover(project)
+                elif operation == "project_check":
+                    result = self.tests.check(project, profile, float(timeout) if timeout is not None else None)
+                elif operation == "test_run":
+                    result = self.tests.run(project, task_type or "repository", timeout=float(timeout) if timeout is not None else None)
+                elif operation == "forge_evaluation":
+                    case_study = str(values.get("case_study", ""))
+                    if not case_study:
+                        raise ControlError("INVALID_INPUT", "evaluate_project requires parameters.case_study")
+                    result = self.integrations.forge.evaluate(project, case_study, model, profile)
+                elif operation == "fabric_dispatch":
+                    result = self.integrations.fabric.dispatch(task_type or "pytest", project, model, node, values)
+                else:
+                    result = {"status": "not_supported", "reason": "Harness exposes status and routing APIs, but no bounded project-run contract is currently public"}
+                step_status = "skipped" if isinstance(result, dict) and result.get("status") == "not_supported" else "failed" if isinstance(result, dict) and result.get("summary") == "FAIL" else "completed"
+                if step_status == "failed":
+                    failed = True
+                step.update({"status": step_status, "completed_at": utc_now(), "result_summary": self._workflow_summary(result)})
+                results.append(result)
+            except Exception as exc:
+                failed = True
+                step.update({"status": "failed", "completed_at": utc_now(), "failure": redact_text(str(exc))[:500]})
+            records.append(step)
+        overall = "failed" if failed else "partial" if any(item["status"] == "skipped" for item in records) else "completed"
+        summary: dict[str, object] = {
+            "workflow": workflow,
+            "workflow_execution_id": workflow_id,
+            "status": overall,
+            "project": project,
+            "started_at": started,
+            "completed_at": utc_now(),
+            "duration_seconds": round(time.monotonic() - started_mono, 3),
+            "steps": records,
+            "result": self._workflow_summary(results[-1]) if results else None,
+            "artifacts": [self._workflow_summary(item) for item in results if isinstance(item, dict) and item.get("artifacts")],
+            "limitations": ["Workflow output is summarized; raw runner output remains available from the underlying typed operation."],
+        }
+        control_job = self.processes.record_external("workflow_" + workflow, project=project, status=overall, result_summary=summary)
+        summary["control_job_id"] = control_job["job_id"]
+        return summary
+
+    @staticmethod
+    def _workflow_summary(value: object) -> object:
+        if isinstance(value, dict):
+            result: dict[str, object] = {}
+            for key, item in list(value.items())[:32]:
+                if key in {"stdout", "stderr", "content", "output"}:
+                    continue
+                result[str(key)] = ControlPlaneService._workflow_summary(item)
+            return result
+        if isinstance(value, list):
+            return [ControlPlaneService._workflow_summary(item) for item in value[:20]]
+        if isinstance(value, str):
+            return redact_text(value)[:500]
+        return value

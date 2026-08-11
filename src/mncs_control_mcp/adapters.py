@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import importlib
 import os
@@ -9,6 +10,7 @@ import shlex
 import shutil
 import socket
 import sys
+import threading
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -20,6 +22,8 @@ from .errors import ControlError
 from .runtime import prepare_fabric_runtime
 from .sandbox import Sandbox
 from .security import redact_text, resolve_repository, safe_host_probe_environment
+from .test_results import parse_test_output
+from .tooling import ToolchainResolver
 from .workspace import WorkspacePolicy
 
 
@@ -58,6 +62,7 @@ class TestAdapter:
         self.actions = actions
         self.policy = policy
         self.sandbox = sandbox
+        self.toolchains = ToolchainResolver()
 
     def _root(self, repository: str) -> tuple[str, Path]:
         if repository in self.config.repositories:
@@ -86,16 +91,22 @@ class TestAdapter:
             raise ControlError("REPOSITORY_MISSING", f"approved repository does not exist: {key}")
         detected = self._detected_suite(root)
         commands: list[dict[str, object]] = []
+        toolchain = self.toolchains.resolve(root, "python" if detected == "pytest" else detected) if detected else None
         if detected == "pytest":
-            commands.append({"suite": "pytest", "command": ["python", "-m", "pytest"]})
+            executable = toolchain.executable if toolchain and toolchain.executable else "python"
+            commands.append({"suite": "pytest", "command": [executable, "-m", "pytest"], "toolchain": toolchain.public() if toolchain else None})
         elif detected == "cargo":
-            commands.append({"suite": "cargo", "command": ["cargo", "test"]})
+            executable = toolchain.executable if toolchain and toolchain.executable else "cargo"
+            commands.append({"suite": "cargo", "command": [executable, "test"], "toolchain": toolchain.public() if toolchain else None})
         elif detected == "node":
-            commands.append({"suite": "node", "command": ["npm", "test", "--"]})
+            executable = toolchain.executable if toolchain and toolchain.executable else "npm"
+            commands.append({"suite": "node", "command": [executable, "test", "--"], "toolchain": toolchain.public() if toolchain else None})
         elif detected == "go":
-            commands.append({"suite": "go", "command": ["go", "test", "./..."]})
+            executable = toolchain.executable if toolchain and toolchain.executable else "go"
+            commands.append({"suite": "go", "command": [executable, "test", "./..."], "toolchain": toolchain.public() if toolchain else None})
         elif detected == "cmake":
-            commands.append({"suite": "cmake", "command": ["ctest", "--test-dir", "build"]})
+            executable = toolchain.executable if toolchain and toolchain.executable else "ctest"
+            commands.append({"suite": "cmake", "command": [executable, "--test-dir", "build"], "toolchain": toolchain.public() if toolchain else None})
         return {
             "repository": key,
             "path": str(root),
@@ -103,43 +114,34 @@ class TestAdapter:
             "supported_suites": list(self.SUITES),
             "commands": commands,
             "test_directories": [name for name in ("tests", "test", "spec") if (root / name).is_dir()],
+            "toolchain": toolchain.public() if toolchain else None,
         }
 
-    def _command(self, root: Path, suite: str, component: str | None) -> tuple[str, ...]:
+    def _command(self, root: Path, suite: str, component: str | None) -> tuple[tuple[str, ...], dict[str, object]]:
         if suite not in self.SUITES:
             raise ControlError("INVALID_TEST_SUITE", f"test suite must be one of {self.SUITES}")
         if suite == "repository":
             suite = self._detected_suite(root) or ""
             if not suite:
                 raise ControlError("TEST_SUITE_UNAVAILABLE", "no approved repository test runner was detected")
+        ecosystem = "python" if suite == "pytest" else suite
+        toolchain = self.toolchains.resolve(root, ecosystem)
+        if toolchain.executable is None:
+            raise ControlError("TOOLCHAIN_UNAVAILABLE", toolchain.diagnostic or f"{ecosystem} toolchain is unavailable")
+        executable = toolchain.executable
         if suite == "cargo":
-            return ("cargo", "test", "--", component) if component else ("cargo", "test")
+            return ((executable, "test", "--", component) if component else (executable, "test"), toolchain.public())
         if suite == "pytest":
-            return ("python", "-m", "pytest", component) if component else ("python", "-m", "pytest")
+            return ((executable, "-m", "pytest", component) if component else (executable, "-m", "pytest"), toolchain.public())
         if suite == "ruff":
-            return ("ruff", "check", component or ".")
+            return ((executable, "check", component or "."), toolchain.public())
         if suite == "node":
-            return ("npm", "test", "--", component) if component else ("npm", "test", "--")
+            return ((executable, "test", "--", component) if component else (executable, "test", "--"), toolchain.public())
         if suite == "go":
-            return ("go", "test", component or "./...")
+            return ((executable, "test", component or "./..."), toolchain.public())
         if suite == "cmake":
-            return ("ctest", "--test-dir", component or "build")
+            return ((executable, "--test-dir", component or "build"), toolchain.public())
         raise ControlError("INVALID_TEST_SUITE", f"test suite must be one of {self.SUITES}")
-
-    @staticmethod
-    def _summary(suite: str, stdout: str, stderr: str) -> dict[str, object]:
-        text = f"{stdout}\n{stderr}"
-        patterns = {
-            "passed": r"(?i)(?:passed|tests? passed)[\s:=]+(\d+)",
-            "failed": r"(?i)(?:failed|tests? failed)[\s:=]+(\d+)",
-            "skipped": r"(?i)(?:skipped|tests? skipped)[\s:=]+(\d+)",
-        }
-        result: dict[str, object] = {}
-        for name, pattern in patterns.items():
-            match = re.search(pattern, text)
-            if match:
-                result[name] = int(match.group(1))
-        return result
 
     def run(
         self,
@@ -156,12 +158,22 @@ class TestAdapter:
                 raise ControlError("INVALID_INPUT", "component must be a safe relative test selector")
         timeout_value = self.config.default_timeout_seconds if timeout is None else float(timeout)
         timeout_value = min(timeout_value, self.config.max_timeout_seconds)
-        argv = self._command(root, test_suite, component)
-        self.actions.resolve(f"test.{('cargo' if argv[0] == 'cargo' else 'pytest')}") if argv[0] in {"cargo", "python"} else None
+        argv, toolchain = self._command(root, test_suite, component)
+        if toolchain["source"] == "system":
+            argv = (Path(argv[0]).name, *argv[1:])
+        else:
+            try:
+                executable_path = Path(argv[0]).absolute()
+                relative_executable = executable_path.relative_to(root.resolve())
+            except ValueError:
+                pass
+            else:
+                argv = ("./" + relative_executable.as_posix(), *argv[1:])
+        self.actions.resolve(f"test.{('cargo' if argv[0].endswith('cargo') else 'pytest')}") if argv[0].endswith(("cargo", "python", "python3")) else None
         self_test = root.name == "mncs-control-mcp"
         command = shlex.join(argv)
         security_skips: list[dict[str, str]] = []
-        if self_test and argv[:3] == ("python", "-m", "pytest"):
+        if self_test and argv[1:3] == ("-m", "pytest"):
             command += " -m 'not requires_bwrap_namespace'"
             security_skips.append({
                 "marker": "requires_bwrap_namespace",
@@ -207,7 +219,7 @@ class TestAdapter:
             "repository": key,
             "test_suite": test_suite,
             "resolved_command": list(argv),
-            "command_identity": f"approved:{'cargo' if argv[0] == 'cargo' else 'pytest'}",
+            "command_identity": f"approved:{'cargo' if argv[1] == 'test' else 'pytest'}",
             "started_at": started,
             "completed_at": completed,
             "exit_code": returncode,
@@ -218,7 +230,8 @@ class TestAdapter:
             "duration_seconds": round(duration, 3),
             "sandbox_backend": backend,
             "summary": "PASS" if passed else "FAIL",
-            "test_counts": self._summary(test_suite, stdout, stderr),
+            "test_counts": parse_test_output(test_suite if test_suite != "repository" else self._detected_suite(root) or "", stdout, stderr),
+            "toolchain": toolchain,
             "security_tests_skipped": security_skips,
             "self_test_mode": self_test,
         }
@@ -231,7 +244,7 @@ class TestAdapter:
             raise ControlError("REPOSITORY_MISSING", f"approved repository does not exist: {key}")
         checks: list[tuple[str, str, str]] = []
         if (root / "pyproject.toml").is_file() or (root / "tests").is_dir():
-            if profile != "quick" and shutil.which("ruff"):
+            if profile != "quick" and self.toolchains.resolve(root, "ruff").executable:
                 checks.append(("lint", "ruff", "ruff check ."))
             checks.append(("tests", "pytest", "python -m pytest"))
         elif (root / "Cargo.toml").is_file():
@@ -574,11 +587,120 @@ class ForgeAdapter:
         self.config = config
         self.policy = policy
 
-    def status(self) -> dict[str, object]:
-        """Report Forge's public operation surface without evaluating a project."""
+    @staticmethod
+    async def _mcp_probe(executable: Path, config: Path) -> dict[str, object]:
+        from mcp import ClientSession, StdioServerParameters
+        from mcp.client.stdio import stdio_client
 
-        if not self.config.forge_path.is_dir():
-            return {"available": False, "status": "not_installed", "operations": []}
+        required = {
+            "mncs_forge_project_inspect",
+            "mncs_forge_providers_list",
+            "mncs_forge_capability_blockers",
+        }
+
+        def value(item: object, *names: str) -> object:
+            for name in names:
+                try:
+                    return getattr(item, name)
+                except AttributeError:
+                    continue
+            return None
+
+        def server_value(initialization: object, *names: str) -> object:
+            return value(value(initialization, "serverInfo", "server_info"), *names)
+        parameters = StdioServerParameters(
+            command=str(executable),
+            args=["--config", str(config), "--mode", "development"],
+        )
+        try:
+            async with (
+                stdio_client(parameters) as (reader, writer),
+                ClientSession(reader, writer) as session,
+            ):
+                initialization = await session.initialize()
+                tools = await session.list_tools()
+                names = {tool.name for tool in tools.tools}
+                missing = sorted(required - names)
+                if missing:
+                    return {
+                        "health_status": "capability_unavailable",
+                        "reachable": True,
+                        "missing_capabilities": missing,
+                        "server": server_value(initialization, "name"),
+                        "version": server_value(initialization, "version"),
+                        "protocol_version": value(initialization, "protocolVersion", "protocol_version"),
+                        "capabilities": sorted(names),
+                    }
+                inspection = await session.call_tool("mncs_forge_project_inspect", {})
+                if bool(value(inspection, "isError", "is_error")):
+                    return {
+                        "health_status": "capability_unavailable",
+                        "reachable": True,
+                        "diagnostic": "project inspection tool returned an MCP error",
+                        "server": server_value(initialization, "name"),
+                        "version": server_value(initialization, "version"),
+                        "protocol_version": value(initialization, "protocolVersion", "protocol_version"),
+                        "capabilities": sorted(names),
+                    }
+                return {
+                    "health_status": "healthy",
+                    "reachable": True,
+                    "server": server_value(initialization, "name"),
+                    "version": server_value(initialization, "version"),
+                    "protocol_version": value(initialization, "protocolVersion", "protocol_version"),
+                    "capabilities": sorted(names),
+                }
+        except (FileNotFoundError, PermissionError) as exc:
+            return {"health_status": "process_start_failed", "reachable": False, "diagnostic": redact_text(str(exc))}
+        except BaseException as exc:
+            return {"health_status": "mcp_initialization_failed", "reachable": False, "diagnostic": redact_text(str(exc))}
+
+    def _probe(self, executable: Path, config: Path) -> dict[str, object]:
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(self._mcp_probe(executable, config))
+
+        result: list[dict[str, object]] = []
+
+        def run_probe() -> None:
+            result.append(asyncio.run(self._mcp_probe(executable, config)))
+
+        worker = threading.Thread(target=run_probe, name="forge-mcp-health", daemon=True)
+        worker.start()
+        worker.join(timeout=30)
+        if not result:
+            return {
+                "health_status": "mcp_initialization_failed",
+                "reachable": False,
+                "diagnostic": "Forge MCP health probe timed out after 30 seconds",
+            }
+        return result[0]
+
+    def status(self) -> dict[str, object]:
+        """Report Forge configuration, MCP reachability, and public capabilities."""
+
+        executable = self.config.forge_server_path
+        forge_config = self.config.forge_probe_config
+        base: dict[str, object] = {
+            "configured": forge_config is not None and forge_config.is_file(),
+            "reachable": False,
+            "protocol": "MCP",
+            "executable": str(executable),
+            "config": str(forge_config) if forge_config else None,
+            "operations": [],
+        }
+        if not executable.is_file() or not os.access(executable, os.X_OK):
+            base.update(available=False, status="executable_missing", health_status="executable_missing")
+            return base
+        if forge_config is None or not forge_config.is_file():
+            base.update(available=False, status="configuration_missing", health_status="configuration_missing")
+            return base
+        probe = self._probe(executable, forge_config)
+        base.update(probe)
+        if probe.get("health_status") != "healthy":
+            base.update(available=False, status=str(probe["health_status"]))
+            return base
         try:
             _load_sibling_package("mncs_forge", self.config.forge_path)
             operations = importlib.import_module("mncs_forge.operations")
@@ -589,16 +711,18 @@ class ForgeAdapter:
                 for item in inventory.get("operations", [])
                 if isinstance(item, dict) and item.get("operation_id")
             )
-            return {
+            base.update({
                 "available": True,
                 "status": "available",
-                "version": getattr(importlib.import_module("mncs_forge"), "__version__", "unknown"),
+                "version": getattr(importlib.import_module("mncs_forge"), "__version__", probe.get("version", "unknown")),
                 "operations": names[:200],
                 "operation_count": len(names),
                 "authority": "Forge owns evaluation semantics, evidence, scoring, and claims",
-            }
+            })
+            return base
         except Exception as exc:
-            return {"available": False, "status": "unavailable", "operations": [], "diagnostic": redact_text(str(exc))}
+            base.update(available=False, status="library_unavailable", diagnostic=redact_text(str(exc)))
+            return base
 
     def evaluate(
         self,

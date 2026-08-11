@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from mncs_control_mcp.actions import CommandResult
+from mncs_control_mcp.actions import CommandResult, run_bounded
 from mncs_control_mcp.deployment import (
     DeploymentPaths,
     configured_runtime_key,
@@ -16,6 +16,7 @@ from mncs_control_mcp.deployment import (
 )
 from mncs_control_mcp.doctor import probe_mcp_stdio, run_doctor
 from mncs_control_mcp.security import safe_host_probe_environment
+from mncs_control_mcp.tooling import ToolchainResolver
 
 
 def test_safe_host_probe_environment_has_home_without_secrets(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -25,6 +26,17 @@ def test_safe_host_probe_environment_has_home_without_secrets(monkeypatch: pytes
     assert environment["HOME"]
     assert "AWS_SECRET_ACCESS_KEY" not in environment
     assert environment["PATH"]
+
+
+def test_generic_bounded_command_gets_minimal_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HOME", "/host-home")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "secret")
+    result = run_bounded(
+        ("python", "-c", "import os; print(os.getenv('HOME')); print(os.getenv('AWS_SECRET_ACCESS_KEY'))"),
+        timeout_seconds=2,
+    )
+    assert "/host-home" not in result.stdout
+    assert "secret" not in result.stdout
 
 
 def test_ollama_probe_receives_safe_home(monkeypatch: pytest.MonkeyPatch, config) -> None:
@@ -41,6 +53,35 @@ def test_ollama_probe_receives_safe_home(monkeypatch: pytest.MonkeyPatch, config
     adapters.OllamaAdapter(config, __import__("mncs_control_mcp.server", fromlist=["_register_actions"])._register_actions()).status()
     assert captured["HOME"]
     assert "AWS_SECRET_ACCESS_KEY" not in captured
+
+
+def test_toolchain_resolver_prefers_safe_project_venv_and_falls_back(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    project = tmp_path / "project"
+    (project / ".venv" / "bin").mkdir(parents=True)
+    python = project / ".venv" / "bin" / "python"
+    python.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    python.chmod(0o700)
+    resolved = ToolchainResolver().resolve(project, "python")
+    assert resolved.source == "project_venv"
+    assert resolved.executable == str(python)
+    outside = tmp_path / "outside-python"
+    outside.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    outside.chmod(0o700)
+    python.unlink()
+    python.symlink_to(outside)
+    fallback = ToolchainResolver().resolve(project, "python")
+    assert fallback.source in {"system", "unavailable"}
+    assert fallback.executable != str(python)
+
+
+@pytest.mark.parametrize("ecosystem", ["rust", "node", "go", "cmake"])
+def test_toolchain_resolution_reports_supported_ecosystems(tmp_path: Path, ecosystem: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    resolver = ToolchainResolver()
+    monkeypatch.setenv("PATH", str(tmp_path / "empty-bin"))
+    result = resolver.resolve(tmp_path, ecosystem)
+    assert result.ecosystem == ecosystem
+    assert result.source == "unavailable"
+    assert result.diagnostic
 
 
 def test_deployment_paths_and_unit_rendering(tmp_path: Path) -> None:

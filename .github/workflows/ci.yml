@@ -16,7 +16,29 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.8.17"
+      - run: uv lock --check
       - run: python -m pip install -e '.[dev]'
       - run: pytest
       - run: ruff check .
       - run: python -m compileall -q src
+      - run: git diff --check
+
+  bubblewrap-security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - run: sudo apt-get update && sudo apt-get install --yes bubblewrap
+      - run: python -m pip install -e '.[dev]'
+      - name: Run namespace subset when the hosted kernel permits it
+        run: |
+          if bwrap --ro-bind / / true >/dev/null 2>&1; then
+            pytest -m requires_bwrap_namespace
+          else
+            echo "SKIP: hosted runner cannot create the Bubblewrap namespace; Fedora/local security integration remains required"
+          fi

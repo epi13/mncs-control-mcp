@@ -149,20 +149,27 @@ Every Git command runs inside the same project sandbox, including repository hoo
 
 `tool_inventory` reports safe executable paths and first-line versions for common Python, Rust, Node, C/C++, Go, Java, container, shell, search, Ollama, NVIDIA/CUDA, and sandbox tools. Each entry distinguishes absent, broken, healthy, and project-local candidates; a broken global wrapper does not hide a usable project virtualenv. It does not return the environment.
 
-`project_review` provides bounded project/Git/test/CI/documentation context. `test_discover`, `test_run`, and `project_check` cover detected pytest, Cargo, Node, Go, and CTest workflows; the legacy `run_tests` name remains supported. When the control repository tests itself, Bubblewrap integration tests are marked `requires_bwrap_namespace` and reported as an explicit skip because the outer production sandbox is already the security boundary; they are not falsely reported as passing. `control_capabilities` and `laboratory_status` expose the current dependency graph and compute topology for agent planning. `control_run` composes only named workflows (`inspect_project`, `check_project`, `test_project`, `evaluate_project`, `fabric_test_project`, and the honest Harness limitation). `run_mncs_evaluation` uses Forge's current typed operation registry for declared development workflows. `dispatch_fabric_job` builds a Fabric artifact manifest, validated `mncs-fabric.job-plan.v0.1`, deterministic EA-NEXT-002 bundle, and calls `FabricClient.execute`; supported task types are `pytest`, `python`, and `cargo_test`. Fabric still owns worker discovery, admission, routing, transfer, execution, and receipts. Raw model routing is not invented at this layer; Harness remains responsible for model/agent execution.
+`project_review` provides bounded project/Git/test/CI/documentation context. `test_discover`, `test_run`, and `project_check` cover detected pytest, Cargo, Node, Go, and CTest workflows; the legacy `run_tests` name remains supported. Test operations report a structured toolchain choice: Python prefers a safe project `.venv/bin/python`/`python3`, then an explicitly declared bounded path, then the approved system interpreter; Rust, Node, Go, and CMake use the same resolver shape with approved system tools. Runner-aware parsers annotate supported output, but process exit status remains authoritative. When the control repository tests itself, Bubblewrap integration tests are marked `requires_bwrap_namespace` and reported as an explicit skip because the outer production sandbox is already the security boundary; they are not falsely reported as passing. `control_capabilities` and `laboratory_status` expose the current dependency graph and compute topology for agent planning. Their Forge entry reports `configuration_missing`, `executable_missing`, `process_start_failed`, `mcp_initialization_failed`, `capability_unavailable`, or `healthy` after a real stdio MCP probe. `control_run` composes only named workflows, including `review_and_check_project` and the opt-in `review_check_and_fabric_test`; each returns bounded step records and a persisted control ID. `run_mncs_evaluation` uses Forge's current typed operation registry for declared development workflows. `dispatch_fabric_job` builds a Fabric artifact manifest, validated `mncs-fabric.job-plan.v0.1`, deterministic EA-NEXT-002 bundle, and calls `FabricClient.execute`; supported task types are `pytest`, `python`, and `cargo_test`. Fabric still owns worker discovery, admission, routing, transfer, execution, and receipts. Raw model routing is not invented at this layer; Harness remains responsible for model/agent execution.
 
 `integration.fabric_controller_id` must equal the controller identity recorded by the chosen Fabric worker registry. The example uses `epi13-local-harness`, which is the normal Harness-owned registry identity. A mismatch is reported as unavailable rather than silently assuming another controller identity.
 
 `dispatch_fabric_job` waits for the upstream receipt by default. Set `wait=false`
 for a stable `ctrl-...` job ID, then use `control_job_status` and
-`control_job_result`; `control_job_stop` can cancel work before the local
-adapter submits it, but cannot force-kill a request already owned by Fabric.
+`control_job_result`; Control propagates the bounded job timeout into Fabric's
+validated job plan. Blocking adapters run in a supervised process, so a local
+deadline frees Control executor capacity. `control_job_stop` reports `stopped`
+before the adapter starts and `upstream_detached` after it has started; Fabric's
+current public API exposes no abort operation, so a remote request is never
+described as cancelled when Control cannot prove that. After restart,
+incomplete upstream records become `upstream_detached`. External jobs never
+expose a fabricated local PID.
 
 Fabric's mutable registry and lock files are kept under
 `~/.local/state/mncs-control-mcp/fabric/`, which is explicitly writable by the
 user service. Existing registries at the historical
 `~/.local/state/mncs-fabric/workers.json` location are copied there on first
-use; the rest of the home directory remains read-only under the service's
+use under an exclusive migration lock, unique temporary file, and atomic
+replace; the rest of the home directory remains read-only under the service's
 `ProtectHome=read-only` policy. Fabric's network ledger and bundle staging are
 also rooted in the private control-plane state tree.
 
@@ -204,7 +211,15 @@ The checked-in user-systemd unit is installed automatically by the installer. Th
 pytest
 ruff check .
 python -m compileall -q src
+uv lock --check
+git diff --check
 ```
+
+CI runs the Python 3.11/3.12/3.13 matrix, lockfile and diff checks, and a
+separate Bubblewrap namespace subset when the hosted kernel permits user
+namespaces. A hosted skip is printed explicitly; it does not claim to validate
+the Fedora kernel/security integration, which remains a local or self-hosted
+responsibility.
 
 The operational tests also cover unit rendering, private environment-file permissions and preservation, idempotent deployment helpers, and the real local MCP stdio doctor handshake. The installer itself can be rerun safely; it returns a nonzero doctor result until required tunnel credentials and profile configuration exist.
 

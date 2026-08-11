@@ -14,7 +14,7 @@ import pytest
 class StdioClient:
     def __init__(self, config_path: Path, cwd: Path) -> None:
         self.process = subprocess.Popen(
-            [shutil.which("python") or sys.executable, "-m", "mncs_control_mcp", "--config", str(config_path)],
+            [sys.executable, "-m", "mncs_control_mcp", "--config", str(config_path)],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -67,6 +67,7 @@ class StdioClient:
 @pytest.mark.skipif(shutil.which("bwrap") is None, reason="bubblewrap is not installed")
 def test_stdio_mcp_end_to_end_developer_workspace(tmp_path: Path) -> None:
     pytest.importorskip("mcp")
+    pytest.importorskip("mcp.server.fastmcp", reason="installed MCP SDK does not include the FastMCP server API")
     workspace = tmp_path / "projects"
     workspace.mkdir()
     config_path = tmp_path / "control.toml"
