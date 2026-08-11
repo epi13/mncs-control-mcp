@@ -155,6 +155,22 @@ Lingering does not manufacture an SSH agent or unlock a private key. Fully
 unattended remote Git authentication therefore still depends on the chosen agent
 and key policy.
 
+Fabric workers have the same systemd user-session consideration. For example,
+the Fedora worker `fabric-worker-01` can remain available after the enrollment
+SSH session closes only after an administrator enables lingering for its
+dedicated `fabric` account, then enables its worker unit as that account:
+
+```bash
+sudo loginctl enable-linger fabric
+systemctl --user daemon-reload
+systemctl --user enable --now mncs-fabric-worker.service
+```
+
+Do not expose the worker's user bus to arbitrary jobs or copy its private key to
+the controller. Verify the result with `loginctl show-user fabric -p Linger` and
+`systemctl --user is-active mncs-fabric-worker.service`; the controller still
+requires the enrolled mTLS certificate and current trust ledger.
+
 ## ChatGPT browser steps
 
 After `./scripts/doctor.sh` reports tunnel-client, runtime key, profile, and
@@ -185,6 +201,10 @@ use an exact pin so unavailable workers fail closed:
 ~/Documents/Projects/epi13-local-harness/.venv/bin/elh ask \
   'Compute 17 + 25 and reply with RESULT=42 plus one short explanation.' \
   --worker collamore02-windows --model-name gemma4:e4b
+~/Documents/Projects/epi13-local-harness/.venv/bin/elh models --worker fabric-worker-01 --json
+~/Documents/Projects/epi13-local-harness/.venv/bin/elh ask \
+  'Compute 17 + 25 and reply with RESULT=42 plus one short explanation.' \
+  --worker fabric-worker-01 --model-name granite3.3:2b
 ~/Documents/Projects/epi13-local-harness/.venv/bin/elh residency status
 ```
 
@@ -192,6 +212,9 @@ The expected evidence is `AVAILABLE`, a current worker observation, the selected
 worker/model, `execution_source=remote`, Fabric request/record/receipt identities,
 and residency still reporting `gemma4:e4b` loaded. Do not add
 `--allow-fallback` for an exact routing smoke test.
+For `fabric-worker-01`, the expected model is `granite3.3:2b`; its current Ollama
+capabilities are completion and tools, so Harness disables an incompatible
+thinking option while preserving the exact worker/model pin.
 
 If the tunnel is not listed, verify the workspace association and Tunnels Read +
 Use permission. If discovery fails, confirm the service is active and rerun
