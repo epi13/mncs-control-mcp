@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
 import sys
@@ -143,6 +144,50 @@ def test_legacy_fabric_registry_is_migrated_into_private_control_state(tmp_path:
     assert target.read_text(encoding="utf-8") == legacy.read_text(encoding="utf-8")
     assert (target.parent.stat().st_mode & 0o777) == 0o700
     assert (target.stat().st_mode & 0o777) == 0o600
+
+
+
+def test_legacy_fabric_trust_state_is_relocated_into_private_control_state(tmp_path: Path) -> None:
+    legacy = tmp_path / ".local" / "state" / "mncs-fabric" / "workers.json"
+    trust_state = (
+        tmp_path
+        / ".local"
+        / "state"
+        / "epi13-local-harness"
+        / "fabric-enrollment"
+        / "collamore02-windows"
+        / "trust"
+        / "controller-trust.jsonl"
+    )
+    trust_state.parent.mkdir(parents=True)
+    trust_state.write_text('{"record":{"identity":"collamore02-windows"}}\n', encoding="utf-8")
+    legacy.parent.mkdir(parents=True)
+    registry = {
+        "schema_version": "mncs-fabric.worker-registry.v0.1",
+        "controller_id": "epi13-local-harness",
+        "workers": [
+            {
+                "worker_id": "collamore02-windows",
+                "trust_state": str(trust_state),
+            }
+        ],
+    }
+    legacy.write_text(json.dumps(registry) + "\n", encoding="utf-8")
+    config = ControlConfig(
+        workspace_root=tmp_path / "projects",
+        fabric_registry=legacy,
+        fabric_state=tmp_path / "control-state" / "fabric.jsonl",
+        job_state_path=tmp_path / "control-state" / "jobs.json",
+        audit_path=tmp_path / "control-state" / "audit.jsonl",
+    )
+
+    target = prepare_fabric_runtime(config)
+    migrated = json.loads(target.read_text(encoding="utf-8"))
+    private_trust = Path(migrated["workers"][0]["trust_state"])
+    assert private_trust != trust_state
+    assert private_trust.parent == target.parent / "trust"
+    assert private_trust.read_text(encoding="utf-8") == trust_state.read_text(encoding="utf-8")
+    assert (private_trust.stat().st_mode & 0o777) == 0o600
 
 
 def test_fabric_registry_migration_is_idempotent_under_concurrency(tmp_path: Path) -> None:

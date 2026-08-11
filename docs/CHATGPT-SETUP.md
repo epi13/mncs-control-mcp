@@ -86,7 +86,10 @@ systemd unit without printing secrets.
 
 Fabric registry locks are stored at
 `~/.local/state/mncs-control-mcp/fabric/workers.json.lock`, not under the
-read-only legacy home path. `fabric_status` should therefore show the registered
+read-only legacy home path. Mutable controller-side Fabric trust ledgers
+referenced by a migrated legacy registry are also copied into
+`~/.local/state/mncs-control-mcp/fabric/trust/` and the private registry is
+rewritten to use those copies. `fabric_status` should therefore show registered
 workers even when the service runs with `ProtectHome=read-only`.
 
 Convenience commands are available through:
