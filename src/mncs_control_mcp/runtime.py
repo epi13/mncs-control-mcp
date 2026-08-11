@@ -14,7 +14,6 @@ from pathlib import Path
 
 from .config import ControlConfig
 from .errors import ControlError
-from .security import safe_host_probe_environment
 
 
 def fabric_runtime_directory(config: ControlConfig) -> Path:
@@ -73,15 +72,3 @@ def prepare_fabric_runtime(config: ControlConfig) -> Path:
         os.chmod(temporary, 0o600)
         temporary.replace(target)
     return target
-
-
-def fabric_environment(config: ControlConfig) -> dict[str, str]:
-    """Environment for trusted Fabric probes, with state rooted privately."""
-
-    runtime = fabric_runtime_directory(config)
-    return safe_host_probe_environment(
-        {
-            "XDG_STATE_HOME": str(runtime.parent),
-            "MNCS_FABRIC_STATE_DIR": str(runtime),
-        }
-    )
