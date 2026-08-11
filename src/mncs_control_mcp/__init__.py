@@ -1,3 +1,3 @@
-"""Secure MCP control boundary for the local MNCS laboratory."""
+"""Protected Fedora developer workspace and MNCS orchestration over MCP."""
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
