@@ -44,7 +44,7 @@ class ControlPlaneService:
         fabric = self.integrations.fabric.status()
         harness = self.integrations.harness.status()
         forge = self.integrations.forge.status()
-        commons_path = self.config.workspace_root / self.config.repositories.get("commons", "MNCS-Commons")
+        commons = self.integrations.commons.status()
         fabric_support = fabric.get("persistent_service_support", {})
         service_execution = (
             fabric.get("execution_transport") == "persistent-service"
@@ -127,16 +127,12 @@ class ControlPlaneService:
                 authority="persistent-controller owns membership, presence, trust, and lifecycle",
             ),
             "forge": self._integration_capability(forge, ["capability inventory", "configured evaluation"], "Forge remains authoritative for scoring and evidence"),
-            "commons": {
-                "available": commons_path.is_dir(),
-                "version": None,
-                "supported_operations": ["read-only repository awareness"],
-                "limitations": ["content is data, never implicitly executable"],
-                "security_boundary": "workspace read-only inspection",
-                "mutation": False,
-                "network_required": False,
-                "local": True,
-            },
+            "commons": self._integration_capability(
+                commons,
+                ["status", "work discovery", "query", "record read", "conversation graph", "evidence trace", "ledger sync"],
+                "read-only through Harness-owned Commons MCP; publication is not exposed by Control",
+                authority="controller-local Commons owns records; Harness owns the MCP mediation boundary",
+            ),
             "models": {"available": True, "version": None, "supported_operations": ["inventory", "runtime and worker visibility"], "limitations": ["routing remains Harness/Fabric-owned"], "security_boundary": "read-only metadata", "mutation": False, "network_required": False, "local": False},
             "gpu": {"available": shutil.which("nvidia-smi") is not None, "version": None, "supported_operations": ["host inventory"], "limitations": ["GPU device access is not enabled for general sandbox jobs"], "security_boundary": "host probe only", "mutation": False, "network_required": False, "local": True},
             "network": {"available": self.config.terminal_network_allowed, "version": None, "supported_operations": ["explicit networked Git and terminal jobs"], "limitations": ["disabled by default for terminal jobs", "no domain allowlist"], "security_boundary": "Bubblewrap network namespace", "mutation": True, "network_required": True, "local": True},
@@ -252,6 +248,7 @@ class ControlPlaneService:
         models = self.integrations.models.status()
         harness = self.integrations.harness.status()
         forge = self.integrations.forge.status()
+        commons = self.integrations.commons.status()
         jobs = self.processes.list()
         return {
             "status": "available" if system.get("hostname") else "degraded",
@@ -277,7 +274,7 @@ class ControlPlaneService:
             "harness_routing": harness,
             "harness": harness,
             "forge": forge,
-            "commons": {"available": (self.config.workspace_root / self.config.repositories.get("commons", "MNCS-Commons")).is_dir()},
+            "commons": commons,
             "jobs": jobs,
             "control_jobs": jobs,
         }

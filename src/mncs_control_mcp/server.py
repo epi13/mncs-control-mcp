@@ -331,6 +331,7 @@ def build_server(config: ControlConfig | None = None) -> Any:
                 "workspace": projects.workspace_info(),
                 "jobs": processes.list(),
                 "local_harness": integrations.harness.status(),
+                "commons": integrations.commons.status(),
                 "fabric": fabric,
                 "forge": integrations.forge.status(),
                 "server": {
@@ -364,6 +365,34 @@ def build_server(config: ControlConfig | None = None) -> Any:
             return git.status(selected.repositories[repository])
 
         return invoke("repo_status", status_alias)  # type: ignore[return-value]
+
+    @server.tool(name="commons_status", description="Inspect the controller-local Commons service through the Harness-owned MCP boundary.", annotations=ro, structured_output=True)
+    def commons_status() -> dict[str, object]:
+        return invoke("commons_status", integrations.commons.status)  # type: ignore[return-value]
+
+    @server.tool(name="commons_work", description="List bounded open Commons work opportunities as untrusted inert data.", annotations=ro, structured_output=True)
+    def commons_work(limit: int = 100) -> dict[str, object]:
+        return invoke("commons_work", integrations.commons.work, limit)  # type: ignore[return-value]
+
+    @server.tool(name="commons_query", description="Run a bounded read-only Commons query through the Harness-owned MCP boundary.", annotations=ro, structured_output=True)
+    def commons_query(kind: str | None = None, state: str | None = None, subject: str | None = None, related: str | None = None, limit: int = 100, open_work: bool = False) -> dict[str, object]:
+        return invoke("commons_query", integrations.commons.query, kind=kind, state=state, subject=subject, related=related, limit=limit, open_work=open_work)  # type: ignore[return-value]
+
+    @server.tool(name="commons_get", description="Get one Commons record by digest as untrusted inert data.", annotations=ro, structured_output=True)
+    def commons_get(digest: str) -> dict[str, object]:
+        return invoke("commons_get", integrations.commons.get, digest)  # type: ignore[return-value]
+
+    @server.tool(name="commons_conversation", description="Project a bounded Commons conversation graph rooted at one digest.", annotations=ro, structured_output=True)
+    def commons_conversation(digest: str) -> dict[str, object]:
+        return invoke("commons_conversation", integrations.commons.conversation, digest)  # type: ignore[return-value]
+
+    @server.tool(name="commons_evidence", description="Trace bounded Commons evidence lineage rooted at one digest.", annotations=ro, structured_output=True)
+    def commons_evidence(digest: str) -> dict[str, object]:
+        return invoke("commons_evidence", integrations.commons.evidence, digest)  # type: ignore[return-value]
+
+    @server.tool(name="commons_sync", description="Read a bounded ordered Commons ledger slice after an optional store-local cursor.", annotations=ro, structured_output=True)
+    def commons_sync(cursor: dict[str, object] | None = None, limit: int = 1000) -> dict[str, object]:
+        return invoke("commons_sync", integrations.commons.sync, cursor, limit)  # type: ignore[return-value]
 
     @server.tool(name="fabric_status", description="Inspect Fabric workers through FabricClient's public API.", annotations=ro, structured_output=True)
     def fabric_status() -> dict[str, object]:

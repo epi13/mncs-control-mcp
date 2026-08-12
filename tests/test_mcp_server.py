@@ -111,7 +111,10 @@ audit_path = {str(tmp_path / 'state' / 'audit.jsonl')!r}
             "workspace_info", "list_projects", "file_write", "file_read", "terminal_exec",
             "terminal_start", "git_status", "git_commit", "tool_inventory", "fabric_status",
             "control_capabilities", "project_review", "control_job_status", "control_job_result",
+            "commons_status", "commons_work", "commons_query", "commons_get",
+            "commons_conversation", "commons_evidence", "commons_sync",
         } <= names
+        assert "commons_publish" not in names
         terminal = next(item for item in tools if item["name"] == "terminal_exec")
         assert terminal["annotations"]["destructiveHint"] is True
         assert terminal["annotations"]["openWorldHint"] is True
@@ -208,6 +211,9 @@ fabric_execution_mode = "unavailable-until-service-support"
         assert {"control_capabilities", "fabric_status", "laboratory_status", "workspace_info", "list_projects", "dispatch_fabric_job"} <= set(by_name)
         assert not any("fabric_admin" in name or name.startswith("fabric_enrollment_") or name.startswith("fabric_worker_revoke") for name in by_name)
         assert by_name["fabric_status"]["annotations"]["readOnlyHint"] is True
+        assert by_name["commons_status"]["annotations"]["readOnlyHint"] is True
+        assert by_name["commons_query"]["annotations"]["readOnlyHint"] is True
+        assert not any(name.startswith("commons_publish") for name in by_name)
         assert by_name["file_delete"]["annotations"]["destructiveHint"] is True
         assert by_name["git_fetch"]["annotations"]["openWorldHint"] is True
         assert by_name["dispatch_fabric_job"]["annotations"]["readOnlyHint"] is False

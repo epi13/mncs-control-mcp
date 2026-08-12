@@ -3,12 +3,14 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import importlib
+import json
 import os
 import platform
 import re
 import shlex
 import shutil
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -453,6 +455,150 @@ class HarnessAdapter:
             }
         except Exception as exc:
             return {"available": False, "status": "unavailable", "diagnostic": redact_text(str(exc))}
+
+
+class CommonsAdapter:
+    """Read-only Control facade over the Harness-owned Commons operator CLI.
+
+    The Harness venv is the dependency boundary for Commons/MCP. Control never
+    imports Commons records as executable content and never exposes publication
+    through this adapter.
+    """
+
+    MAX_TEXT_ARGUMENT = 4096
+    MAX_CURSOR_BYTES = 64 * 1024
+    MAX_LIMIT = 1000
+
+    def __init__(self, config: ControlConfig) -> None:
+        self.config = config
+
+    @property
+    def executable(self) -> Path:
+        return self.config.harness_path / ".venv" / "bin" / "elh"
+
+    def _base_argv(self) -> list[str]:
+        executable = self.executable
+        if not executable.is_file() or not os.access(executable, os.X_OK):
+            raise ControlError(
+                "COMMONS_HARNESS_UNAVAILABLE",
+                "Harness CLI executable is unavailable; install the Harness venv before using Commons",
+            )
+        argv = [str(executable)]
+        if self.config.harness_config is not None:
+            argv.extend(["--config", str(self.config.harness_config)])
+        argv.append("commons")
+        return argv
+
+    def _run(self, operation: str, arguments: list[str] | None = None) -> dict[str, object]:
+        argv = [*self._base_argv(), operation, *(arguments or []), "--json"]
+        try:
+            completed = subprocess.run(
+                argv,
+                cwd=self.config.harness_path,
+                capture_output=True,
+                text=True,
+                timeout=45,
+                check=False,
+                env=safe_host_probe_environment(),
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise ControlError("COMMONS_HARNESS_UNAVAILABLE", redact_text(str(exc))) from exc
+        stdout = completed.stdout.strip()
+        if completed.returncode != 0:
+            diagnostic = completed.stderr.strip() or stdout or "Harness Commons command failed"
+            raise ControlError("COMMONS_REQUEST_FAILED", redact_text(diagnostic[:2000]))
+        if len(stdout.encode("utf-8")) > self.config.max_response_bytes:
+            raise ControlError("COMMONS_RESPONSE_OVERSIZED", "Commons response exceeded Control policy")
+        try:
+            payload = json.loads(stdout)
+        except json.JSONDecodeError as exc:
+            raise ControlError("COMMONS_RESPONSE_MALFORMED", "Harness Commons output was not JSON") from exc
+        if not isinstance(payload, dict):
+            raise ControlError("COMMONS_RESPONSE_MALFORMED", "Harness Commons output was not an object")
+        payload.setdefault("content_trust", "UNTRUSTED")
+        return payload
+
+    @classmethod
+    def _text(cls, value: str | None, name: str) -> str | None:
+        if value is None:
+            return None
+        if not value or len(value) > cls.MAX_TEXT_ARGUMENT or "\x00" in value:
+            raise ControlError("INVALID_INPUT", f"{name} must be bounded non-empty text")
+        return value
+
+    @classmethod
+    def _limit(cls, value: int) -> int:
+        if not 1 <= int(value) <= cls.MAX_LIMIT:
+            raise ControlError("INVALID_INPUT", f"limit must be between 1 and {cls.MAX_LIMIT}")
+        return int(value)
+
+    def status(self) -> dict[str, object]:
+        try:
+            payload = self._run("status")
+            return {
+                "available": bool(payload.get("ready")),
+                "reachable": bool(payload.get("ready")),
+                "status": "available" if payload.get("ready") else "unavailable",
+                "transport": "harness-stdio-mcp",
+                "authority": "controller-local Commons through Harness",
+                **payload,
+            }
+        except ControlError as exc:
+            return {
+                "available": False,
+                "reachable": False,
+                "status": "unavailable",
+                "ready": False,
+                "code": exc.code,
+                "transport": "harness-stdio-mcp",
+                "content_trust": "UNTRUSTED",
+                "diagnostic": redact_text(exc.message),
+            }
+
+    def work(self, limit: int = 100) -> dict[str, object]:
+        return self._run("work", ["--limit", str(self._limit(limit))])
+
+    def query(
+        self,
+        *,
+        kind: str | None = None,
+        state: str | None = None,
+        subject: str | None = None,
+        related: str | None = None,
+        limit: int = 100,
+        open_work: bool = False,
+    ) -> dict[str, object]:
+        argv: list[str] = ["--limit", str(self._limit(limit))]
+        for flag, value, name in (
+            ("--kind", kind, "kind"),
+            ("--state", state, "state"),
+            ("--subject", subject, "subject"),
+            ("--related", related, "related"),
+        ):
+            bounded = self._text(value, name)
+            if bounded is not None:
+                argv.extend([flag, bounded])
+        if open_work:
+            argv.append("--open-work")
+        return self._run("query", argv)
+
+    def get(self, digest: str) -> dict[str, object]:
+        return self._run("get", [self._text(digest, "digest") or ""])
+
+    def conversation(self, digest: str) -> dict[str, object]:
+        return self._run("conversation", [self._text(digest, "digest") or ""])
+
+    def evidence(self, digest: str) -> dict[str, object]:
+        return self._run("evidence", [self._text(digest, "digest") or ""])
+
+    def sync(self, cursor: dict[str, object] | None = None, limit: int = 1000) -> dict[str, object]:
+        argv = ["--limit", str(self._limit(limit))]
+        if cursor is not None:
+            encoded = json.dumps(cursor, sort_keys=True, separators=(",", ":"))
+            if len(encoded.encode("utf-8")) > self.MAX_CURSOR_BYTES:
+                raise ControlError("INVALID_INPUT", "cursor exceeds the configured bound")
+            argv.extend(["--cursor", encoded])
+        return self._run("sync", argv)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1014,6 +1160,7 @@ class IntegrationBundle:
         self.ollama = ollama
         self.system = SystemAdapter(config, actions, ollama)
         self.harness = HarnessAdapter(config)
+        self.commons = CommonsAdapter(config)
         self.fabric = fabric
         self.models = ModelAdapter(config, ollama, fabric)
         self.forge = ForgeAdapter(config, policy)
