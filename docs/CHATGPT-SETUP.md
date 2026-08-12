@@ -84,15 +84,15 @@ the required tool set. It reports missing tunnel-client, missing keys, profile
 doctor failures, SSH-agent state, Fabric/Harness/Forge, Ollama, CUDA, and the
 systemd unit without printing secrets.
 
-Fabric registry locks are stored at
-`~/.local/state/mncs-control-mcp/fabric/workers.json.lock`, not under the
-read-only legacy home path. Mutable controller-side Fabric trust ledgers
-referenced by a migrated legacy registry are also copied into
-`~/.local/state/mncs-control-mcp/fabric/trust/` and the private registry is
-rewritten to use those copies. `fabric_status` should therefore show registered
-workers even when the service runs with `ProtectHome=read-only`; each status call
-also performs an authenticated worker refresh so availability and resource
-observations are current rather than registry-only.
+In the intended service configuration, Control connects to the Fabric-owned
+consumer socket at `~/.local/state/mncs-fabric/controller.sock`. It does not
+copy a registry or trust ledgers, does not need worker certificates, and does
+not connect to the admin socket. `fabric_status` reports controller connection,
+fleet authority, worker observations, and the current execution transport.
+Fabric 0.2.0a15 supports fleet reads but not persistent execution dispatch, so
+`dispatch_fabric_job` reports `FABRIC_SERVICE_EXECUTION_UNSUPPORTED`; select
+explicit transitional mode only when direct embedded execution compatibility is
+intended.
 
 Convenience commands are available through:
 

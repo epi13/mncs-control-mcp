@@ -8,17 +8,25 @@ These adapters were reviewed against the sibling sources present in `$HOME/Docum
 
 ## Fabric
 
-`mncs-fabric` 0.2.0a13 exposes the stable `FabricClient`, registry loading, worker observations, `build_manifest`, `validate_job_plan`, deterministic `build_bundle_archive`, and `execute`. MNCS Control now constructs these public artifacts for `pytest`, `python`, and `cargo_test` tasks and delegates worker selection, capability admission, native bundle transfer, execution, receipts, and reconciliation to Fabric.
+`mncs-fabric` 0.2.0a15 is the persistent fleet and controller authority. It
+owns durable lifecycle/membership state, the foreground controller runtime,
+worker presence, the consumer AF_UNIX socket, and the separate local operator
+socket. Ordinary consumers use `FabricClient.connect()`; `FabricAdminClient`
+is reserved for local operator code and is not used by MNCS Control.
 
-The adapter passes Fabric a private control-plane registry path. This avoids
-Fabric's registry lock being created below the service's read-only real home;
-the legacy registry is migrated into that path without copying lock files.
-Fabric's public client accepts validated job-plan `timeout_seconds` and its
-transport/worker configuration has bounded control and execution timeouts, but
-the checked-out client exposes no abort or polling API that Control can invoke.
-Control therefore supervises its blocking adapter call, propagates the job
-deadline into the Fabric plan, and reports `upstream_detached` when local
-cancellation cannot establish remote cancellation.
+The current public consumer boundary supports controller and fleet reads through
+`controller_status()`, `fleet()`, `fleet_status()`, and `workers()`. Fabric's
+public contract does not yet advertise persistent execution or capability
+ingestion, so Control reports `FABRIC_SERVICE_EXECUTION_UNSUPPORTED` instead of
+creating an embedded execution client in service mode. `transitional` mode may
+use a separately marked embedded-direct compatibility client for bounded
+execution while persistent Fabric remains fleet authority. This path is
+temporary and does not grant Control the admin socket.
+
+The `embedded` mode remains for isolated tests and deployments. Only that
+explicit compatibility mode prepares/loads the legacy worker registry and
+trust references. Service mode never copies `workers.json`, trust state,
+certificates, or private keys into Control state.
 
 The adapter does not turn a caller string into Fabric remote shell. Python scripts must exist in the selected artifact tree; pytest/cargo entrypoints are fixed task families. Fabric bundle limits and symlink rules remain authoritative. The optional MCP `model` field is reported but not used to invent model-placement semantics; Harness owns model routing.
 

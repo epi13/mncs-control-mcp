@@ -169,6 +169,11 @@ def prepare_fabric_runtime(config: ControlConfig) -> Path:
     to be used by other local Fabric tooling.
     """
 
+    if config.fabric_mode == "service":
+        raise ControlError(
+            "FABRIC_SERVICE_NO_PRIVATE_REGISTRY",
+            "persistent Fabric service mode owns the registry; Control must not prepare a private copy",
+        )
     target = effective_fabric_registry(config)
     if target.exists() and target.is_symlink():
         raise ControlError("FABRIC_REGISTRY_INVALID", "private Fabric registry may not be a symlink")

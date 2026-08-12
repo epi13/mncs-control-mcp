@@ -44,13 +44,14 @@ upstream job has a local PID. A restart marks incomplete upstream metadata as
 
 ## Integration runtime state
 
-Mutable integration state is not placed in the real home directory. Fabric's
-registry, lock, network ledger, and bundle staging use the private
+Mutable integration state is not placed in the real home directory. In explicit
+embedded/transitional compatibility mode, the legacy Fabric registry, lock,
+network ledger, and bundle staging use the private
 `~/.local/state/mncs-control-mcp/fabric/` tree, which is one of the narrowly
-allowed service write paths. A legacy Fabric registry is migrated by copying
-only its bounded JSON document under an exclusive file lock, a unique fsynced
-temporary file, and atomic replacement; lock files are recreated in the private
-tree.
+allowed service write paths. Service mode does not create or migrate that
+registry: the persistent Fabric controller owns it. A legacy registry is copied
+only when compatibility mode is explicitly selected, under an exclusive file
+lock, a unique fsynced temporary file, and atomic replacement.
 The sandbox also has an internal runtime-mount hook restricted to control-plane
 state directories, so future approved integrations can receive one writable
 directory without making `$HOME`, `.ssh`, `.config`, or `/run/user` writable.
@@ -62,6 +63,22 @@ until an explicit, least-privilege adapter exists.
 Audit JSONL lives outside the workspace, mode 0600 under a 0700 directory. It contains bounded/redacted metadata, not full file contents or environment data. Generic workspace tools cannot address it.
 
 ## Persistent service boundary
+
+### Fabric consumer boundary
+
+MNCS Control is an ordinary persistent Fabric consumer. It connects only to
+the configured consumer socket and never imports or connects to
+`FabricAdminClient` or the operator/admin socket. MCP access therefore does not
+grant enrollment-token creation, enrollment approval/denial, worker revocation,
+or other Fabric administrative authority. Service mode requires neither worker
+certificates nor private keys. Fabric owns fleet membership, presence, trust,
+and registry state; Control reports those observations without copying them into
+private Control state.
+
+The current Fabric service exposes fleet reads but not execution dispatch.
+Control fails closed with `FABRIC_SERVICE_EXECUTION_UNSUPPORTED`. Direct
+execution is available only under an explicit `embedded` or `transitional`
+configuration and is labeled in returned results.
 
 The user service runs `tunnel-client`, which owns the MCP stdio child. It uses
 absolute repository/virtualenv paths, a filtered PATH, `ProtectSystem=strict`,

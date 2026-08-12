@@ -20,10 +20,19 @@ developer workspace   MNCS adapters
  |  +-------- Bash    `-- Ollama/models
  `----------- files
               |
-          Bubblewrap
+         Bubblewrap
               |
          /workspace only
 ```
+
+Fabric integration is a consumer boundary: the persistent
+`mncs-fabric-controller.service` owns fleet lifecycle and worker presence;
+Control reads the same consumer AF_UNIX socket as Local Harness. Service mode
+does not copy a worker registry or trust material and does not expose Fabric
+administration. Fabric 0.2.0a15 does not yet dispatch execution over that
+socket, so Control reports the limitation explicitly. Select `transitional`
+only when bounded embedded-direct execution compatibility is intentionally
+configured.
 
 The MCP registration layer is intentionally thin. `WorkspacePolicy` owns path authorization; `Sandbox` constructs the Linux namespace; `FileService`, `GitService`, `ProcessManager`, `ProjectService`, `ToolInventory`, and `AuditLog` own cohesive capabilities. Harness remains the agent/model layer, Fabric remains the distributed execution and routing authority, and Forge remains the evaluation/evidence authority.
 
@@ -168,9 +177,9 @@ Every Git command runs inside the same project sandbox, including repository hoo
 
 `tool_inventory` reports safe executable paths and first-line versions for common Python, Rust, Node, C/C++, Go, Java, container, shell, search, Ollama, NVIDIA/CUDA, and sandbox tools. Each entry distinguishes absent, broken, healthy, and project-local candidates; a broken global wrapper does not hide a usable project virtualenv. It does not return the environment.
 
-`project_review` provides bounded project/Git/test/CI/documentation context. `test_discover`, `test_run`, and `project_check` cover detected pytest, Cargo, Node, Go, and CTest workflows; the legacy `run_tests` name remains supported. Test operations report a structured toolchain choice: Python prefers a safe project `.venv/bin/python`/`python3`, then an explicitly declared bounded path, then the approved system interpreter; Rust, Node, Go, and CMake use the same resolver shape with approved system tools. Runner-aware parsers annotate supported output, but process exit status remains authoritative. When the control repository tests itself, Bubblewrap integration tests are marked `requires_bwrap_namespace` and reported as an explicit skip because the outer production sandbox is already the security boundary; they are not falsely reported as passing. `control_capabilities` and `laboratory_status` expose the current dependency graph and compute topology for agent planning. Their Forge entry reports `configuration_missing`, `executable_missing`, `process_start_failed`, `mcp_initialization_failed`, `capability_unavailable`, or `healthy` after a real stdio MCP probe. `control_run` composes only named workflows, including `review_and_check_project` and the opt-in `review_check_and_fabric_test`; each returns bounded step records and a persisted control ID. `run_mncs_evaluation` uses Forge's current typed operation registry for declared development workflows. `dispatch_fabric_job` builds a Fabric artifact manifest, validated `mncs-fabric.job-plan.v0.1`, deterministic EA-NEXT-002 bundle, and calls `FabricClient.execute`; supported task types are `pytest`, `python`, and `cargo_test`. Fabric still owns worker discovery, admission, routing, transfer, execution, and receipts. Raw model routing is not invented at this layer; Harness remains responsible for model/agent execution.
+`project_review` provides bounded project/Git/test/CI/documentation context. `test_discover`, `test_run`, and `project_check` cover detected pytest, Cargo, Node, Go, and CTest workflows; the legacy `run_tests` name remains supported. Test operations report a structured toolchain choice: Python prefers a safe project `.venv/bin/python`/`python3`, then an explicitly declared bounded path, then the approved system interpreter; Rust, Node, Go, and CMake use the same resolver shape with approved system tools. Runner-aware parsers annotate supported output, but process exit status remains authoritative. When the control repository tests itself, Bubblewrap integration tests are marked `requires_bwrap_namespace` and reported as an explicit skip because the outer production sandbox is already the security boundary; they are not falsely reported as passing. `control_capabilities` and `laboratory_status` expose the current dependency graph and compute topology for agent planning. Their Forge entry reports `configuration_missing`, `executable_missing`, `process_start_failed`, `mcp_initialization_failed`, `capability_unavailable`, or `healthy` after a real stdio MCP probe. `control_run` composes only named workflows, including `review_and_check_project` and the opt-in `review_check_and_fabric_test`; each returns bounded step records and a persisted control ID. `run_mncs_evaluation` uses Forge's current typed operation registry for declared development workflows. `dispatch_fabric_job` uses explicit embedded/transitional compatibility execution only; service mode returns `FABRIC_SERVICE_EXECUTION_UNSUPPORTED` because Fabric 0.2.0a15 exposes fleet reads but not persistent execution dispatch. Fabric owns fleet authority; Harness owns model/agent routing.
 
-`integration.fabric_controller_id` must equal the controller identity recorded by the chosen Fabric worker registry. The example uses `epi13-local-harness`, which is the normal Harness-owned registry identity. A mismatch is reported as unavailable rather than silently assuming another controller identity.
+Service mode configures `integration.fabric_socket` and an ordinary consumer identity. It does not require a Control-owned registry, controller lifecycle, or worker trust material. `fabric_controller_id` remains only for explicit embedded compatibility.
 
 `dispatch_fabric_job` waits for the upstream receipt by default. Set `wait=false`
 for a stable `ctrl-...` job ID, then use `control_job_status` and
@@ -183,14 +192,10 @@ described as cancelled when Control cannot prove that. After restart,
 incomplete upstream records become `upstream_detached`. External jobs never
 expose a fabricated local PID.
 
-Fabric's mutable registry and lock files are kept under
-`~/.local/state/mncs-control-mcp/fabric/`, which is explicitly writable by the
-user service. Existing registries at the historical
-`~/.local/state/mncs-fabric/workers.json` location are copied there on first
-use under an exclusive migration lock, unique temporary file, and atomic
-replace; the rest of the home directory remains read-only under the service's
-`ProtectHome=read-only` policy. Fabric's network ledger and bundle staging are
-also rooted in the private control-plane state tree.
+Only explicit embedded/transitional compatibility uses the private Control
+Fabric state tree for registry migration, network ledger, and bundle staging.
+Service mode reads the Fabric-owned consumer socket and leaves those files under
+the persistent Fabric controller's authority.
 
 `file_patch` intentionally accepts standard Git-style unified diffs. Include
 both `--- a/path` and `+++ b/path` headers; an error response explains this
