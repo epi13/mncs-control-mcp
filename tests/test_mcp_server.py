@@ -6,6 +6,8 @@ import select
 import shutil
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -20,7 +22,12 @@ class StdioClient:
             stderr=subprocess.PIPE,
             text=True,
             cwd=cwd,
-            env={**os.environ, "PYTHONPATH": str(cwd / "src")},
+            env={
+                **os.environ,
+                "PYTHONPATH": os.pathsep.join(
+                    [str(cwd / "src"), str(cwd.parent / "mncs-fabric" / "src")]
+                ),
+            },
         )
         self.next_id = 1
 
@@ -131,3 +138,99 @@ audit_path = {str(tmp_path / 'state' / 'audit.jsonl')!r}
         assert not (workspace / "e2e").exists()
     finally:
         client.close()
+
+
+def test_stdio_mcp_protocol_reads_persistent_fabric_without_admin_surface(tmp_path: Path) -> None:
+    pytest.importorskip("mcp")
+    pytest.importorskip("mcp.server.fastmcp", reason="installed MCP SDK does not include the FastMCP server API")
+    fabric_source = Path(__file__).parents[2] / "mncs-fabric" / "src"
+    if not fabric_source.is_dir():
+        pytest.skip("sibling mncs-fabric source checkout is required")
+    sys.path.insert(0, str(fabric_source))
+    from mncs_fabric.controller_service import ControllerConfig, ControllerService
+
+    workspace = tmp_path / "projects"
+    workspace.mkdir()
+    socket_path = tmp_path / "controller.sock"
+    service = ControllerService(
+        ControllerConfig(
+            "mcp-protocol-fixture",
+            tmp_path / "lifecycle.jsonl",
+            service_log=tmp_path / "service.jsonl",
+            socket_path=socket_path,
+            admin_socket_path=tmp_path / "controller-admin.sock",
+        )
+    )
+    thread = threading.Thread(target=service.run, kwargs={"max_seconds": 30.0}, daemon=True)
+    thread.start()
+    for _ in range(100):
+        if socket_path.is_socket():
+            break
+        time.sleep(0.02)
+    else:
+        service.request_stop()
+        thread.join(timeout=3)
+        pytest.fail("temporary Fabric consumer socket did not start")
+    config_path = tmp_path / "control.toml"
+    config_path.write_text(
+        f"""
+[workspace]
+root = {str(workspace)!r}
+[sandbox]
+backend = "none"
+require_real_sandbox = false
+home = {str(tmp_path / 'sandbox-home')!r}
+[server]
+audit_path = {str(tmp_path / 'state' / 'audit.jsonl')!r}
+[terminal]
+job_state_path = {str(tmp_path / 'state' / 'jobs.json')!r}
+[integration]
+fabric_mode = "service"
+fabric_socket = {str(socket_path)!r}
+fabric_execution_mode = "unavailable-until-service-support"
+""",
+        encoding="utf-8",
+    )
+    client = StdioClient(config_path, Path(__file__).parents[1])
+    try:
+        initialized = client.request(
+            "initialize",
+            {
+                "protocolVersion": "2025-11-25",
+                "capabilities": {},
+                "clientInfo": {"name": "persistent-fabric-test", "version": "1"},
+            },
+        )
+        assert initialized["serverInfo"]["name"] == "mncs-control-mcp"
+        client.notify("notifications/initialized", {})
+        tools = client.request("tools/list", {})["tools"]
+        by_name = {item["name"]: item for item in tools}
+        assert {"control_capabilities", "fabric_status", "laboratory_status", "workspace_info", "list_projects", "dispatch_fabric_job"} <= set(by_name)
+        assert not any("fabric_admin" in name or name.startswith("fabric_enrollment_") or name.startswith("fabric_worker_revoke") for name in by_name)
+        assert by_name["fabric_status"]["annotations"]["readOnlyHint"] is True
+        assert by_name["file_delete"]["annotations"]["destructiveHint"] is True
+        assert by_name["git_fetch"]["annotations"]["openWorldHint"] is True
+        assert by_name["dispatch_fabric_job"]["annotations"]["readOnlyHint"] is False
+        assert client.call("workspace_info", {})["root"] == str(workspace)
+        assert isinstance(client.call("list_projects", {})["projects"], list)
+        capabilities = client.call("control_capabilities", {})
+        assert capabilities["server"]["fabric_mode"] == "service"
+        assert capabilities["fabric"]["authority"].startswith("persistent-controller")
+        status = client.call("fabric_status", {})
+        assert status["controller_connected"] is True
+        assert status["fleet_authority"] == "persistent-controller"
+        assert status["execution_transport"] == "unsupported"
+        laboratory = client.call("laboratory_status", {})
+        assert laboratory["fabric_controller"]["connected"] is True
+        dispatch = client.call("dispatch_fabric_job", {"task_type": "pytest", "project": "missing"})
+        assert dispatch["error"] == "FABRIC_SERVICE_EXECUTION_UNSUPPORTED"
+        smuggled = client.call(
+            "control_run",
+            {"workflow": "fabric_admin", "project": "missing", "parameters": {"operation": "enrollment.create"}},
+        )
+        assert smuggled["error"] == "INVALID_WORKFLOW"
+        assert "fabric_admin" not in json.dumps(by_name["terminal_exec"], sort_keys=True)
+    finally:
+        client.close()
+        service.request_stop()
+        thread.join(timeout=3)

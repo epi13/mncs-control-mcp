@@ -64,13 +64,15 @@ class ControlConfig:
     fabric_state: Path = field(
         default_factory=lambda: Path.home() / ".local" / "state" / "mncs-control-mcp" / "fabric.jsonl"
     )
-    fabric_mode: str = "embedded"
+    # Persistent Fabric is the production ownership model. Embedded Fabric is
+    # an explicit compatibility choice for isolated tests/deployments.
+    fabric_mode: str = "service"
     fabric_socket: Path = field(
         default_factory=lambda: Path.home() / ".local" / "state" / "mncs-fabric" / "controller.sock"
     )
     fabric_service_timeout_seconds: float = 5.0
     fabric_consumer_identity: str = "mncs-control-mcp"
-    fabric_execution_mode: str = "embedded-direct"
+    fabric_execution_mode: str = "unavailable-until-service-support"
     fabric_controller_id: str = "epi13-local-harness"
     forge_config_name: str = "mncs-forge.toml"
     forge_mcp_executable: Path | None = None

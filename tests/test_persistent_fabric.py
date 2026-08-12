@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import threading
 import time
 from dataclasses import replace
@@ -8,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from mncs_control_mcp.adapters import FabricAdapter
-from mncs_control_mcp.config import load_config
+from mncs_control_mcp.config import ControlConfig, load_config
 from mncs_control_mcp.errors import ControlError
 from mncs_control_mcp.runtime import prepare_fabric_runtime
 
@@ -59,7 +60,7 @@ root = "projects"
 
 [integration]
 fabric_mode = "service"
-        fabric_socket = "__SOCKET__"
+fabric_socket = "__SOCKET__"
 fabric_execution_mode = "unavailable-until-service-support"
         """.strip().replace("__SOCKET__", str(tmp_path / "controller.sock")),
         encoding="utf-8",
@@ -90,6 +91,8 @@ def test_service_status_reads_persistent_fleet_and_closes_only_consumer(
     assert status["persistent_service_support"]["persistent_fleet_read"] is True
     assert status["fleet_count"] == 0
     assert service.status()["service_runtime"] == "RUNNING"
+    assert status["controller_version"] == service.status()["fabric_version"]
+    assert status["controller_contract_identity"] == service.status()["public_contract_identity"]
 
 
 def test_service_dispatch_fails_explicitly_without_fallback(config, persistent_service) -> None:
@@ -100,11 +103,25 @@ def test_service_dispatch_fails_explicitly_without_fallback(config, persistent_s
         FabricAdapter(consumer_config).dispatch("pytest", "fixture")
 
     assert error.value.code == "FABRIC_SERVICE_EXECUTION_UNSUPPORTED"
-    assert error.value.details == {
-        "fabric_controller": "persistent-service",
-        "fleet_authority": "persistent-controller",
-        "execution_transport": "unsupported",
-    }
+    assert error.value.details["fabric_controller"] == "persistent-service"
+    assert error.value.details["fleet_authority"] == "persistent-controller"
+    assert error.value.details["execution_transport"] == "unsupported"
+    assert error.value.details["persistent_service_support"]["persistent_service_execution"] is False
+
+
+def test_control_config_direct_and_loaded_defaults_use_persistent_service(tmp_path: Path) -> None:
+    direct = ControlConfig()
+    loaded = load_config(tmp_path / "missing.toml")
+    example = load_config(Path(__file__).parents[1] / "config" / "control.example.toml")
+    assert direct.fabric_mode == loaded.fabric_mode == "service"
+    assert direct.fabric_execution_mode == loaded.fabric_execution_mode == "unavailable-until-service-support"
+    assert (example.fabric_mode, example.fabric_execution_mode) == (direct.fabric_mode, direct.fabric_execution_mode)
+
+
+def test_fabric_adapter_has_no_admin_client_authority() -> None:
+    from mncs_control_mcp.adapters import FabricAdapter
+
+    assert "FabricAdminClient" not in inspect.getsource(FabricAdapter)
 
 
 def test_service_mode_does_not_prepare_private_fabric_runtime(config) -> None:

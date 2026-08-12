@@ -46,6 +46,14 @@ class ControlPlaneService:
         forge = self.integrations.forge.status()
         commons_path = self.config.workspace_root / self.config.repositories.get("commons", "MNCS-Commons")
         return {
+            "server": {
+                "name": self.config.name,
+                "package_version": __import__("mncs_control_mcp", fromlist=["__version__"]).__version__,
+                "transport": "stdio",
+                "fabric_client_version": fabric.get("client_fabric_version") or fabric.get("version"),
+                "fabric_mode": self.config.fabric_mode,
+                "fabric_consumer_identity": self.config.fabric_consumer_identity,
+            },
             "workspace": {
                 "available": self.policy.root.is_dir(),
                 "version": None,
@@ -87,7 +95,12 @@ class ControlPlaneService:
                 "local": True,
             },
             "harness": self._integration_capability(harness, ["status", "models", "bounded analysis"], "local model execution remains upstream-owned"),
-            "fabric": self._integration_capability(fabric, ["status", "worker discovery", "validated dispatch"], "Fabric remains authoritative for routing and admission"),
+            "fabric": self._integration_capability(
+                fabric,
+                ["persistent fleet read", "validated dispatch"],
+                "persistent service execution is not advertised by current Fabric; use explicit transitional compatibility for direct execution",
+                authority="persistent-controller owns membership, presence, trust, and lifecycle",
+            ),
             "forge": self._integration_capability(forge, ["capability inventory", "configured evaluation"], "Forge remains authoritative for scoring and evidence"),
             "commons": {
                 "available": commons_path.is_dir(),
@@ -106,8 +119,17 @@ class ControlPlaneService:
         }
 
     @staticmethod
-    def _integration_capability(status: dict[str, object], operations: list[str], limitation: str) -> dict[str, object]:
+    def _integration_capability(
+        status: dict[str, object],
+        operations: list[str],
+        limitation: str,
+        *,
+        authority: str | None = None,
+    ) -> dict[str, object]:
         result: dict[str, object] = {
+            "configured": status.get("configured", bool(status.get("available"))),
+            "reachable": status.get("reachable", status.get("controller_connected", False)),
+            "supported": bool(status.get("available")),
             "available": bool(status.get("available")),
             "version": status.get("version") or status.get("package_version"),
             "supported_operations": operations,
@@ -116,6 +138,8 @@ class ControlPlaneService:
             "mutation": "dispatch" in operations or "configured evaluation" in operations,
             "network_required": "dispatch" in operations,
             "local": True,
+            "authority": authority or "upstream adapter owns its declared semantics",
+            "current_limitation": limitation,
         }
         for key in (
             "configured",
@@ -201,16 +225,36 @@ class ControlPlaneService:
         system = self.integrations.system.status()
         fabric = self.integrations.fabric.status()
         models = self.integrations.models.status()
+        harness = self.integrations.harness.status()
+        forge = self.integrations.forge.status()
+        jobs = self.processes.list()
         return {
             "status": "available" if system.get("hostname") else "degraded",
             "controller": {"hostname": system.get("hostname"), "workspace": str(self.policy.root), "sandbox": self.sandbox.backend},
             "resources": {"cpu": system.get("cpu"), "ram": system.get("ram"), "disk": system.get("disk"), "gpu": system.get("gpu")},
             "models": models,
             "fabric": fabric,
-            "harness": self.integrations.harness.status(),
-            "forge": self.integrations.forge.status(),
+            "fabric_controller": {
+                "connected": fabric.get("controller_connected", False),
+                "authority": fabric.get("fleet_authority"),
+                "version": fabric.get("controller_version"),
+                "contract_identity": fabric.get("controller_contract_identity"),
+                "mode": fabric.get("fabric_mode"),
+            },
+            "fabric_workers": {
+                "count": fabric.get("fleet_count", 0),
+                "present": fabric.get("present_workers", 0),
+                "available": fabric.get("available_workers", 0),
+                "stale": fabric.get("stale_workers", 0),
+                "nodes": fabric.get("known_nodes", []),
+            },
+            "local_ollama": self.integrations.ollama.status(),
+            "harness_routing": harness,
+            "harness": harness,
+            "forge": forge,
             "commons": {"available": (self.config.workspace_root / self.config.repositories.get("commons", "MNCS-Commons")).is_dir()},
-            "jobs": self.processes.list(),
+            "jobs": jobs,
+            "control_jobs": jobs,
         }
 
     def run_workflow(

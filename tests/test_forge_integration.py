@@ -21,6 +21,8 @@ def test_control_reaches_forge_through_real_mcp_path() -> None:
         workspace_root=PROJECTS,
         forge_mcp_executable=FORGE_EXECUTABLE,
         forge_mcp_config=FORGE_CONFIG,
+        fabric_mode="embedded",
+        fabric_execution_mode="embedded-direct",
     )
 
     result = ForgeAdapter(config).status()
@@ -39,6 +41,8 @@ def test_control_distinguishes_missing_forge_configuration(tmp_path: Path) -> No
         workspace_root=tmp_path,
         forge_mcp_executable=Path("/bin/true"),
         forge_mcp_config=tmp_path / "missing.toml",
+        fabric_mode="embedded",
+        fabric_execution_mode="embedded-direct",
     )
 
     result = ForgeAdapter(config).status()

@@ -323,18 +323,29 @@ def build_server(config: ControlConfig | None = None) -> Any:
 
     @server.tool(name="system_status", description="Inspect Fedora host resources, sandbox, MCP jobs, and MNCS subsystem availability.", annotations=ro, structured_output=True)
     def system_status() -> dict[str, object]:
-        return invoke(
-            "system_status",
-            lambda: {
+        def view() -> dict[str, object]:
+            fabric = integrations.fabric.status()
+            return {
                 **integrations.system.status(),
                 "sandbox": {"backend": sandbox.backend, "available": sandbox.available, "required": selected.require_real_sandbox},
                 "workspace": projects.workspace_info(),
                 "jobs": processes.list(),
                 "local_harness": integrations.harness.status(),
-                "fabric": integrations.fabric.status(),
+                "fabric": fabric,
                 "forge": integrations.forge.status(),
-                "server": {"name": selected.name, "version": __version__, "transport": "stdio"},
-            },
+                "server": {
+                    "name": selected.name,
+                    "version": __version__,
+                    "transport": "stdio",
+                    "fabric_client_version": fabric.get("client_fabric_version"),
+                    "fabric_mode": selected.fabric_mode,
+                    "fabric_consumer_identity": selected.fabric_consumer_identity,
+                },
+            }
+
+        return invoke(
+            "system_status",
+            view,
         )  # type: ignore[return-value]
 
     @server.tool(name="audit_summary", description="Show bounded aggregate control activity from the private audit log without exposing raw commands or secrets.", annotations=ro, structured_output=True)

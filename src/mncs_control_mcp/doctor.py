@@ -265,8 +265,11 @@ def run_doctor(config_path: Path, *, profile: str = "mncs-fedora", json_output: 
             try:
                 fabric_package = importlib.import_module("mncs_fabric")
                 fabric_version = str(getattr(fabric_package, "__version__", "unknown"))
-                fabric_api_ok = fabric_version >= "0.2.0a15"
-                fabric_api_detail = f"mncs-fabric {fabric_version}; persistent consumer API required"
+                client = getattr(fabric_package, "FabricClient", None)
+                contract = client.contract() if client and callable(getattr(client, "contract", None)) else {}
+                features = contract.get("features", {}) if isinstance(contract, dict) else {}
+                fabric_api_ok = callable(getattr(client, "connect", None)) and features.get("persistent_fleet_read") is True
+                fabric_api_detail = f"mncs-fabric {fabric_version}; public persistent fleet-read contract={'present' if fabric_api_ok else 'missing'}"
             except Exception as exc:
                 fabric_version = "unavailable"
                 fabric_api_ok = False
@@ -283,7 +286,7 @@ def run_doctor(config_path: Path, *, profile: str = "mncs-fedora", json_output: 
                 Check(
                     "Fabric consumer socket",
                     "OK" if socket_path.is_socket() else "FAIL",
-                    str(socket_path),
+                    f"{socket_path} (AF_UNIX consumer socket)" if socket_path.is_socket() else str(socket_path),
                     required=True,
                 )
             )
@@ -312,6 +315,7 @@ def run_doctor(config_path: Path, *, profile: str = "mncs-fedora", json_output: 
                 checks.append(Check("Fabric controller", "FAIL", redact_text(str(exc)), required=True))
             checks.append(Check("Fabric admin authority", "OK", "Control uses ordinary consumer access; admin socket is not configured", required=True))
             checks.append(Check("Fabric worker credentials", "OK", "consumer mode does not require worker certificates or private keys", required=True))
+            checks.append(Check("Remote connector", "UNKNOWN", "external ChatGPT-side verification required; local checks do not establish connector reachability"))
         else:
             registry_path = effective_fabric_registry(config)
             checks.append(Check("Fabric registry", "OK" if registry_path.is_file() else "WARNING", str(registry_path)))
@@ -331,7 +335,9 @@ def run_doctor(config_path: Path, *, profile: str = "mncs-fedora", json_output: 
             checks.append(Check("CUDA", "WARNING", "nvidia-smi not found"))
 
     service_status, service_detail = _service_state()
-    checks.append(Check("systemd service", service_status, service_detail))
+    checks.append(Check("Tunnel systemd service", service_status, service_detail))
+    if not any(check.name == "Remote connector" for check in checks):
+        checks.append(Check("Remote connector", "UNKNOWN", "external ChatGPT-side verification required; local checks do not establish connector reachability"))
 
     result = {"profile": profile, "checks": [asdict(check) for check in checks], "ok": all(check.ok for check in checks if check.required)}
     if json_output:

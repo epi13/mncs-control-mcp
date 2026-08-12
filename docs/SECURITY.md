@@ -80,6 +80,12 @@ Control fails closed with `FABRIC_SERVICE_EXECUTION_UNSUPPORTED`. Direct
 execution is available only under an explicit `embedded` or `transitional`
 configuration and is labeled in returned results.
 
+`scripts/mcp-smoke.py` tests the local stdio protocol and read-only deployment
+identity without testing ChatGPT-side connector reachability. `doctor` reports
+the MCP executable, stdio protocol, tunnel client/profile/systemd layers,
+consumer socket/controller state, and an explicit `UNKNOWN` remote connector
+state when external verification is required.
+
 The user service runs `tunnel-client`, which owns the MCP stdio child. It uses
 absolute repository/virtualenv paths, a filtered PATH, `ProtectSystem=strict`,
 `ProtectHome=read-only`, `PrivateTmp`, `NoNewPrivileges`, a control-group kill
