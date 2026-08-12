@@ -44,7 +44,32 @@ class ControlPlaneService:
         fabric = self.integrations.fabric.status()
         harness = self.integrations.harness.status()
         forge = self.integrations.forge.status()
-        commons = self.integrations.commons.status()
+        commons_path = self.config.workspace_root / self.config.repositories.get("commons", "MNCS-Commons")
+        fabric_support = fabric.get("persistent_service_support", {})
+        service_execution = (
+            fabric.get("execution_transport") == "persistent-service"
+            and isinstance(fabric_support, dict)
+            and fabric_support.get("persistent_service_execution") is True
+        )
+        fabric_operations = ["persistent fleet read"]
+        fabric_limitations: list[str] = []
+        if service_execution:
+            fabric_operations.append("validated persistent-service dispatch")
+        else:
+            fabric_operations.append("validated dispatch in explicit compatibility mode")
+            fabric_limitations.append(
+                "persistent service execution is not advertised by the connected Fabric controller"
+            )
+        rendezvous_supported = (
+            isinstance(fabric_support, dict)
+            and fabric_support.get("worker_rendezvous") is True
+        )
+        if rendezvous_supported:
+            fabric_operations.append("authenticated worker-initiated rendezvous")
+        else:
+            fabric_limitations.append(
+                "worker-initiated rendezvous is not advertised by the connected Fabric controller"
+            )
         return {
             "server": {
                 "name": self.config.name,
@@ -97,8 +122,8 @@ class ControlPlaneService:
             "harness": self._integration_capability(harness, ["status", "models", "bounded analysis"], "local model execution remains upstream-owned"),
             "fabric": self._integration_capability(
                 fabric,
-                ["persistent fleet read", "validated dispatch"],
-                "persistent service execution is not advertised by current Fabric; use explicit transitional compatibility for direct execution",
+                fabric_operations,
+                "; ".join(fabric_limitations) if fabric_limitations else "controller-managed persistent execution is available",
                 authority="persistent-controller owns membership, presence, trust, and lifecycle",
             ),
             "forge": self._integration_capability(forge, ["capability inventory", "configured evaluation"], "Forge remains authoritative for scoring and evidence"),

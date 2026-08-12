@@ -75,10 +75,14 @@ certificates nor private keys. Fabric owns fleet membership, presence, trust,
 and registry state; Control reports those observations without copying them into
 private Control state.
 
-The current Fabric service exposes fleet reads but not execution dispatch.
-Control fails closed with `FABRIC_SERVICE_EXECUTION_UNSUPPORTED`. Direct
-execution is available only under an explicit `embedded` or `transitional`
-configuration and is labeled in returned results.
+The Fabric service advertises execution only when its controller-owned,
+authenticated worker backend is configured and reachable. Control fails closed
+with `FABRIC_SERVICE_EXECUTION_UNSUPPORTED` when the connected service does not
+advertise it; it never silently constructs an embedded client. Direct
+execution remains available only under an explicit `embedded` or `transitional`
+configuration and is labeled in returned results. The current service
+execution path is controller-managed endpoint compatibility; worker-initiated
+rendezvous remains separately planned and is reported as unsupported.
 
 `scripts/mcp-smoke.py` tests the local stdio protocol and read-only deployment
 identity without testing ChatGPT-side connector reachability. `doctor` reports

@@ -99,10 +99,13 @@ consumer socket at `~/.local/state/mncs-fabric/controller.sock`. It does not
 copy a registry or trust ledgers, does not need worker certificates, and does
 not connect to the admin socket. `fabric_status` reports controller connection,
 fleet authority, worker observations, and the current execution transport.
-The current Fabric public contract advertises fleet reads but not persistent execution dispatch, so
-`dispatch_fabric_job` reports `FABRIC_SERVICE_EXECUTION_UNSUPPORTED`; select
-explicit transitional mode only when direct embedded execution compatibility is
-intended.
+The controller-owned service status advertises execution support only when its
+authenticated worker backend is configured and reachable. In that case
+`dispatch_fabric_job` uses `FabricClient.connect()` and reports
+`execution_transport=persistent-service`. If the connected controller does not
+advertise execution, Control reports `FABRIC_SERVICE_EXECUTION_UNSUPPORTED`;
+select transitional mode only when direct embedded execution compatibility is
+intended. Worker-initiated rendezvous is a separate planned Fabric feature.
 
 Convenience commands are available through:
 

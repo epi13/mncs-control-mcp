@@ -15,14 +15,20 @@ socket. Ordinary consumers use `FabricClient.connect()`; `FabricAdminClient`
 is reserved for local operator code and is not used by MNCS Control.
 
 The current public consumer boundary supports controller and fleet reads through
-`controller_status()`, `fleet()`, `fleet_status()`, and `workers()`. Fabric's
-public contract advertises each persistent-service capability independently. The
-current contract does not advertise persistent execution or capability
-ingestion, so Control reports `FABRIC_SERVICE_EXECUTION_UNSUPPORTED` instead of
-creating an embedded execution client in service mode. `transitional` mode may
-use a separately marked embedded-direct compatibility client for bounded
-execution while persistent Fabric remains fleet authority. This path is
-temporary and does not grant Control the admin socket.
+`controller_status()`, `fleet()`, `fleet_status()`, and `workers()`. The
+controller's public status projection advertises each persistent-service
+capability independently. When the controller is configured with its
+operator-owned authenticated worker endpoint registry, it also advertises
+controller-managed service execution, worker observations, and capability
+ingestion. `FabricClient.connect()` dispatches through that service path; it
+does not load the registry or worker credentials into Control. Worker-initiated
+rendezvous remains a separate planned feature and is not advertised by the
+current service. If the connected controller does not advertise execution,
+Control reports `FABRIC_SERVICE_EXECUTION_UNSUPPORTED` rather than creating an
+embedded execution client. `transitional` mode may use a separately marked
+embedded-direct compatibility client for bounded execution while persistent
+Fabric remains fleet authority. This path is temporary and does not grant
+Control the admin socket.
 
 The `embedded` mode remains for isolated tests and deployments. Only that
 explicit compatibility mode prepares/loads the legacy worker registry and
