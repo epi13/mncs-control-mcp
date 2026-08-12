@@ -37,7 +37,11 @@ class WorkspacePolicy:
             raise ControlError("WORKSPACE_ROOT_PROTECTED", "the workspace root is protected")
         path = PurePosixPath(value)
         if path.is_absolute() or ".." in path.parts or any(part == "" for part in path.parts):
-            raise ControlError("PATH_ESCAPE", "path must remain relative to the workspace")
+            raise ControlError(
+                "PATH_ESCAPE",
+                "caller paths must be workspace-relative/project-relative; "
+                "sandbox-internal /workspace paths are not caller path values",
+            )
         return path
 
     def _contained(self, candidate: Path, boundary: Path | None = None) -> Path:

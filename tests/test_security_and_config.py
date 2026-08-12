@@ -85,6 +85,19 @@ def test_workspace_policy_rejects_traversal_absolute_and_symlink_escape(config, 
         assert error.value.code in {"PATH_ESCAPE", "INVALID_PATH"}
 
 
+def test_terminal_cwd_uses_relative_abstraction_not_sandbox_internal_path(config) -> None:
+    policy = WorkspacePolicy(config)
+    (config.workspace_root / "mncs-control-mcp").mkdir()
+    with pytest.raises(ControlError, match="workspace-relative/project-relative"):
+        policy.resolve_scope(
+            scope="project",
+            project="mncs-control-mcp",
+            cwd="/workspace/mncs-control-mcp",
+        )
+    resolution = policy.resolve_scope(scope="project", project="mncs-control-mcp", cwd=".")
+    assert resolution.sandbox_cwd == "/workspace/mncs-control-mcp"
+
+
 def test_file_service_blocks_root_deletion_and_symlink_writes(config, tmp_path: Path) -> None:
     policy = WorkspacePolicy(config)
     files = FileService(config, policy)

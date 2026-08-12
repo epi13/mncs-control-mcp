@@ -58,6 +58,15 @@ def _first_line(value: str) -> str:
     return value.splitlines()[0][:160] if value else "no version output"
 
 
+def _loadable_fabric_source(config_path: Path) -> Path | None:
+    """Find the checked-out sibling Fabric source without trusting private state."""
+
+    candidate = config_path.parent.parent / "mncs-fabric" / "src"
+    if candidate.is_dir():
+        return candidate
+    return None
+
+
 def _read_json_response(stream: Any, process: subprocess.Popen[str], request_id: int, timeout: float) -> dict[str, Any]:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -263,6 +272,9 @@ def run_doctor(config_path: Path, *, profile: str = "mncs-fedora", json_output: 
         if config.fabric_mode in {"service", "transitional"}:
             socket_path = config.fabric_socket.expanduser()
             try:
+                fabric_source = _loadable_fabric_source(config_path)
+                if fabric_source is not None and str(fabric_source) not in sys.path:
+                    sys.path.insert(0, str(fabric_source))
                 fabric_package = importlib.import_module("mncs_fabric")
                 fabric_version = str(getattr(fabric_package, "__version__", "unknown"))
                 client = getattr(fabric_package, "FabricClient", None)
