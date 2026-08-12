@@ -387,6 +387,17 @@ class HarnessAdapter:
                         self.config.workspace_root / self.config.repositories.get("fabric", "mncs-fabric"),
                     )
                     service_support = FabricContractSupport.from_client(fabric_package)
+                    service_client = fabric_package.FabricClient.connect(
+                        harness_config.fabric.service_socket,
+                        client_identity=harness_config.fabric.consumer_identity,
+                        timeout=harness_config.fabric.service_timeout_seconds,
+                    )
+                    try:
+                        service_support = FabricContractSupport.from_service_status(
+                            service_client.controller_status(), service_support
+                        )
+                    finally:
+                        service_client.close()
                 except Exception:
                     service_support = FabricContractSupport()
             return {
@@ -475,6 +486,21 @@ class FabricContractSupport:
             contract_identity=str(contract.get("contract_identity")) if contract.get("contract_identity") else None,
         )
 
+    @classmethod
+    def from_service_status(cls, status: Any, fallback: FabricContractSupport) -> FabricContractSupport:
+        features = status.get("service_features", {}) if isinstance(status, dict) else {}
+        if not isinstance(features, dict):
+            return fallback
+        return cls(
+            persistent_fleet_read=features.get("persistent_fleet_read") is True,
+            persistent_service_execution=features.get("persistent_service_execution") is True,
+            persistent_service_capability_ingestion=features.get("persistent_service_capability_ingestion") is True,
+            persistent_worker_observations=features.get("persistent_worker_observations") is True,
+            worker_rendezvous=features.get("worker_rendezvous") is True,
+            client_version=str(status.get("fabric_version") or fallback.client_version),
+            contract_identity=str(status.get("public_contract_identity") or fallback.contract_identity),
+        )
+
     def as_dict(self) -> dict[str, object]:
         return {
             "persistent_fleet_read": self.persistent_fleet_read,
@@ -511,7 +537,12 @@ class FabricAdapter:
 
     @staticmethod
     def _fleet_counts(workers: list[dict[str, Any]]) -> dict[str, int]:
-        present = sum(1 for worker in workers if worker.get("presence") == "PRESENT")
+        present = sum(
+            1
+            for worker in workers
+            if worker.get("presence") == "PRESENT"
+            or ("presence" not in worker and worker.get("availability") == "AVAILABLE")
+        )
         available = sum(1 for worker in workers if worker.get("availability") == "AVAILABLE")
         stale = sum(1 for worker in workers if worker.get("presence") == "STALE" or worker.get("availability") == "UNKNOWN")
         return {"fleet_count": len(workers), "present_workers": present, "available_workers": available, "stale_workers": stale}
@@ -530,6 +561,7 @@ class FabricAdapter:
                 client = self._service_client(fabric)
                 try:
                     controller = client.controller_status()
+                    support = FabricContractSupport.from_service_status(controller, support)
                     workers = [dict(worker) for worker in client.workers()]
                 finally:
                     client.close()
@@ -608,7 +640,14 @@ class FabricAdapter:
         """Construct current public Fabric artifacts for bounded task families."""
         fabric = self._module()
         support = self._public_support(fabric)
+        service_controller: dict[str, Any] | None = None
         if self.config.fabric_mode == "service":
+            client = self._service_client(fabric)
+            try:
+                service_controller = client.controller_status()
+                support = FabricContractSupport.from_service_status(service_controller, support)
+            finally:
+                client.close()
             if not support.persistent_service_execution:
                 raise ControlError(
                     "FABRIC_SERVICE_EXECUTION_UNSUPPORTED",
@@ -745,7 +784,7 @@ class FabricAdapter:
                 "registry": registry_report,
                 "fabric_controller": "persistent-service" if self.config.fabric_mode in {"service", "transitional"} else "embedded-compatibility",
                 "fleet_authority": "persistent-controller" if self.config.fabric_mode in {"service", "transitional"} else "embedded-compatibility-controller",
-                "execution_transport": self.config.fabric_execution_mode,
+                "execution_transport": "persistent-service" if self.config.fabric_mode == "service" and support.persistent_service_execution else self.config.fabric_execution_mode,
                 "results": results,
             }
         except ControlError:
@@ -788,8 +827,7 @@ class ForgeAdapter:
         self.config = config
         self.policy = policy
 
-    @staticmethod
-    async def _mcp_probe(executable: Path, config: Path) -> dict[str, object]:
+    async def _mcp_probe(self, executable: Path, config: Path) -> dict[str, object]:
         from mcp import ClientSession, StdioServerParameters
         from mcp.client.stdio import stdio_client
 
@@ -812,6 +850,7 @@ class ForgeAdapter:
         parameters = StdioServerParameters(
             command=str(executable),
             args=["--config", str(config), "--mode", "development"],
+            env={**os.environ, "MNCS_FORGE_STATE_DIR": str(self.config.job_state_path.parent / "forge-state")},
         )
         try:
             async with (
