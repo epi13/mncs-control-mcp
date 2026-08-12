@@ -185,6 +185,58 @@ class Sandbox:
             argv.extend(("--ro-bind", str(self.policy.root), "/workspace"))
             argv.extend(("--bind", str(resolution.host_root), f"/workspace/{resolution.project}"))
 
+        # Python virtual environments and editable installs commonly embed
+        # absolute host paths in console-script shebangs and .pth files. The
+        # canonical sandbox view remains /workspace, but mirror the bounded
+        # workspace at its original absolute host path so those generated
+        # references continue to resolve inside Bubblewrap. This is only an
+        # alias of the already-authorized workspace tree; it does not expose
+        # the rest of the user's home directory.
+        host_workspace = self.policy.root.resolve()
+        protected_alias_roots = tuple(
+            Path(value)
+            for value in (
+                "/usr",
+                "/etc",
+                "/proc",
+                "/dev",
+                "/run",
+                "/workspace",
+                "/home/developer",
+                "/opt/mncs-tools",
+            )
+        )
+        if not any(_is_relative_to(host_workspace, root) for root in protected_alias_roots):
+            current = Path("/")
+            existing = {
+                "/",
+                "/home",
+                "/home/developer",
+                "/run",
+                "/tmp",
+                "/workspace",
+                "/opt",
+                "/opt/mncs-tools",
+            }
+            for part in host_workspace.parent.parts[1:]:
+                current /= part
+                if current.as_posix() not in existing:
+                    argv.extend(("--dir", current.as_posix()))
+                    existing.add(current.as_posix())
+            argv.extend(("--dir", host_workspace.as_posix()))
+            if resolution.scope == "workspace":
+                argv.extend(("--bind", str(host_workspace), host_workspace.as_posix()))
+            else:
+                argv.extend(("--ro-bind", str(host_workspace), host_workspace.as_posix()))
+                assert resolution.project is not None
+                argv.extend(
+                    (
+                        "--bind",
+                        str(resolution.host_root),
+                        (host_workspace / resolution.project).as_posix(),
+                    )
+                )
+
         # Integrations may request narrowly scoped writable runtime mounts.  A
         # caller cannot mount arbitrary host paths: only directories already
         # belonging to the control-plane state tree are accepted.

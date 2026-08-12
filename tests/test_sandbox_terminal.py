@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import sys
 import time
 from pathlib import Path
 
@@ -79,6 +80,55 @@ def test_workspace_scope_can_mutate_siblings_but_not_real_home(config) -> None:
     )
     assert result.exit_code == 0
     assert (config.workspace_root / "beta" / "cross.txt").read_text(encoding="utf-8") == "cross\n"
+
+
+@pytest.mark.requires_bwrap_namespace
+def test_project_scope_preserves_host_absolute_workspace_paths_for_venv_entrypoints(config) -> None:
+    project = config.workspace_root / "alpha"
+    sibling = config.workspace_root / "beta"
+    bin_dir = project / ".venv" / "bin"
+    bin_dir.mkdir(parents=True)
+    sibling.mkdir()
+
+    interpreter = bin_dir / "python"
+    interpreter.symlink_to(Path(sys.executable))
+    entrypoint = bin_dir / "host-path-tool"
+    entrypoint.write_text(
+        f"#!{config.workspace_root}/alpha/.venv/bin/python\n"
+        "from pathlib import Path\n"
+        f"print(Path({str(config.workspace_root)!r}, 'beta').is_dir())\n",
+        encoding="utf-8",
+    )
+    entrypoint.chmod(0o755)
+
+    _, sandbox = _sandbox(config)
+    result = sandbox.run(
+        "./.venv/bin/host-path-tool",
+        scope="project",
+        project="alpha",
+        cwd=".",
+        timeout_seconds=20,
+        network=False,
+    )
+
+    assert result.exit_code == 0, result.stderr
+    assert result.stdout.strip() == "True"
+
+    alias_project = config.workspace_root / "alpha"
+    alias_sibling = config.workspace_root / "beta"
+    mutation = sandbox.run(
+        f"echo own > {alias_project}/own-via-alias.txt; "
+        f"(echo blocked > {alias_sibling}/blocked.txt) 2>/dev/null || echo sibling-readonly",
+        scope="project",
+        project="alpha",
+        cwd=".",
+        timeout_seconds=20,
+        network=False,
+    )
+    assert mutation.exit_code == 0, mutation.stderr
+    assert "sibling-readonly" in mutation.stdout
+    assert (project / "own-via-alias.txt").read_text(encoding="utf-8") == "own\n"
+    assert not (sibling / "blocked.txt").exists()
 
 
 @pytest.mark.requires_bwrap_namespace

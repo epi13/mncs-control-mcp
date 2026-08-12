@@ -266,6 +266,19 @@ def test_runtime_mount_accepts_only_control_state_and_keeps_home_unmounted(confi
     )
     assert "--bind" in argv
     assert str(runtime) in argv
+    assert str(config.workspace_root) in argv
+
+    project = config.workspace_root / "alpha"
+    project.mkdir()
+    project_argv, _ = sandbox.command_argv(
+        "true",
+        policy.resolve_scope(scope="project", project="alpha", cwd="."),
+        network=False,
+    )
+    expected_alias = str(config.workspace_root / "alpha")
+    assert expected_alias in project_argv
+    assert project_argv.count(str(config.workspace_root)) >= 2
+
     with pytest.raises(ControlError) as error:
         sandbox.command_argv(
             "true",
