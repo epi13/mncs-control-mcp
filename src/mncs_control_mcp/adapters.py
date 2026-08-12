@@ -379,6 +379,16 @@ class HarnessAdapter:
             package = _load_sibling_package("epi13_local_harness", self.config.harness_path)
             loader = importlib.import_module("epi13_local_harness.config").load_config
             harness_config = loader(path)
+            service_support = None
+            if harness_config.fabric.controller_mode == "service":
+                try:
+                    fabric_package = _load_sibling_package(
+                        "mncs_fabric",
+                        self.config.workspace_root / self.config.repositories.get("fabric", "mncs-fabric"),
+                    )
+                    service_support = FabricContractSupport.from_client(fabric_package)
+                except Exception:
+                    service_support = FabricContractSupport()
             return {
                 "available": True,
                 "status": "configured",
@@ -389,9 +399,20 @@ class HarnessAdapter:
                 "fabric_service_configured": harness_config.fabric.controller_mode in {"service", "transitional"},
                 "fabric_controller_connected": None,
                 "fabric_execution_mode": (
-                    "persistent-service" if harness_config.fabric.controller_mode == "service"
+                    "persistent-service" if service_support and service_support.persistent_service_execution
+                    else "unsupported" if harness_config.fabric.controller_mode == "service"
                     else "embedded-direct-compatibility" if harness_config.fabric.controller_mode == "transitional"
                     else "embedded-direct"
+                ),
+                "fabric_service_support": (
+                    {
+                        "persistent_fleet_read": service_support.persistent_fleet_read,
+                        "persistent_service_execution": service_support.persistent_service_execution,
+                        "persistent_service_capability_ingestion": service_support.persistent_service_capability_ingestion,
+                        "worker_rendezvous": service_support.worker_rendezvous,
+                    }
+                    if service_support is not None
+                    else None
                 ),
                 "providers": sorted({model.provider for model in harness_config.models.values()}),
                 "models": [
