@@ -84,12 +84,22 @@ the required tool set. It reports missing tunnel-client, missing keys, profile
 doctor failures, SSH-agent state, Fabric/Harness/Forge, Ollama, CUDA, and the
 systemd unit without printing secrets.
 
+For a repeatable local protocol check independent of ChatGPT, run:
+
+```bash
+./scripts/mcp-smoke.py --config control.toml
+```
+
+It performs only initialize, tools/list, and read-only calls. A passing local
+smoke or doctor result does not prove that the ChatGPT connector is registered
+or reachable; that remains an external verification step.
+
 In the intended service configuration, Control connects to the Fabric-owned
 consumer socket at `~/.local/state/mncs-fabric/controller.sock`. It does not
 copy a registry or trust ledgers, does not need worker certificates, and does
 not connect to the admin socket. `fabric_status` reports controller connection,
 fleet authority, worker observations, and the current execution transport.
-Fabric 0.2.0a15 supports fleet reads but not persistent execution dispatch, so
+The current Fabric public contract advertises fleet reads but not persistent execution dispatch, so
 `dispatch_fabric_job` reports `FABRIC_SERVICE_EXECUTION_UNSUPPORTED`; select
 explicit transitional mode only when direct embedded execution compatibility is
 intended.

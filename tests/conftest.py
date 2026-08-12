@@ -19,4 +19,6 @@ def config(tmp_path: Path) -> ControlConfig:
         audit_path=tmp_path / "state" / "audit.jsonl",
         fabric_registry=tmp_path / "state" / "workers.json",
         fabric_state=tmp_path / "state" / "fabric.jsonl",
+        fabric_mode="embedded",
+        fabric_execution_mode="embedded-direct",
     )

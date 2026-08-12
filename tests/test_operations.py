@@ -116,6 +116,7 @@ def test_doctor_reports_missing_required_tunnel_dependencies(tmp_path: Path, cap
     output = capsys.readouterr().out
     assert "Tunnel client" in output
     assert "Runtime key" in output
+    assert "Remote connector" in output
 
 
 def test_installer_help_is_safe_and_idempotence_contract_is_documented() -> None:

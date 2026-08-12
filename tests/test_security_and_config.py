@@ -136,6 +136,8 @@ def test_legacy_fabric_registry_is_migrated_into_private_control_state(tmp_path:
         fabric_state=tmp_path / "control-state" / "fabric.jsonl",
         job_state_path=tmp_path / "control-state" / "jobs.json",
         audit_path=tmp_path / "control-state" / "audit.jsonl",
+        fabric_mode="embedded",
+        fabric_execution_mode="embedded-direct",
     )
     target = effective_fabric_registry(config)
     assert target != legacy
@@ -179,6 +181,8 @@ def test_legacy_fabric_trust_state_is_relocated_into_private_control_state(tmp_p
         fabric_state=tmp_path / "control-state" / "fabric.jsonl",
         job_state_path=tmp_path / "control-state" / "jobs.json",
         audit_path=tmp_path / "control-state" / "audit.jsonl",
+        fabric_mode="embedded",
+        fabric_execution_mode="embedded-direct",
     )
 
     target = prepare_fabric_runtime(config)
@@ -200,6 +204,8 @@ def test_fabric_registry_migration_is_idempotent_under_concurrency(tmp_path: Pat
         fabric_state=tmp_path / "control-state" / "fabric.jsonl",
         job_state_path=tmp_path / "control-state" / "jobs.json",
         audit_path=tmp_path / "control-state" / "audit.jsonl",
+        fabric_mode="embedded",
+        fabric_execution_mode="embedded-direct",
     )
     with ThreadPoolExecutor(max_workers=8) as pool:
         results = list(pool.map(lambda _item: prepare_fabric_runtime(config), range(8)))
@@ -222,6 +228,8 @@ def test_fabric_registry_migration_rejects_symlinks(tmp_path: Path, kind: str) -
         fabric_state=tmp_path / "control-state" / "fabric.jsonl",
         job_state_path=tmp_path / "control-state" / "jobs.json",
         audit_path=tmp_path / "control-state" / "audit.jsonl",
+        fabric_mode="embedded",
+        fabric_execution_mode="embedded-direct",
     )
     if kind == "target_symlink":
         target = effective_fabric_registry(config)
@@ -266,6 +274,8 @@ def test_fabric_status_uses_migrated_registry_lock_in_private_state(tmp_path: Pa
         fabric_state=tmp_path / "control-state" / "fabric.jsonl",
         job_state_path=tmp_path / "control-state" / "jobs.json",
         audit_path=tmp_path / "control-state" / "audit.jsonl",
+        fabric_mode="embedded",
+        fabric_execution_mode="embedded-direct",
     )
 
     class FakeClient:
