@@ -30,7 +30,10 @@ def read_response(stream, process: subprocess.Popen[str], request_id: int, timeo
             continue
         if value.get("id") == request_id:
             return value
-    detail = "MCP process exited without a response" if process.poll() is not None else "MCP response timed out"
+    if process.poll() is not None and process.stderr is not None:
+        detail = process.stderr.read(2000).strip() or "MCP process exited without a response"
+    else:
+        detail = "MCP response timed out"
     raise RuntimeError(detail)
 
 
