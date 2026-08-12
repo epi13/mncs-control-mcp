@@ -60,8 +60,16 @@ class ControlPlaneService:
             fabric_limitations.append(
                 "persistent service execution is not advertised by the connected Fabric controller"
             )
-        if not (isinstance(fabric_support, dict) and fabric_support.get("worker_rendezvous") is True):
-            fabric_limitations.append("worker-initiated rendezvous remains planned")
+        rendezvous_supported = (
+            isinstance(fabric_support, dict)
+            and fabric_support.get("worker_rendezvous") is True
+        )
+        if rendezvous_supported:
+            fabric_operations.append("authenticated worker-initiated rendezvous")
+        else:
+            fabric_limitations.append(
+                "worker-initiated rendezvous is not advertised by the connected Fabric controller"
+            )
         return {
             "server": {
                 "name": self.config.name,
