@@ -19,7 +19,7 @@ from .security import redact_text, safe_host_probe_environment
 
 _REQUIRED_TOOLS = {
     "workspace_info", "list_projects", "file_read", "terminal_exec", "git_status",
-    "system_status", "fabric_status", "control_capabilities", "project_review",
+    "system_status", "fabric_status", "commons_status", "control_capabilities", "project_review",
     "project_check", "laboratory_status",
 }
 

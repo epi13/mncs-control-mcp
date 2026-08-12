@@ -174,6 +174,7 @@ Every Git command runs inside the same project sandbox, including repository hoo
 - `tool_inventory`, `system_status`, `control_capabilities`, `laboratory_status`, `list_repositories`
 - `project_review`, `test_discover`, `test_run`, `project_check`, `control_run`
 - `fabric_status`, `model_status`, `run_tests`, `run_mncs_evaluation`, `dispatch_fabric_job`
+- `commons_status`, `commons_work`, `commons_query`, `commons_get`, `commons_conversation`, `commons_evidence`, `commons_sync`
 - `control_job_status`, `control_job_result`, `control_job_stop`
 
 `tool_inventory` reports safe executable paths and first-line versions for common Python, Rust, Node, C/C++, Go, Java, container, shell, search, Ollama, NVIDIA/CUDA, and sandbox tools. Each entry distinguishes absent, broken, healthy, and project-local candidates; a broken global wrapper does not hide a usable project virtualenv. It does not return the environment.
