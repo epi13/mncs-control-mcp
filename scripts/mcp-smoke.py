@@ -77,7 +77,10 @@ def main(argv: list[str] | None = None) -> int:
         calls: dict[str, object] = {}
         for index, name in enumerate(sorted(REQUIRED_TOOLS), start=3):
             result = request(process, index, "tools/call", {"name": name, "arguments": {}})
-            calls[name] = result.get("structuredContent", result.get("content"))
+            structured = result.get("structuredContent")
+            if not isinstance(structured, dict):
+                raise RuntimeError(f"{name} returned malformed structured output")
+            calls[name] = structured
         fabric = calls.get("fabric_status")
         if not isinstance(fabric, dict):
             raise RuntimeError("fabric_status did not return structured output")
