@@ -384,6 +384,14 @@ class HarnessAdapter:
                 "package_version": getattr(package, "__version__", "unknown"),
                 "config_path": str(path or "default"),
                 "fabric_enabled": bool(harness_config.fabric.enabled),
+                "fabric_controller_mode": harness_config.fabric.controller_mode,
+                "fabric_service_configured": harness_config.fabric.controller_mode in {"service", "transitional"},
+                "fabric_controller_connected": None,
+                "fabric_execution_mode": (
+                    "persistent-service" if harness_config.fabric.controller_mode == "service"
+                    else "embedded-direct-compatibility" if harness_config.fabric.controller_mode == "transitional"
+                    else "embedded-direct"
+                ),
                 "providers": sorted({model.provider for model in harness_config.models.values()}),
                 "models": [
                     {
@@ -403,7 +411,8 @@ class HarnessAdapter:
                     "enabled": harness_config.router.enable_semantic_routing,
                     "device": harness_config.router.device,
                 },
-                "fabric_workers_configured": len(harness_config.fabric.workers),
+                "fabric_workers_configured": len(harness_config.fabric.workers)
+                if harness_config.fabric.controller_mode != "service" else 0,
                 "policy": {
                     "approval_mode": harness_config.policy.approval_mode,
                     "allowed_executables": list(harness_config.policy.allowed_executables),
@@ -424,28 +433,104 @@ class FabricAdapter:
         except ImportError:
             return _load_sibling_package("mncs_fabric", self.config.fabric_path)
 
+    @staticmethod
+    def _public_support(fabric: Any) -> dict[str, object]:
+        contract_method = getattr(fabric.FabricClient, "contract", None)
+        contract = contract_method() if callable(contract_method) else {}
+        features = contract.get("features", {}) if isinstance(contract, dict) else {}
+        return {
+            "persistent_fleet_read": True,
+            "persistent_execution": bool(features.get("persistent_service_execution", False)),
+            "persistent_capability_ingestion": bool(
+                features.get("persistent_service_capability_ingestion", False)
+            ),
+        }
+
+    def _service_client(self, fabric: Any) -> Any:
+        return fabric.FabricClient.connect(
+            self.config.fabric_socket,
+            client_identity=self.config.fabric_consumer_identity,
+            timeout=self.config.fabric_service_timeout_seconds,
+        )
+
+    @staticmethod
+    def _fleet_counts(workers: list[dict[str, Any]]) -> dict[str, int]:
+        present = sum(1 for worker in workers if worker.get("presence") == "PRESENT")
+        available = sum(1 for worker in workers if worker.get("availability") == "AVAILABLE")
+        stale = sum(1 for worker in workers if worker.get("presence") == "STALE" or worker.get("availability") == "UNKNOWN")
+        return {"fleet_count": len(workers), "present_workers": present, "available_workers": available, "stale_workers": stale}
+
     def status(self) -> dict[str, object]:
         try:
             fabric = self._module()
+            support = self._public_support(fabric)
+            if self.config.fabric_mode in {"service", "transitional"}:
+                client = self._service_client(fabric)
+                try:
+                    controller = client.controller_status()
+                    workers = [dict(worker) for worker in client.workers()]
+                finally:
+                    client.close()
+                counts = self._fleet_counts(workers)
+                return {
+                    "available": True,
+                    "status": "available" if workers else "empty",
+                    "version": getattr(fabric, "__version__", "unknown"),
+                    "controller_connected": True,
+                    "controller_version": getattr(fabric, "__version__", "unknown"),
+                    "service_mode": self.config.fabric_mode == "service",
+                    "fabric_mode": self.config.fabric_mode,
+                    "fleet_authority": "persistent-controller",
+                    "execution_transport": (
+                        "persistent-service" if self.config.fabric_mode == "service" and support["persistent_execution"]
+                        else "embedded-direct-compatibility" if self.config.fabric_mode == "transitional"
+                        else "unsupported"
+                    ),
+                    "persistent_service_support": support,
+                    "controller": {"runtime": controller.get("service_runtime"), "worker_rendezvous": controller.get("worker_rendezvous")},
+                    **counts,
+                    "known_nodes": [self._public_worker(worker) for worker in workers],
+                }
             registry_path = prepare_fabric_runtime(self.config)
             client = fabric.FabricClient(self.config.fabric_controller_id, self.config.fabric_state)
-            registry_report: dict[str, object] | None = None
-            if registry_path.exists():
-                registry_report = client.load_registry(registry_path)
-            client.refresh_workers()
-            workers = client.workers()
+            try:
+                registry_report: dict[str, object] | None = None
+                if registry_path.exists():
+                    registry_report = client.load_registry(registry_path)
+                client.refresh_workers()
+                workers = [dict(worker) for worker in client.workers()]
+            finally:
+                close = getattr(client, "close", None)
+                if callable(close):
+                    close()
+            counts = self._fleet_counts(workers)
             return {
                 "available": True,
                 "status": "available" if workers else "empty",
                 "version": getattr(fabric, "__version__", "unknown"),
+                "fabric_mode": self.config.fabric_mode,
+                "controller_connected": True,
+                "fleet_authority": "embedded-compatibility-controller",
+                "execution_transport": "embedded-direct",
+                "persistent_service_support": support,
                 "registry_path": str(registry_path),
                 "state_path": str(self.config.fabric_state),
-                "state_policy": "private-control-plane-runtime",
+                "state_policy": "explicit-embedded-compatibility",
                 "registry": registry_report,
+                **counts,
                 "known_nodes": [self._public_worker(worker) for worker in workers],
             }
         except Exception as exc:
-            return {"available": False, "status": "unavailable", "known_nodes": [], "diagnostic": redact_text(str(exc))}
+            return {
+                "available": False,
+                "status": "unavailable",
+                "controller_connected": False,
+                "fabric_mode": self.config.fabric_mode,
+                "fleet_authority": "persistent-controller" if self.config.fabric_mode in {"service", "transitional"} else "embedded-compatibility-controller",
+                "execution_transport": "unsupported" if self.config.fabric_mode == "service" else self.config.fabric_execution_mode,
+                "known_nodes": [],
+                "diagnostic": redact_text(str(exc)),
+            }
 
     def dispatch(
         self,
@@ -456,6 +541,35 @@ class FabricAdapter:
         parameters: dict[str, object] | None = None,
     ) -> dict[str, object]:
         """Construct current public Fabric artifacts for bounded task families."""
+        if self.config.fabric_mode == "service":
+            raise ControlError(
+                "FABRIC_SERVICE_EXECUTION_UNSUPPORTED",
+                "persistent Fabric service currently exposes fleet reads only; configure transitional mode for explicit direct execution compatibility",
+                details={
+                    "fabric_controller": "persistent-service",
+                    "fleet_authority": "persistent-controller",
+                    "execution_transport": "unsupported",
+                },
+            )
+        if self.config.fabric_mode == "transitional":
+            try:
+                fabric = self._module()
+                authority_client = self._service_client(fabric)
+                try:
+                    authority_client.controller_status()
+                finally:
+                    authority_client.close()
+            except Exception as exc:
+                raise ControlError(
+                    "FABRIC_CONTROLLER_UNAVAILABLE",
+                    "transitional execution requires the persistent Fabric controller to remain reachable",
+                    details={
+                        "fabric_controller": "persistent-service",
+                        "fleet_authority": "persistent-controller",
+                        "execution_transport": "embedded-direct-compatibility",
+                        "diagnostic": redact_text(str(exc)),
+                    },
+                ) from exc
         if self.policy is None:
             raise ControlError("FABRIC_UNAVAILABLE", "workspace policy is unavailable")
         if task_type not in {"pytest", "python", "cargo_test"}:
@@ -528,13 +642,18 @@ class FabricAdapter:
             archive = self.config.fabric_state.parent / "bundles" / f"{job_suffix}.zip"
             bundle_report = bundles.build_bundle_archive(artifact_root, archive).as_dict()
             client = fabric.FabricClient(self.config.fabric_controller_id, self.config.fabric_state)
-            registry_report = client.load_registry(registry_path) if registry_path.exists() else None
-            results = client.execute(
-                plan,
-                manifest,
-                worker_id=node,
-                execution_bundle_archive=archive,
-            )
+            try:
+                registry_report = client.load_registry(registry_path) if registry_path.exists() else None
+                results = client.execute(
+                    plan,
+                    manifest,
+                    worker_id=node,
+                    execution_bundle_archive=archive,
+                )
+            finally:
+                close = getattr(client, "close", None)
+                if callable(close):
+                    close()
             return {
                 "status": "completed",
                 "task_type": task_type,
@@ -546,6 +665,9 @@ class FabricAdapter:
                 "manifest_identity": manifest["manifest_identity"],
                 "bundle": bundle_report,
                 "registry": registry_report,
+                "fabric_controller": "persistent-service" if self.config.fabric_mode == "transitional" else "embedded-compatibility",
+                "fleet_authority": "persistent-controller" if self.config.fabric_mode == "transitional" else "embedded-compatibility-controller",
+                "execution_transport": self.config.fabric_execution_mode,
                 "results": results,
             }
         except ControlError:

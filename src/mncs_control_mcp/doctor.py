@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 import json
 import os
 import select
@@ -259,8 +260,61 @@ def run_doctor(config_path: Path, *, profile: str = "mncs-fedora", json_output: 
     checks.append(Check("SSH agent", ssh_status, ssh_detail))
 
     if config is not None:
-        registry_path = effective_fabric_registry(config)
-        checks.append(Check("Fabric registry", "OK" if registry_path.is_file() else "WARNING", str(registry_path)))
+        if config.fabric_mode in {"service", "transitional"}:
+            socket_path = config.fabric_socket.expanduser()
+            try:
+                fabric_package = importlib.import_module("mncs_fabric")
+                fabric_version = str(getattr(fabric_package, "__version__", "unknown"))
+                fabric_api_ok = fabric_version >= "0.2.0a15"
+                fabric_api_detail = f"mncs-fabric {fabric_version}; persistent consumer API required"
+            except Exception as exc:
+                fabric_version = "unavailable"
+                fabric_api_ok = False
+                fabric_api_detail = redact_text(f"mncs-fabric import failed: {exc}")
+            checks.append(
+                Check(
+                    "Fabric package/API",
+                    "OK" if fabric_api_ok else "FAIL",
+                    fabric_api_detail,
+                    required=True,
+                )
+            )
+            checks.append(
+                Check(
+                    "Fabric consumer socket",
+                    "OK" if socket_path.is_socket() else "FAIL",
+                    str(socket_path),
+                    required=True,
+                )
+            )
+            try:
+                from .adapters import FabricAdapter
+
+                fabric_status = FabricAdapter(config).status()
+                connected = fabric_status.get("controller_connected") is True
+                checks.append(
+                    Check(
+                        "Fabric controller",
+                        "OK" if connected else "FAIL",
+                        "persistent controller responded" if connected else str(fabric_status.get("diagnostic", "unavailable")),
+                        required=True,
+                    )
+                )
+                checks.append(
+                    Check(
+                        "Fabric consumer fleet read",
+                        "OK" if connected and fabric_status.get("persistent_service_support", {}).get("persistent_fleet_read") else "FAIL",
+                        f"workers={fabric_status.get('fleet_count', 0)}",
+                        required=True,
+                    )
+                )
+            except Exception as exc:
+                checks.append(Check("Fabric controller", "FAIL", redact_text(str(exc)), required=True))
+            checks.append(Check("Fabric admin authority", "OK", "Control uses ordinary consumer access; admin socket is not configured", required=True))
+            checks.append(Check("Fabric worker credentials", "OK", "consumer mode does not require worker certificates or private keys", required=True))
+        else:
+            registry_path = effective_fabric_registry(config)
+            checks.append(Check("Fabric registry", "OK" if registry_path.is_file() else "WARNING", str(registry_path)))
         checks.append(Check("Harness", "OK" if config.harness_path.is_dir() else "WARNING", str(config.harness_path)))
         checks.append(Check("Forge", "OK" if config.forge_path.is_dir() else "WARNING", str(config.forge_path)))
         ollama = shutil.which("ollama")

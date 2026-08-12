@@ -64,6 +64,13 @@ class ControlConfig:
     fabric_state: Path = field(
         default_factory=lambda: Path.home() / ".local" / "state" / "mncs-control-mcp" / "fabric.jsonl"
     )
+    fabric_mode: str = "embedded"
+    fabric_socket: Path = field(
+        default_factory=lambda: Path.home() / ".local" / "state" / "mncs-fabric" / "controller.sock"
+    )
+    fabric_service_timeout_seconds: float = 5.0
+    fabric_consumer_identity: str = "mncs-control-mcp"
+    fabric_execution_mode: str = "embedded-direct"
     fabric_controller_id: str = "epi13-local-harness"
     forge_config_name: str = "mncs-forge.toml"
     forge_mcp_executable: Path | None = None
@@ -192,6 +199,34 @@ def load_config(path: Path | str | None = None) -> ControlConfig:
     def state_path(table: dict[str, object], key: str, default: Path) -> Path:
         return _path(table[key]) if key in table else default.resolve()
 
+    fabric_mode = str(integration.get("fabric_mode", "service"))
+    if fabric_mode not in {"service", "embedded", "transitional"}:
+        raise ControlError("CONFIG_INVALID", "integration.fabric_mode must be service, embedded, or transitional")
+    fabric_execution_mode = str(
+        integration.get(
+            "fabric_execution_mode",
+            "unavailable-until-service-support" if fabric_mode == "service" else "embedded-direct",
+        )
+    )
+    expected_execution_modes = {
+        "service": {"unavailable-until-service-support", "persistent-service"},
+        "embedded": {"embedded-direct"},
+        "transitional": {"embedded-direct-compatibility"},
+    }
+    if fabric_execution_mode not in expected_execution_modes[fabric_mode]:
+        raise ControlError("CONFIG_INVALID", "integration.fabric_execution_mode does not match fabric_mode")
+    if fabric_mode == "service" and any(key in integration for key in ("fabric_registry", "fabric_state")):
+        raise ControlError(
+            "CONFIG_LEGACY_FABRIC_OWNERSHIP",
+            "service mode does not accept Control-owned fabric_registry or fabric_state; remove them or select embedded/transitional",
+        )
+    fabric_timeout = float(integration.get("fabric_service_timeout_seconds", 5.0))
+    if not 0.1 <= fabric_timeout <= 30:
+        raise ControlError("CONFIG_INVALID", "integration.fabric_service_timeout_seconds must be between 0.1 and 30")
+    fabric_identity = str(integration.get("fabric_consumer_identity", "mncs-control-mcp"))
+    if not fabric_identity or len(fabric_identity) > 128 or "\x00" in fabric_identity:
+        raise ControlError("CONFIG_INVALID", "integration.fabric_consumer_identity is invalid")
+
     harness_value = integration.get("harness_config")
     forge_executable = integration.get("forge_mcp_executable")
     forge_config = integration.get("forge_mcp_config")
@@ -252,6 +287,15 @@ def load_config(path: Path | str | None = None) -> ControlConfig:
             "fabric_state",
             Path.home() / ".local" / "state" / "mncs-control-mcp" / "fabric.jsonl",
         ),
+        fabric_mode=fabric_mode,
+        fabric_socket=state_path(
+            integration,
+            "fabric_socket",
+            Path.home() / ".local" / "state" / "mncs-fabric" / "controller.sock",
+        ),
+        fabric_service_timeout_seconds=fabric_timeout,
+        fabric_consumer_identity=fabric_identity,
+        fabric_execution_mode=fabric_execution_mode,
         fabric_controller_id=str(integration.get("fabric_controller_id", "epi13-local-harness")),
         forge_config_name=str(integration.get("forge_config_name", "mncs-forge.toml")),
         forge_mcp_executable=_path(forge_executable) if forge_executable else None,
