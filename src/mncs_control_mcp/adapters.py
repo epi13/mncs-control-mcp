@@ -710,6 +710,22 @@ class FabricAdapter:
         stale = sum(1 for worker in workers if worker.get("presence") == "STALE" or worker.get("availability") == "UNKNOWN")
         return {"fleet_count": len(workers), "present_workers": present, "available_workers": available, "stale_workers": stale}
 
+    @staticmethod
+    def _version_compatibility(fabric: Any, controller: dict[str, Any]) -> dict[str, object]:
+        client_version = str(getattr(fabric, "__version__", "unknown"))
+        controller_version = controller.get("fabric_version")
+        controller_version = str(controller_version) if controller_version else "unknown"
+        if client_version == "unknown" or controller_version == "unknown":
+            state = "unknown"
+        else:
+            state = "compatible" if client_version == controller_version else "mismatch"
+        return {
+            "state": state,
+            "client_version": client_version,
+            "controller_version": controller_version,
+            "action": "dispatch_allowed" if state == "compatible" else "fail_closed",
+        }
+
     def status(self) -> dict[str, object]:
         try:
             fabric = self._module()
@@ -729,6 +745,7 @@ class FabricAdapter:
                 finally:
                     client.close()
                 counts = self._fleet_counts(workers)
+                compatibility = self._version_compatibility(fabric, controller)
                 return {
                     "available": True,
                     "status": "available" if workers else "empty",
@@ -736,6 +753,7 @@ class FabricAdapter:
                     "controller_connected": True,
                     "client_fabric_version": getattr(fabric, "__version__", "unknown"),
                     "controller_version": controller.get("fabric_version"),
+                    "compatibility": compatibility,
                     "controller_contract_identity": controller.get("public_contract_identity"),
                     "service_contract": controller.get("service_contract"),
                     "service_mode": self.config.fabric_mode == "service",
@@ -823,6 +841,13 @@ class FabricAdapter:
                         "execution_transport": "unsupported",
                         "persistent_service_support": support.as_dict(),
                     },
+                )
+            compatibility = self._version_compatibility(fabric, service_controller or {})
+            if compatibility["state"] == "mismatch":
+                raise ControlError(
+                    "FABRIC_VERSION_MISMATCH",
+                    "Fabric client and persistent controller versions are incompatible",
+                    details={"compatibility": compatibility},
                 )
         if self.config.fabric_mode == "transitional":
             try:
