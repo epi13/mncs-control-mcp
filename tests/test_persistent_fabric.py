@@ -94,6 +94,8 @@ def test_service_status_reads_persistent_fleet_and_closes_only_consumer(
     assert service.status()["service_runtime"] == "RUNNING"
     assert status["controller_version"] == service.status()["fabric_version"]
     assert status["controller_contract_identity"] == service.status()["public_contract_identity"]
+    assert status["compatibility"]["state"] == "compatible"
+    assert status["compatibility"]["action"] == "dispatch_allowed"
 
 
 def test_service_dispatch_fails_explicitly_without_fallback(config, persistent_service) -> None:

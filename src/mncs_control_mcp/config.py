@@ -70,7 +70,9 @@ class ControlConfig:
     fabric_socket: Path = field(
         default_factory=lambda: Path.home() / ".local" / "state" / "mncs-fabric" / "controller.sock"
     )
-    fabric_service_timeout_seconds: float = 5.0
+    # Controller status and persistent dispatch may include a bounded worker
+    # round-trip; keep the default below the transport's 30-second ceiling.
+    fabric_service_timeout_seconds: float = 30.0
     fabric_consumer_identity: str = "mncs-control-mcp"
     commons_socket: Path = field(
         default_factory=lambda: Path.home()
@@ -242,7 +244,7 @@ def load_config(path: Path | str | None = None) -> ControlConfig:
             "CONFIG_LEGACY_FABRIC_OWNERSHIP",
             "service mode does not accept Control-owned fabric_registry or fabric_state; remove them or select embedded/transitional",
         )
-    fabric_timeout = float(integration.get("fabric_service_timeout_seconds", 5.0))
+    fabric_timeout = float(integration.get("fabric_service_timeout_seconds", 30.0))
     if not 0.1 <= fabric_timeout <= 30:
         raise ControlError("CONFIG_INVALID", "integration.fabric_service_timeout_seconds must be between 0.1 and 30")
     fabric_identity = str(integration.get("fabric_consumer_identity", "mncs-control-mcp"))
