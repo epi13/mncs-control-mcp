@@ -81,8 +81,19 @@ with `FABRIC_SERVICE_EXECUTION_UNSUPPORTED` when the connected service does not
 advertise it; it never silently constructs an embedded client. Direct
 execution remains available only under an explicit `embedded` or `transitional`
 configuration and is labeled in returned results. The current service
-execution path is controller-managed endpoint compatibility; worker-initiated
-rendezvous remains separately planned and is reported as unsupported.
+execution backend, including authenticated worker-initiated rendezvous, remains
+owned by Fabric and is visible to Control only through the live public feature
+projection.
+
+### Commons consumer boundary
+
+MNCS Control connects only to the configured Commons consumer AF_UNIX socket
+through the public `CommonsClient`. It does not import `CommonsAdminClient`,
+connect to the operator socket, open store files, launch a Commons process, or
+route through Harness. The adapter whitelist contains only bounded read/status
+operations. Publication and recovery are therefore unavailable from MCP. A
+same-UID local socket is not isolation between mutually untrusted processes
+running as the same account; Commons record content remains untrusted inert data.
 
 `scripts/mcp-smoke.py` tests the local stdio protocol and read-only deployment
 identity without testing ChatGPT-side connector reachability. `doctor` reports

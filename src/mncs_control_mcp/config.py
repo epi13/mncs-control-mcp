@@ -72,6 +72,14 @@ class ControlConfig:
     )
     fabric_service_timeout_seconds: float = 5.0
     fabric_consumer_identity: str = "mncs-control-mcp"
+    commons_socket: Path = field(
+        default_factory=lambda: Path.home()
+        / ".local"
+        / "state"
+        / "mncs-commons"
+        / "commons.sock"
+    )
+    commons_service_timeout_seconds: float = 5.0
     fabric_execution_mode: str = "unavailable-until-service-support"
     fabric_controller_id: str = "epi13-local-harness"
     forge_config_name: str = "mncs-forge.toml"
@@ -90,6 +98,10 @@ class ControlConfig:
     @property
     def fabric_path(self) -> Path:
         return self.workspace_root / self.repositories.get("fabric", "mncs-fabric")
+
+    @property
+    def commons_path(self) -> Path:
+        return self.workspace_root / self.repositories.get("commons", "MNCS-Commons")
 
     @property
     def forge_path(self) -> Path:
@@ -228,6 +240,12 @@ def load_config(path: Path | str | None = None) -> ControlConfig:
     fabric_identity = str(integration.get("fabric_consumer_identity", "mncs-control-mcp"))
     if not fabric_identity or len(fabric_identity) > 128 or "\x00" in fabric_identity:
         raise ControlError("CONFIG_INVALID", "integration.fabric_consumer_identity is invalid")
+    commons_timeout = float(integration.get("commons_service_timeout_seconds", 5.0))
+    if not 0.1 <= commons_timeout <= 30:
+        raise ControlError(
+            "CONFIG_INVALID",
+            "integration.commons_service_timeout_seconds must be between 0.1 and 30",
+        )
 
     harness_value = integration.get("harness_config")
     forge_executable = integration.get("forge_mcp_executable")
@@ -297,6 +315,12 @@ def load_config(path: Path | str | None = None) -> ControlConfig:
         ),
         fabric_service_timeout_seconds=fabric_timeout,
         fabric_consumer_identity=fabric_identity,
+        commons_socket=state_path(
+            integration,
+            "commons_socket",
+            Path.home() / ".local" / "state" / "mncs-commons" / "commons.sock",
+        ),
+        commons_service_timeout_seconds=commons_timeout,
         fabric_execution_mode=fabric_execution_mode,
         fabric_controller_id=str(integration.get("fabric_controller_id", "epi13-local-harness")),
         forge_config_name=str(integration.get("forge_config_name", "mncs-forge.toml")),

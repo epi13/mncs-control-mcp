@@ -61,6 +61,8 @@ fabric_mode = "service"
 fabric_socket = "~/.local/state/mncs-fabric/controller.sock"
 fabric_service_timeout_seconds = 5.0
 fabric_consumer_identity = "mncs-control-mcp"
+commons_socket = "~/.local/state/mncs-commons/commons.sock"
+commons_service_timeout_seconds = 5.0
 fabric_execution_mode = "unavailable-until-service-support"
 # Service mode reads the Fabric-owned fleet and does not copy workers.json,
 # trust state, certificates, or keys into Control. For explicit compatibility:

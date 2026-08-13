@@ -17,8 +17,8 @@ developer workspace   MNCS adapters
  |  |  |  |           |-- epi13-local-harness
  |  |  |  +-- tools   |-- mncs-fabric
  |  |  +----- Git     |-- mncs-forge-mcp
- |  +-------- Bash    `-- Ollama/models
- `----------- files
+ |  +-------- Bash    |-- MNCS-Commons
+ `----------- files   `-- Ollama/models
               |
          Bubblewrap
               |
@@ -29,11 +29,11 @@ Fabric integration is a consumer boundary: the persistent
 `mncs-fabric-controller.service` owns fleet lifecycle and worker presence;
 Control reads the same consumer AF_UNIX socket as Local Harness. Service mode
 does not copy a worker registry or trust material and does not expose Fabric
-administration. The current public Fabric contract does not advertise
-persistent execution over that socket, so Control reports the limitation
-explicitly. Select `transitional`
-only when bounded embedded-direct execution compatibility is intentionally
-configured.
+administration. Control derives execution support from the connected service's
+live feature projection, using persistent dispatch only when it is advertised
+and reporting `FABRIC_SERVICE_EXECUTION_UNSUPPORTED` otherwise. Select
+`transitional` only when bounded embedded-direct execution compatibility is
+intentionally configured.
 
 The MCP registration layer is intentionally thin. `WorkspacePolicy` owns path authorization; `Sandbox` constructs the Linux namespace; `FileService`, `GitService`, `ProcessManager`, `ProjectService`, `ToolInventory`, and `AuditLog` own cohesive capabilities. Harness remains the agent/model layer, Fabric remains the distributed execution and routing authority, and Forge remains the evaluation/evidence authority.
 
@@ -182,6 +182,13 @@ Every Git command runs inside the same project sandbox, including repository hoo
 `project_review` provides bounded project/Git/test/CI/documentation context. `test_discover`, `test_run`, and `project_check` cover detected pytest, Cargo, Node, Go, and CTest workflows; the legacy `run_tests` name remains supported. Test operations report a structured toolchain choice: Python prefers a safe project `.venv/bin/python`/`python3`, then an explicitly declared bounded path, then the approved system interpreter; Rust, Node, Go, and CMake use the same resolver shape with approved system tools. Runner-aware parsers annotate supported output, but process exit status remains authoritative. When the control repository tests itself, Bubblewrap integration tests are marked `requires_bwrap_namespace` and reported as an explicit skip because the outer production sandbox is already the security boundary; they are not falsely reported as passing. `control_capabilities` and `laboratory_status` expose the current dependency graph and compute topology for agent planning. Their Forge entry reports `configuration_missing`, `executable_missing`, `process_start_failed`, `mcp_initialization_failed`, `capability_unavailable`, or `healthy` after a real stdio MCP probe. `control_run` composes only named workflows, including `review_and_check_project` and the opt-in `review_check_and_fabric_test`; each returns bounded step records and a persisted control ID. `run_mncs_evaluation` uses Forge's current typed operation registry for declared development workflows. `dispatch_fabric_job` negotiates the connected controller's public service feature projection; when the controller-owned authenticated worker backend is configured it uses `FabricClient.connect()` and reports `execution_transport=persistent-service`, otherwise service mode returns `FABRIC_SERVICE_EXECUTION_UNSUPPORTED` and never silently creates an embedded client. Fabric owns fleet authority; Harness owns model/agent routing.
 
 Service mode configures `integration.fabric_socket` and an ordinary consumer identity. It does not require a Control-owned registry, controller lifecycle, or worker trust material. `fabric_controller_id` remains only for explicit embedded compatibility.
+
+Commons integration is also a consumer boundary. Control connects directly to
+the configured persistent Commons consumer socket through the public
+`CommonsClient`; it neither launches a Harness subprocess nor opens the Commons
+store. The exposed operations are the fixed read-only status/work/query/get/
+conversation/evidence/sync set. Publication and recovery are absent, and record
+content is always returned as untrusted inert data.
 
 Use `./scripts/mcp-smoke.py --config control.toml` for a local, read-only
 protocol/deployment check. It cannot verify ChatGPT-side connector reachability;

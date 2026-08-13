@@ -44,7 +44,7 @@ class ControlPlaneService:
         fabric = self.integrations.fabric.status()
         harness = self.integrations.harness.status()
         forge = self.integrations.forge.status()
-        commons_path = self.config.workspace_root / self.config.repositories.get("commons", "MNCS-Commons")
+        commons = self.integrations.commons.status()
         fabric_support = fabric.get("persistent_service_support", {})
         service_execution = (
             fabric.get("execution_transport") == "persistent-service"
@@ -130,8 +130,8 @@ class ControlPlaneService:
             "commons": self._integration_capability(
                 commons,
                 ["status", "work discovery", "query", "record read", "conversation graph", "evidence trace", "ledger sync"],
-                "read-only through Harness-owned Commons MCP; publication is not exposed by Control",
-                authority="controller-local Commons owns records; Harness owns the MCP mediation boundary",
+                "read-only through the Commons consumer socket; publication is not exposed by Control",
+                authority="controller-local Commons owns records and its separate operator surface",
             ),
             "models": {"available": True, "version": None, "supported_operations": ["inventory", "runtime and worker visibility"], "limitations": ["routing remains Harness/Fabric-owned"], "security_boundary": "read-only metadata", "mutation": False, "network_required": False, "local": False},
             "gpu": {"available": shutil.which("nvidia-smi") is not None, "version": None, "supported_operations": ["host inventory"], "limitations": ["GPU device access is not enabled for general sandbox jobs"], "security_boundary": "host probe only", "mutation": False, "network_required": False, "local": True},
