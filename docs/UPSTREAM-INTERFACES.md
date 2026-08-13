@@ -38,6 +38,9 @@ certificates, or private keys into Control state.
 The service status response is controller-owned and includes `fabric_version`,
 `service_contract`, and `public_contract_identity`. Consumers report that
 identity separately from their locally imported Fabric client version.
+Control additionally exposes `compatibility.state` and `compatibility.action`;
+known client/controller version mismatches are reported explicitly and dispatch
+fails closed with `FABRIC_VERSION_MISMATCH`.
 
 The adapter does not turn a caller string into Fabric remote shell. Python scripts must exist in the selected artifact tree; pytest/cargo entrypoints are fixed task families. Fabric bundle limits and symlink rules remain authoritative. The optional MCP `model` field is reported but not used to invent model-placement semantics; Harness owns model routing.
 
