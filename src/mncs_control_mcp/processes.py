@@ -145,6 +145,15 @@ class ProcessManager:
         for item in raw[-100:]:
             if not isinstance(item, dict) or not isinstance(item.get("job_id"), str):
                 continue
+            persisted_status = str(item.get("status", "unknown"))
+            kind = str(item.get("kind", "terminal"))
+            reconciled_status = (
+                "upstream_detached"
+                if persisted_status in {"running", "queued"} and kind != "terminal"
+                else "orphaned" if persisted_status == "running" else persisted_status
+            )
+            if reconciled_status != persisted_status:
+                changed = True
             job = TerminalJob(
                 job_id=item["job_id"],
                 command=str(item.get("command", "[unavailable]")),
@@ -154,18 +163,14 @@ class ProcessManager:
                 network=bool(item.get("network", False)),
                 sandbox_backend=str(item.get("sandbox_backend", "unknown")),
                 timeout_seconds=float(item.get("timeout_seconds", 0)),
-                status=(
-                    "upstream_detached"
-                    if item.get("status") in {"running", "queued"} and str(item.get("kind", "terminal")) != "terminal"
-                    else "orphaned" if item.get("status") == "running" else str(item.get("status", "unknown"))
-                ),
+                status=reconciled_status,
                 created_at=str(item.get("created_at", utc_now())),
                 started_at=str(item.get("started_at", utc_now())),
                 completed_at=item.get("completed_at") if isinstance(item.get("completed_at"), str) else None,
                 exit_code=item.get("exit_code") if isinstance(item.get("exit_code"), int) else None,
                 timed_out=bool(item.get("timed_out", False)),
                 stopped=bool(item.get("stopped", False)),
-                kind=str(item.get("kind", "terminal")),
+                kind=kind,
                 upstream_id=item.get("upstream_id") if isinstance(item.get("upstream_id"), str) else None,
                 result_summary=item.get("result_summary") if isinstance(item.get("result_summary"), dict) else None,
                 artifacts=item.get("artifacts") if isinstance(item.get("artifacts"), list) else [],
