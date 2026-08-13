@@ -485,6 +485,16 @@ class CommonsAdapter:
                 "COMMONS_SERVICE_UNAVAILABLE", redact_text(str(exc))
             ) from exc
 
+    def _operator(self) -> Any:
+        try:
+            commons = self._module()
+            return commons.CommonsAdminClient.connect(
+                self.config.commons_operator_socket,
+                timeout=self.config.commons_service_timeout_seconds,
+            )
+        except Exception as exc:
+            raise ControlError("COMMONS_OPERATOR_UNAVAILABLE", redact_text(str(exc))) from exc
+
     def _bounded(self, payload: object) -> dict[str, object]:
         try:
             encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
@@ -573,6 +583,24 @@ class CommonsAdapter:
 
     def work_status(self, work_id: str) -> dict[str, object]:
         return self._read("work_status", self._text(work_id, "work_id") or "")
+
+    def submit_work(self, request: dict[str, object]) -> dict[str, object]:
+        operator = self._operator()
+        try:
+            return self._bounded(operator.submit_work(request))
+        except Exception as exc:
+            raise ControlError("COMMONS_WORK_SUBMIT_FAILED", redact_text(str(exc))) from exc
+        finally:
+            operator.close()
+
+    def transition_work(self, work_id: str, transition: dict[str, object]) -> dict[str, object]:
+        operator = self._operator()
+        try:
+            return self._bounded(operator.transition_work(work_id, transition))
+        except Exception as exc:
+            raise ControlError("COMMONS_WORK_TRANSITION_FAILED", redact_text(str(exc))) from exc
+        finally:
+            operator.close()
 
     def opportunities(self, limit: int = 100) -> dict[str, object]:
         return self._read("work", limit=self._limit(limit))

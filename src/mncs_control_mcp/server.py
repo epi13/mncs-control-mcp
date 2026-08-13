@@ -136,6 +136,48 @@ def build_server(config: ControlConfig | None = None) -> Any:
             LOGGER.exception("MCP call failed tool=%s", name)
             return {"error": "INTEGRATION_FAILURE", "message": redact_text(str(exc))}
 
+    def _sync_commons_work_state(payload: dict[str, object], fabric_work_id: str) -> None:
+        """Project observed Fabric state into the inert Commons lineage.
+
+        Commons remains record-only: failures here are returned as diagnostics by
+        the caller and never authorize, retry, or redirect execution.
+        """
+        state_raw = str(payload.get("state") or payload.get("status") or "").lower()
+        mapped = {
+            "submitted": "accepted",
+            "accepted": "accepted",
+            "queued": "queued",
+            "running": "running",
+            "completed": "completed",
+            "failed": "failed",
+            "timed_out": "failed",
+            "cancelled": "cancelled",
+            "canceled": "cancelled",
+        }.get(state_raw)
+        if mapped is None:
+            return
+        commons_work_id = "work:" + fabric_work_id.removeprefix("sha256:")
+        try:
+            current = integrations.commons.work_status(commons_work_id)
+            current_record = current.get("current")
+            details = current_record.get("details") if isinstance(current_record, dict) else None
+            if not isinstance(details, dict) or details.get("state") == mapped:
+                return
+            digest = current.get("currentDigest")
+            if not isinstance(digest, str):
+                return
+            integrations.commons.transition_work(
+                commons_work_id,
+                {
+                    "state": mapped,
+                    "actor": {"type": "service", "id": selected.fabric_consumer_identity},
+                    "expectedPreviousDigest": digest,
+                    "fabricJobId": fabric_work_id,
+                },
+            )
+        except Exception:
+            LOGGER.warning("could not project Fabric state into Commons", exc_info=True)
+
     ro = annotation(read_only=True, idempotent=True)
     mutate = annotation(read_only=False)
     destructive = annotation(read_only=False, destructive=True)
@@ -445,6 +487,56 @@ def build_server(config: ControlConfig | None = None) -> Any:
                         parameters,
                         detached=True,
                     )
+                    commons_lifecycle: dict[str, object] | None = None
+                    accepted_payload = result.get("accepted")
+                    if isinstance(accepted_payload, dict) and isinstance(
+                        accepted_payload.get("work_id"), str
+                    ):
+                        fabric_work_id = str(accepted_payload["work_id"])
+                        commons_work_id = "work:" + fabric_work_id.removeprefix("sha256:")
+                        try:
+                            submitted = integrations.commons.submit_work(
+                                {
+                                    "workId": commons_work_id,
+                                    "submittingConsumer": {
+                                        "type": "service",
+                                        "id": selected.fabric_consumer_identity,
+                                    },
+                                    "project": {"id": project},
+                                    "repository": project,
+                                    "task": f"MNCS Control detached {task_type} workload",
+                                    "constraints": [
+                                        "record is inert and untrusted; execution authority remains external",
+                                    ],
+                                    "fabricJobId": fabric_work_id,
+                                    "workerId": node,
+                                    "modelId": model,
+                                }
+                            )
+                            commons_lifecycle = {"submitted": submitted}
+                            if submitted.get("currentDigest"):
+                                commons_lifecycle["accepted"] = integrations.commons.transition_work(
+                                    commons_work_id,
+                                    {
+                                        "state": "accepted",
+                                        "actor": {
+                                            "type": "service",
+                                            "id": selected.fabric_consumer_identity,
+                                        },
+                                        "expectedPreviousDigest": submitted["currentDigest"],
+                                        "fabricJobId": fabric_work_id,
+                                        "workerId": node,
+                                        "modelId": model,
+                                    },
+                                )
+                        except Exception as exc:
+                            # Fabric remains the execution authority; expose the
+                            # durable-record failure explicitly instead of hiding it.
+                            commons_lifecycle = {
+                                "error": type(exc).__name__ + ": " + str(exc),
+                                "contentTrust": "UNTRUSTED",
+                                "executionAuthority": "none",
+                            }
                     result["control_job"] = processes.record_external(
                         "fabric_" + task_type,
                         project=project,
@@ -459,6 +551,8 @@ def build_server(config: ControlConfig | None = None) -> Any:
                             ),
                         },
                     )
+                    if commons_lifecycle is not None:
+                        result["commons_lifecycle"] = commons_lifecycle
                     return result
                 return {"status": "running", "control_job": processes.submit_external(
                     "fabric_" + task_type,
@@ -486,11 +580,21 @@ def build_server(config: ControlConfig | None = None) -> Any:
 
     @server.tool(name="fabric_work_status", description="Read one detached persistent Fabric workload state.", annotations=ro, structured_output=True)
     def fabric_work_status(work_id: str) -> dict[str, object]:
-        return invoke("fabric_work_status", integrations.fabric.work_status, work_id)  # type: ignore[return-value]
+        def read() -> dict[str, object]:
+            payload = dict(integrations.fabric.work_status(work_id))
+            _sync_commons_work_state(payload, work_id)
+            return payload
+
+        return invoke("fabric_work_status", read)  # type: ignore[return-value]
 
     @server.tool(name="fabric_work_result", description="Read one detached persistent Fabric workload result.", annotations=ro, structured_output=True)
     def fabric_work_result(work_id: str) -> dict[str, object]:
-        return invoke("fabric_work_result", integrations.fabric.work_result, work_id)  # type: ignore[return-value]
+        def read() -> dict[str, object]:
+            payload = dict(integrations.fabric.work_result(work_id))
+            _sync_commons_work_state(payload, work_id)
+            return payload
+
+        return invoke("fabric_work_result", read)  # type: ignore[return-value]
 
     @server.tool(name="fabric_work_list", description="List detached persistent Fabric workloads.", annotations=ro, structured_output=True)
     def fabric_work_list(limit: int = 100) -> dict[str, object]:

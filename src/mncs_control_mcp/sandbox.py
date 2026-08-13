@@ -180,6 +180,10 @@ class Sandbox:
                 self.config.commons_socket,
                 Path("/home/developer/.local/state/mncs-commons/commons.sock"),
             ),
+            (
+                self.config.commons_operator_socket,
+                Path("/home/developer/.local/state/mncs-commons/commons-operator.sock"),
+            ),
         ):
             try:
                 entry = os.lstat(source)

@@ -81,6 +81,13 @@ class ControlConfig:
         / "mncs-commons"
         / "commons.sock"
     )
+    commons_operator_socket: Path = field(
+        default_factory=lambda: Path.home()
+        / ".local"
+        / "state"
+        / "mncs-commons"
+        / "commons-operator.sock"
+    )
     commons_service_timeout_seconds: float = 5.0
     fabric_execution_mode: str = "unavailable-until-service-support"
     fabric_controller_id: str = "epi13-local-harness"
@@ -329,6 +336,11 @@ def load_config(path: Path | str | None = None) -> ControlConfig:
             integration,
             "commons_socket",
             Path.home() / ".local" / "state" / "mncs-commons" / "commons.sock",
+        ),
+        commons_operator_socket=state_path(
+            integration,
+            "commons_operator_socket",
+            Path.home() / ".local" / "state" / "mncs-commons" / "commons-operator.sock",
         ),
         commons_service_timeout_seconds=commons_timeout,
         fabric_execution_mode=fabric_execution_mode,
