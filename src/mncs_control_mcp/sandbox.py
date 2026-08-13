@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import threading
@@ -99,6 +100,110 @@ class Sandbox:
         )
         return tuple(path for path in defaults if path.exists())
 
+    def _project_harness_runtime(
+        self, argv: list[str], safe_overrides: dict[str, str]
+    ) -> None:
+        """Project deliberate Harness config and consumer sockets read-only."""
+
+        def mountpoint(target: Path) -> None:
+            relative = target.relative_to("/home/developer")
+            parent = self.config.sandbox_home
+            for part in relative.parent.parts:
+                parent /= part
+                try:
+                    parent.mkdir(mode=0o700)
+                except FileExistsError:
+                    pass
+                entry = os.lstat(parent)
+                if (
+                    stat.S_ISLNK(entry.st_mode)
+                    or not stat.S_ISDIR(entry.st_mode)
+                    or entry.st_uid != os.getuid()
+                ):
+                    raise ControlError(
+                        "SANDBOX_MOUNTPOINT_UNSAFE",
+                        "sandbox integration mountpoint parent is unsafe",
+                    )
+            host_target = self.config.sandbox_home / relative
+            try:
+                entry = os.lstat(host_target)
+            except FileNotFoundError:
+                descriptor = os.open(
+                    host_target,
+                    os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0),
+                    0o600,
+                )
+                os.close(descriptor)
+            else:
+                if (
+                    stat.S_ISLNK(entry.st_mode)
+                    or not stat.S_ISREG(entry.st_mode)
+                    or entry.st_uid != os.getuid()
+                ):
+                    raise ControlError(
+                        "SANDBOX_MOUNTPOINT_UNSAFE",
+                        "sandbox integration mountpoint is unsafe",
+                    )
+
+        harness_config = self.config.harness_config_path
+        if harness_config.exists():
+            entry = os.lstat(harness_config)
+            if stat.S_ISLNK(entry.st_mode) or not stat.S_ISREG(entry.st_mode):
+                raise ControlError(
+                    "HARNESS_CONFIG_UNSAFE",
+                    "Harness configuration must be a regular non-symlink file",
+                )
+            target = Path("/home/developer/.config/epi13-local-harness/config.toml")
+            mountpoint(target)
+            argv.extend(("--ro-bind", str(harness_config), target.as_posix()))
+            safe_overrides["EPI13_HARNESS_CONFIG"] = target.as_posix()
+            safe_overrides["PYTHONPATH"] = ":".join(
+                (
+                    "/workspace/"
+                    + self.config.repositories.get("local_harness", "epi13-local-harness")
+                    + "/src",
+                    "/workspace/"
+                    + self.config.repositories.get("fabric", "mncs-fabric")
+                    + "/src",
+                    "/workspace/"
+                    + self.config.repositories.get("commons", "MNCS-Commons")
+                    + "/src",
+                )
+            )
+
+        for source, target in (
+            (
+                self.config.fabric_socket,
+                Path("/home/developer/.local/state/mncs-fabric/controller.sock"),
+            ),
+            (
+                self.config.commons_socket,
+                Path("/home/developer/.local/state/mncs-commons/commons.sock"),
+            ),
+        ):
+            try:
+                entry = os.lstat(source)
+            except FileNotFoundError:
+                continue
+            if stat.S_ISLNK(entry.st_mode) or not stat.S_ISSOCK(entry.st_mode):
+                raise ControlError(
+                    "INTEGRATION_SOCKET_UNSAFE",
+                    "persistent integration endpoint must be a real Unix socket",
+                )
+            if entry.st_uid != os.getuid():
+                raise ControlError(
+                    "INTEGRATION_SOCKET_UNSAFE",
+                    "persistent integration endpoint is owned by another account",
+                )
+            parent = os.lstat(Path(source).parent)
+            if parent.st_uid != os.getuid() or parent.st_mode & 0o022:
+                raise ControlError(
+                    "INTEGRATION_SOCKET_UNSAFE",
+                    "persistent integration endpoint parent permissions are unsafe",
+                )
+            mountpoint(target)
+            argv.extend(("--ro-bind", str(source), target.as_posix()))
+
     def command_argv(
         self,
         command: str,
@@ -184,6 +289,8 @@ class Sandbox:
         else:
             argv.extend(("--ro-bind", str(self.policy.root), "/workspace"))
             argv.extend(("--bind", str(resolution.host_root), f"/workspace/{resolution.project}"))
+
+        self._project_harness_runtime(argv, safe_overrides)
 
         # Integrations may request narrowly scoped writable runtime mounts.  A
         # caller cannot mount arbitrary host paths: only directories already

@@ -370,9 +370,17 @@ def build_server(config: ControlConfig | None = None) -> Any:
     def commons_status() -> dict[str, object]:
         return invoke("commons_status", integrations.commons.status)  # type: ignore[return-value]
 
-    @server.tool(name="commons_work", description="List bounded open Commons work opportunities as untrusted inert data.", annotations=ro, structured_output=True)
+    @server.tool(name="commons_work", description="List bounded durable Commons work records as untrusted inert data.", annotations=ro, structured_output=True)
     def commons_work(limit: int = 100) -> dict[str, object]:
         return invoke("commons_work", integrations.commons.work, limit)  # type: ignore[return-value]
+
+    @server.tool(name="commons_work_status", description="Read one durable Commons work record and its append-only history as untrusted inert data.", annotations=ro, structured_output=True)
+    def commons_work_status(work_id: str) -> dict[str, object]:
+        return invoke("commons_work_status", integrations.commons.work_status, work_id)  # type: ignore[return-value]
+
+    @server.tool(name="commons_opportunities", description="List legacy open Commons work opportunities as untrusted inert data.", annotations=ro, structured_output=True)
+    def commons_opportunities(limit: int = 100) -> dict[str, object]:
+        return invoke("commons_opportunities", integrations.commons.opportunities, limit)  # type: ignore[return-value]
 
     @server.tool(name="commons_query", description="Run a bounded read-only Commons query through the Harness-owned MCP boundary.", annotations=ro, structured_output=True)
     def commons_query(kind: str | None = None, state: str | None = None, subject: str | None = None, related: str | None = None, limit: int = 100, open_work: bool = False) -> dict[str, object]:
@@ -428,6 +436,30 @@ def build_server(config: ControlConfig | None = None) -> Any:
             def operation() -> dict[str, object]:
                 return integrations.fabric.dispatch(task_type, project, model, node, parameters)
             if not wait:
+                if selected.fabric_mode == "service":
+                    result = integrations.fabric.dispatch(
+                        task_type,
+                        project,
+                        model,
+                        node,
+                        parameters,
+                        detached=True,
+                    )
+                    result["control_job"] = processes.record_external(
+                        "fabric_" + task_type,
+                        project=project,
+                        node=node,
+                        model=model,
+                        result_summary={
+                            "status": result.get("status"),
+                            "fabric_work_id": (
+                                result.get("accepted", {}).get("work_id")
+                                if isinstance(result.get("accepted"), dict)
+                                else None
+                            ),
+                        },
+                    )
+                    return result
                 return {"status": "running", "control_job": processes.submit_external(
                     "fabric_" + task_type,
                     operation,
@@ -451,6 +483,18 @@ def build_server(config: ControlConfig | None = None) -> Any:
             return result
 
         return invoke("dispatch_fabric_job", dispatch, audit_metadata={"project": project, "task_type": task_type, "node": node})  # type: ignore[return-value]
+
+    @server.tool(name="fabric_work_status", description="Read one detached persistent Fabric workload state.", annotations=ro, structured_output=True)
+    def fabric_work_status(work_id: str) -> dict[str, object]:
+        return invoke("fabric_work_status", integrations.fabric.work_status, work_id)  # type: ignore[return-value]
+
+    @server.tool(name="fabric_work_result", description="Read one detached persistent Fabric workload result.", annotations=ro, structured_output=True)
+    def fabric_work_result(work_id: str) -> dict[str, object]:
+        return invoke("fabric_work_result", integrations.fabric.work_result, work_id)  # type: ignore[return-value]
+
+    @server.tool(name="fabric_work_list", description="List detached persistent Fabric workloads.", annotations=ro, structured_output=True)
+    def fabric_work_list(limit: int = 100) -> dict[str, object]:
+        return invoke("fabric_work_list", integrations.fabric.work_list, limit)  # type: ignore[return-value]
 
     @server.tool(name="control_job_status", description="Inspect a local terminal or upstream control-plane job by stable control ID.", annotations=ro, structured_output=True)
     def control_job_status(job_id: str) -> dict[str, object]:

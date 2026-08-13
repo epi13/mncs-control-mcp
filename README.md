@@ -181,29 +181,31 @@ Every Git command runs inside the same project sandbox, including repository hoo
 
 `project_review` provides bounded project/Git/test/CI/documentation context. `test_discover`, `test_run`, and `project_check` cover detected pytest, Cargo, Node, Go, and CTest workflows; the legacy `run_tests` name remains supported. Test operations report a structured toolchain choice: Python prefers a safe project `.venv/bin/python`/`python3`, then an explicitly declared bounded path, then the approved system interpreter; Rust, Node, Go, and CMake use the same resolver shape with approved system tools. Runner-aware parsers annotate supported output, but process exit status remains authoritative. When the control repository tests itself, Bubblewrap integration tests are marked `requires_bwrap_namespace` and reported as an explicit skip because the outer production sandbox is already the security boundary; they are not falsely reported as passing. `control_capabilities` and `laboratory_status` expose the current dependency graph and compute topology for agent planning. Their Forge entry reports `configuration_missing`, `executable_missing`, `process_start_failed`, `mcp_initialization_failed`, `capability_unavailable`, or `healthy` after a real stdio MCP probe. `control_run` composes only named workflows, including `review_and_check_project` and the opt-in `review_check_and_fabric_test`; each returns bounded step records and a persisted control ID. `run_mncs_evaluation` uses Forge's current typed operation registry for declared development workflows. `dispatch_fabric_job` negotiates the connected controller's public service feature projection; when the controller-owned authenticated worker backend is configured it uses `FabricClient.connect()` and reports `execution_transport=persistent-service`, otherwise service mode returns `FABRIC_SERVICE_EXECUTION_UNSUPPORTED` and never silently creates an embedded client. Fabric owns fleet authority; Harness owns model/agent routing.
 
+In persistent service mode, `dispatch_fabric_job(wait=false)` delegates to Fabric's
+durable detached queue instead of a Control-owned background thread. It returns a
+persistent Fabric `work_id`; later clients call `fabric_work_status`,
+`fabric_work_result`, or `fabric_work_list`. Raw jobs must name a bounded
+`artifact_path` below the project, cannot use the project root, and detached jobs
+must provide a stable `idempotency_key`.
+
 Service mode configures `integration.fabric_socket` and an ordinary consumer identity. It does not require a Control-owned registry, controller lifecycle, or worker trust material. `fabric_controller_id` remains only for explicit embedded compatibility.
 
 Commons integration is also a consumer boundary. Control connects directly to
 the configured persistent Commons consumer socket through the public
 `CommonsClient`; it neither launches a Harness subprocess nor opens the Commons
-store. The exposed operations are the fixed read-only status/work/query/get/
-conversation/evidence/sync set. Publication and recovery are absent, and record
-content is always returned as untrusted inert data.
+store or operator socket. `commons_work` and `commons_work_status` read durable
+append-only coordination history; `commons_opportunities` retains the legacy open
+request projection. Publication and recovery are absent, and record content is
+always returned as untrusted inert data.
 
 Use `./scripts/mcp-smoke.py --config control.toml` for a local, read-only
 protocol/deployment check. It cannot verify ChatGPT-side connector reachability;
 the doctor reports that layer as `UNKNOWN`.
 
-`dispatch_fabric_job` waits for the upstream receipt by default. Set `wait=false`
-for a stable `ctrl-...` job ID, then use `control_job_status` and
-`control_job_result`; Control propagates the bounded job timeout into Fabric's
-validated job plan. Blocking adapters run in a supervised process, so a local
-deadline frees Control executor capacity. `control_job_stop` reports `stopped`
-before the adapter starts and `upstream_detached` after it has started; Fabric's
-current public API exposes no abort operation, so a remote request is never
-described as cancelled when Control cannot prove that. After restart,
-incomplete upstream records become `upstream_detached`. External jobs never
-expose a fabricated local PID.
+`dispatch_fabric_job` waits for the upstream receipt by default. In compatibility
+modes only, `wait=false` retains the older Control-local background job behavior.
+Persistent service mode always returns Fabric's durable work identity. Control does
+not claim cancellation when Fabric has not exposed a matching persistent operation.
 
 Only explicit embedded/transitional compatibility uses the private Control
 Fabric state tree for registry migration, network ledger, and bundle staging.
