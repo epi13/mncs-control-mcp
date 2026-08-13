@@ -420,6 +420,7 @@ class HarnessAdapter:
                     {
                         "persistent_fleet_read": service_support.persistent_fleet_read,
                         "persistent_service_execution": service_support.persistent_service_execution,
+                        "persistent_detached_execution": service_support.persistent_detached_execution,
                         "persistent_service_capability_ingestion": service_support.persistent_service_capability_ingestion,
                         "worker_rendezvous": service_support.worker_rendezvous,
                     }
@@ -508,6 +509,8 @@ class CommonsAdapter:
             if not callable(operation) or method not in {
                 "status",
                 "work",
+                "work_list",
+                "work_status",
                 "query",
                 "get",
                 "conversation",
@@ -566,6 +569,12 @@ class CommonsAdapter:
             }
 
     def work(self, limit: int = 100) -> dict[str, object]:
+        return self._read("work_list", limit=self._limit(limit))
+
+    def work_status(self, work_id: str) -> dict[str, object]:
+        return self._read("work_status", self._text(work_id, "work_id") or "")
+
+    def opportunities(self, limit: int = 100) -> dict[str, object]:
         return self._read("work", limit=self._limit(limit))
 
     def query(
@@ -611,6 +620,7 @@ class FabricContractSupport:
 
     persistent_fleet_read: bool = False
     persistent_service_execution: bool = False
+    persistent_detached_execution: bool = False
     persistent_service_capability_ingestion: bool = False
     persistent_worker_observations: bool = False
     worker_rendezvous: bool = False
@@ -629,6 +639,7 @@ class FabricContractSupport:
         return cls(
             persistent_fleet_read=features.get("persistent_fleet_read") is True,
             persistent_service_execution=features.get("persistent_service_execution") is True,
+            persistent_detached_execution=features.get("persistent_detached_execution") is True,
             persistent_service_capability_ingestion=features.get("persistent_service_capability_ingestion") is True,
             persistent_worker_observations=features.get("persistent_worker_observations") is True,
             worker_rendezvous=features.get("worker_rendezvous") is True,
@@ -644,6 +655,7 @@ class FabricContractSupport:
         return cls(
             persistent_fleet_read=features.get("persistent_fleet_read") is True,
             persistent_service_execution=features.get("persistent_service_execution") is True,
+            persistent_detached_execution=features.get("persistent_detached_execution") is True,
             persistent_service_capability_ingestion=features.get("persistent_service_capability_ingestion") is True,
             persistent_worker_observations=features.get("persistent_worker_observations") is True,
             worker_rendezvous=features.get("worker_rendezvous") is True,
@@ -655,6 +667,7 @@ class FabricContractSupport:
         return {
             "persistent_fleet_read": self.persistent_fleet_read,
             "persistent_service_execution": self.persistent_service_execution,
+            "persistent_detached_execution": self.persistent_detached_execution,
             "persistent_service_capability_ingestion": self.persistent_service_capability_ingestion,
             "persistent_worker_observations": self.persistent_worker_observations,
             "worker_rendezvous": self.worker_rendezvous,
@@ -786,6 +799,8 @@ class FabricAdapter:
         model: str | None = None,
         node: str | None = None,
         parameters: dict[str, object] | None = None,
+        *,
+        detached: bool = False,
     ) -> dict[str, object]:
         """Construct current public Fabric artifacts for bounded task families."""
         fabric = self._module()
@@ -836,8 +851,18 @@ class FabricAdapter:
         values = parameters or {}
         if not isinstance(values, dict):
             raise ControlError("INVALID_INPUT", "parameters must be an object")
-        artifact_path = str(values.get("artifact_path", "."))
+        if "artifact_path" not in values:
+            raise ControlError(
+                "FABRIC_ARTIFACT_ROOT_REQUIRED",
+                "raw Fabric jobs require an explicit bounded artifact_path",
+            )
+        artifact_path = str(values["artifact_path"])
         relative = self.policy.normalize_relative(artifact_path)
+        if relative == Path("."):
+            raise ControlError(
+                "FABRIC_ARTIFACT_ROOT_TOO_BROAD",
+                "raw Fabric jobs cannot bundle the entire project; select a bounded artifact subdirectory",
+            )
         artifact_root = root.joinpath(*relative.parts).resolve(strict=True)
         try:
             artifact_root.relative_to(root)
@@ -875,8 +900,20 @@ class FabricAdapter:
             bundles = importlib.import_module("mncs_fabric.bundles")
             models = importlib.import_module("mncs_fabric.models")
             manifest = artifacts.build_manifest(artifact_root)
+            idempotency_key = values.get("idempotency_key")
+            if detached and (
+                not isinstance(idempotency_key, str)
+                or not idempotency_key
+                or len(idempotency_key) > 256
+                or "\x00" in idempotency_key
+            ):
+                raise ControlError(
+                    "FABRIC_IDEMPOTENCY_KEY_REQUIRED",
+                    "detached Fabric jobs require a bounded idempotency_key",
+                )
+            uniqueness = idempotency_key if detached else str(time.time_ns())
             job_suffix = hashlib.sha256(
-                f"{project}:{task_type}:{manifest['manifest_identity']}:{time.time_ns()}".encode()
+                f"{project}:{task_type}:{manifest['manifest_identity']}:{uniqueness}".encode()
             ).hexdigest()[:20]
             plan = models.validate_job_plan(
                 {
@@ -911,18 +948,35 @@ class FabricAdapter:
             try:
                 if self.config.fabric_mode != "service":
                     registry_report = client.load_registry(registry_path) if registry_path.exists() else None
-                results = client.execute(
-                    plan,
-                    manifest,
-                    worker_id=node,
-                    execution_bundle_archive=archive,
-                )
+                if detached:
+                    if self.config.fabric_mode != "service" or not support.persistent_detached_execution:
+                        raise ControlError(
+                            "FABRIC_DETACHED_EXECUTION_UNSUPPORTED",
+                            "detached execution requires live persistent Fabric support",
+                        )
+                    accepted = client.submit_execution(
+                        plan,
+                        manifest,
+                        worker_id=node,
+                        idempotency_key=str(idempotency_key),
+                        execution_bundle_archive=archive,
+                    )
+                    results = []
+                else:
+                    accepted = None
+                    results = client.execute(
+                        plan,
+                        manifest,
+                        worker_id=node,
+                        execution_bundle_archive=archive,
+                    )
             finally:
                 close = getattr(client, "close", None)
                 if callable(close):
                     close()
             return {
-                "status": "completed",
+                "status": "accepted" if detached else "completed",
+                "accepted": accepted,
                 "task_type": task_type,
                 "project": project,
                 "model": model,
@@ -941,6 +995,37 @@ class FabricAdapter:
             raise
         except Exception as exc:
             raise ControlError("FABRIC_DISPATCH_FAILED", redact_text(str(exc))) from exc
+
+    def work_status(self, work_id: str) -> dict[str, object]:
+        return self._detached_read("execution_status", work_id)
+
+    def work_result(self, work_id: str) -> dict[str, object]:
+        return self._detached_read("execution_result", work_id)
+
+    def work_list(self, limit: int = 100) -> dict[str, object]:
+        if not 1 <= int(limit) <= 1000:
+            raise ControlError("INVALID_INPUT", "limit must be between 1 and 1000")
+        fabric = self._module()
+        client = self._service_client(fabric)
+        try:
+            return {"work": client.executions(limit=int(limit)), "persistent": True}
+        except Exception as exc:
+            raise ControlError("FABRIC_REQUEST_FAILED", redact_text(str(exc))) from exc
+        finally:
+            client.close()
+
+    def _detached_read(self, operation: str, work_id: str) -> dict[str, object]:
+        if not isinstance(work_id, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", work_id):
+            raise ControlError("INVALID_INPUT", "work_id must be a SHA-256 identity")
+        fabric = self._module()
+        client = self._service_client(fabric)
+        try:
+            method = getattr(client, operation)
+            return dict(method(work_id))
+        except Exception as exc:
+            raise ControlError("FABRIC_REQUEST_FAILED", redact_text(str(exc))) from exc
+        finally:
+            client.close()
 
     @staticmethod
     def _public_worker(worker: dict[str, Any]) -> dict[str, object]:

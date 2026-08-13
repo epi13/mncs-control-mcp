@@ -31,6 +31,14 @@ class FakeCommonsClient:
         self.calls.append(("work", limit))
         return {"records": [], "limit": limit}
 
+    def work_list(self, *, limit: int) -> dict[str, object]:
+        self.calls.append(("work_list", limit))
+        return {"work": [], "limit": limit}
+
+    def work_status(self, work_id: str) -> dict[str, object]:
+        self.calls.append(("work_status", work_id))
+        return {"workId": work_id, "history": []}
+
     def query(self, **filters: object) -> dict[str, object]:
         self.calls.append(("query", filters))
         return {"records": [], "filters": filters}
@@ -83,6 +91,8 @@ def test_commons_adapter_uses_only_read_only_service_client(tmp_path: Path) -> N
     assert status["transport"] == "local-unix-service"
 
     assert adapter.work(5)["limit"] == 5
+    assert adapter.opportunities(6)["limit"] == 6
+    assert adapter.work_status("work:fixture")["workId"] == "work:fixture"
     query = adapter.query(
         kind="WorkRequest",
         subject="test:commons-control",

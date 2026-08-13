@@ -96,6 +96,14 @@ class ControlConfig:
         return self.workspace_root / self.repositories.get("local_harness", "epi13-local-harness")
 
     @property
+    def harness_config_path(self) -> Path:
+        return (
+            self.harness_config
+            if self.harness_config is not None
+            else Path.home() / ".config" / "epi13-local-harness" / "config.toml"
+        ).expanduser().resolve()
+
+    @property
     def fabric_path(self) -> Path:
         return self.workspace_root / self.repositories.get("fabric", "mncs-fabric")
 

@@ -148,7 +148,9 @@ def test_live_service_projection_enables_bounded_control_dispatch(
     service._worker_client = backend
     project = config.workspace_root / "fixture-repo"
     project.mkdir()
-    (project / "task.py").write_text("print('control persistent fixture')\n", encoding="utf-8")
+    artifact = project / "artifact"
+    artifact.mkdir()
+    (artifact / "task.py").write_text("print('control persistent fixture')\n", encoding="utf-8")
     consumer_config = replace(
         config,
         fabric_mode="service",
@@ -162,7 +164,7 @@ def test_live_service_projection_enables_bounded_control_dispatch(
     result = adapter.dispatch(
         "python",
         "fixture-repo",
-        parameters={"script": "task.py", "timeout_seconds": 5},
+        parameters={"artifact_path": "artifact", "script": "task.py", "timeout_seconds": 5},
     )
 
     assert status["execution_transport"] == "persistent-service"
@@ -172,6 +174,44 @@ def test_live_service_projection_enables_bounded_control_dispatch(
     assert backend.archive is not None
     assert backend.archive.is_relative_to(service.config.execution_bundle_root_value)
     assert not backend.archive.is_relative_to(consumer_config.job_state_path.parent)
+
+    detached = adapter.dispatch(
+        "python",
+        "fixture-repo",
+        parameters={
+            "artifact_path": "artifact",
+            "script": "task.py",
+            "timeout_seconds": 5,
+            "idempotency_key": "control-detached-fixture",
+        },
+        detached=True,
+    )
+    assert detached["status"] == "accepted"
+    accepted = detached["accepted"]
+    assert isinstance(accepted, dict)
+    work_id = str(accepted["work_id"])
+    deadline = time.monotonic() + 2
+    observed = adapter.work_result(work_id)
+    while observed["state"] != "COMPLETED" and time.monotonic() < deadline:
+        time.sleep(0.01)
+        observed = adapter.work_result(work_id)
+    assert observed["state"] == "COMPLETED"
+    assert adapter.work_status(work_id)["persistent"] is True
+    assert adapter.work_list()["work"][0]["work_id"] == work_id
+
+
+def test_raw_dispatch_rejects_implicit_or_project_root_bundle(config) -> None:
+    project = config.workspace_root / "fixture-repo"
+    project.mkdir()
+    adapter = FabricAdapter(config, WorkspacePolicy(config))
+
+    with pytest.raises(ControlError) as missing:
+        adapter.dispatch("pytest", "fixture-repo")
+    assert missing.value.code == "FABRIC_ARTIFACT_ROOT_REQUIRED"
+
+    with pytest.raises(ControlError) as broad:
+        adapter.dispatch("pytest", "fixture-repo", parameters={"artifact_path": "."})
+    assert broad.value.code == "FABRIC_ARTIFACT_ROOT_TOO_BROAD"
 
 
 def test_control_config_direct_and_loaded_defaults_use_persistent_service(tmp_path: Path) -> None:

@@ -5,6 +5,7 @@ import shutil
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -274,6 +275,42 @@ def test_runtime_mount_accepts_only_control_state_and_keeps_home_unmounted(confi
             runtime_mounts=((tmp_path, "/home/developer/.local/state/other"),),
         )
     assert error.value.code == "INVALID_RUNTIME_MOUNT"
+
+
+@pytest.mark.requires_bwrap_namespace
+def test_harness_config_is_deliberately_projected_into_sandbox(config, tmp_path: Path) -> None:
+    harness_config = tmp_path / "harness.toml"
+    harness_config.write_text("[fabric]\nenabled = true\n", encoding="utf-8")
+    projected = replace(config, harness_config=harness_config)
+    policy = WorkspacePolicy(projected)
+    sandbox = Sandbox(projected, policy)
+    result = sandbox.run(
+        "test \"$EPI13_HARNESS_CONFIG\" = /home/developer/.config/epi13-local-harness/config.toml "
+        "&& grep -q 'enabled = true' \"$EPI13_HARNESS_CONFIG\"",
+        scope="workspace",
+        project=None,
+        cwd=".",
+        timeout_seconds=10,
+        network=False,
+    )
+    assert result.exit_code == 0, result.stderr
+
+
+def test_harness_projection_rejects_symlink_mountpoint(config, tmp_path: Path) -> None:
+    harness_config = tmp_path / "harness.toml"
+    harness_config.write_text("[fabric]\nenabled = true\n", encoding="utf-8")
+    projected = replace(config, harness_config=harness_config)
+    target = projected.sandbox_home / ".config"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.symlink_to(tmp_path / "outside", target_is_directory=True)
+    sandbox = Sandbox(projected, WorkspacePolicy(projected))
+    with pytest.raises(ControlError) as error:
+        sandbox.command_argv(
+            "true",
+            WorkspacePolicy(projected).resolve_scope(scope="workspace", project=None, cwd="."),
+            network=False,
+        )
+    assert error.value.code == "SANDBOX_MOUNTPOINT_UNSAFE"
 
 
 def test_fabric_status_uses_migrated_registry_lock_in_private_state(tmp_path: Path) -> None:
