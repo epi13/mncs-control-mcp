@@ -21,9 +21,9 @@ capability independently. When the controller is configured with its
 operator-owned authenticated worker endpoint registry, it also advertises
 controller-managed service execution, worker observations, and capability
 ingestion. `FabricClient.connect()` dispatches through that service path; it
-does not load the registry or worker credentials into Control. Worker-initiated
-rendezvous remains a separate planned feature and is not advertised by the
-current service. If the connected controller does not advertise execution,
+does not load the registry or worker credentials into Control. Authenticated
+worker-initiated rendezvous is another controller-owned backend and can project
+the same public service features when configured. If the connected controller does not advertise execution,
 Control reports `FABRIC_SERVICE_EXECUTION_UNSUPPORTED` rather than creating an
 embedded execution client. `transitional` mode may use a separately marked
 embedded-direct compatibility client for bounded execution while persistent
@@ -54,7 +54,13 @@ lifecycle, scoring, and claim boundaries.
 
 ## Commons
 
-Commons remains transport-neutral and evidence-preserving. This MCP does not turn Commons content, reproduction instructions, or suggested actions into commands. Any future publication adapter must use Commons' public boundary and preserve PASS/FAIL/UNKNOWN distinctions.
+Commons remains transport-neutral and evidence-preserving. Control uses the
+persistent local service's public consumer client and socket, not a Harness CLI
+subprocess or direct store access. Its fixed adapter exposes only status, work,
+query, get, conversation, evidence, and sync. The consumer client has no publish
+or recovery method; those operations remain on Commons' separate operator
+boundary. Commons content, reproduction instructions, and suggested actions are
+returned as untrusted inert data and never become commands.
 
 ## Control-plane ownership
 

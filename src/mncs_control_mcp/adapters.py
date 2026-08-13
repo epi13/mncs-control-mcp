@@ -10,7 +10,6 @@ import re
 import shlex
 import shutil
 import socket
-import subprocess
 import sys
 import threading
 import time
@@ -458,12 +457,7 @@ class HarnessAdapter:
 
 
 class CommonsAdapter:
-    """Read-only Control facade over the Harness-owned Commons operator CLI.
-
-    The Harness venv is the dependency boundary for Commons/MCP. Control never
-    imports Commons records as executable content and never exposes publication
-    through this adapter.
-    """
+    """Read-only Control facade over the persistent Commons consumer socket."""
 
     MAX_TEXT_ARGUMENT = 4096
     MAX_CURSOR_BYTES = 64 * 1024
@@ -472,51 +466,64 @@ class CommonsAdapter:
     def __init__(self, config: ControlConfig) -> None:
         self.config = config
 
-    @property
-    def executable(self) -> Path:
-        return self.config.harness_path / ".venv" / "bin" / "elh"
+    def _module(self) -> Any:
+        try:
+            return importlib.import_module("mncs_commons")
+        except ImportError:
+            return _load_sibling_package("mncs_commons", self.config.commons_path)
 
-    def _base_argv(self) -> list[str]:
-        executable = self.executable
-        if not executable.is_file() or not os.access(executable, os.X_OK):
+    def _client(self) -> Any:
+        try:
+            commons = self._module()
+            return commons.CommonsClient.connect(
+                self.config.commons_socket,
+                timeout=self.config.commons_service_timeout_seconds,
+            )
+        except Exception as exc:
             raise ControlError(
-                "COMMONS_HARNESS_UNAVAILABLE",
-                "Harness CLI executable is unavailable; install the Harness venv before using Commons",
-            )
-        argv = [str(executable)]
-        if self.config.harness_config is not None:
-            argv.extend(["--config", str(self.config.harness_config)])
-        argv.append("commons")
-        return argv
+                "COMMONS_SERVICE_UNAVAILABLE", redact_text(str(exc))
+            ) from exc
 
-    def _run(self, operation: str, arguments: list[str] | None = None) -> dict[str, object]:
-        argv = [*self._base_argv(), operation, *(arguments or []), "--json"]
+    def _bounded(self, payload: object) -> dict[str, object]:
         try:
-            completed = subprocess.run(
-                argv,
-                cwd=self.config.harness_path,
-                capture_output=True,
-                text=True,
-                timeout=45,
-                check=False,
-                env=safe_host_probe_environment(),
-            )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            raise ControlError("COMMONS_HARNESS_UNAVAILABLE", redact_text(str(exc))) from exc
-        stdout = completed.stdout.strip()
-        if completed.returncode != 0:
-            diagnostic = completed.stderr.strip() or stdout or "Harness Commons command failed"
-            raise ControlError("COMMONS_REQUEST_FAILED", redact_text(diagnostic[:2000]))
-        if len(stdout.encode("utf-8")) > self.config.max_response_bytes:
+            encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        except (TypeError, ValueError) as exc:
+            raise ControlError(
+                "COMMONS_RESPONSE_MALFORMED", "Commons response was not JSON"
+            ) from exc
+        if len(encoded.encode("utf-8")) > self.config.max_response_bytes:
             raise ControlError("COMMONS_RESPONSE_OVERSIZED", "Commons response exceeded Control policy")
-        try:
-            payload = json.loads(stdout)
-        except json.JSONDecodeError as exc:
-            raise ControlError("COMMONS_RESPONSE_MALFORMED", "Harness Commons output was not JSON") from exc
         if not isinstance(payload, dict):
-            raise ControlError("COMMONS_RESPONSE_MALFORMED", "Harness Commons output was not an object")
-        payload.setdefault("content_trust", "UNTRUSTED")
-        return payload
+            raise ControlError(
+                "COMMONS_RESPONSE_MALFORMED", "Commons response was not an object"
+            )
+        result = dict(payload)
+        result.setdefault("content_trust", "UNTRUSTED")
+        return result
+
+    def _read(self, method: str, *args: Any, **kwargs: Any) -> dict[str, object]:
+        client = self._client()
+        try:
+            operation = getattr(client, method, None)
+            if not callable(operation) or method not in {
+                "status",
+                "work",
+                "query",
+                "get",
+                "conversation",
+                "evidence",
+                "sync",
+            }:
+                raise ControlError(
+                    "COMMONS_OPERATION_DENIED", "Commons operation is not allowed"
+                )
+            return self._bounded(operation(*args, **kwargs))
+        except ControlError:
+            raise
+        except Exception as exc:
+            raise ControlError("COMMONS_REQUEST_FAILED", redact_text(str(exc))) from exc
+        finally:
+            client.close()
 
     @classmethod
     def _text(cls, value: str | None, name: str) -> str | None:
@@ -534,13 +541,16 @@ class CommonsAdapter:
 
     def status(self) -> dict[str, object]:
         try:
-            payload = self._run("status")
+            payload = self._read("status")
             return {
-                "available": bool(payload.get("ready")),
-                "reachable": bool(payload.get("ready")),
-                "status": "available" if payload.get("ready") else "unavailable",
-                "transport": "harness-stdio-mcp",
-                "authority": "controller-local Commons through Harness",
+                "available": payload.get("storeHealthy") is True,
+                "reachable": True,
+                "status": (
+                    "available" if payload.get("storeHealthy") is True else "unavailable"
+                ),
+                "ready": payload.get("storeHealthy") is True,
+                "transport": "local-unix-service",
+                "authority": "read-only Commons consumer socket",
                 **payload,
             }
         except ControlError as exc:
@@ -550,13 +560,13 @@ class CommonsAdapter:
                 "status": "unavailable",
                 "ready": False,
                 "code": exc.code,
-                "transport": "harness-stdio-mcp",
+                "transport": "local-unix-service",
                 "content_trust": "UNTRUSTED",
                 "diagnostic": redact_text(exc.message),
             }
 
     def work(self, limit: int = 100) -> dict[str, object]:
-        return self._run("work", ["--limit", str(self._limit(limit))])
+        return self._read("work", limit=self._limit(limit))
 
     def query(
         self,
@@ -568,37 +578,31 @@ class CommonsAdapter:
         limit: int = 100,
         open_work: bool = False,
     ) -> dict[str, object]:
-        argv: list[str] = ["--limit", str(self._limit(limit))]
-        for flag, value, name in (
-            ("--kind", kind, "kind"),
-            ("--state", state, "state"),
-            ("--subject", subject, "subject"),
-            ("--related", related, "related"),
-        ):
-            bounded = self._text(value, name)
-            if bounded is not None:
-                argv.extend([flag, bounded])
-        if open_work:
-            argv.append("--open-work")
-        return self._run("query", argv)
+        return self._read(
+            "query",
+            kind=self._text(kind, "kind"),
+            state=self._text(state, "state"),
+            subject=self._text(subject, "subject"),
+            related=self._text(related, "related"),
+            limit=self._limit(limit),
+            openWorkRequests=bool(open_work),
+        )
 
     def get(self, digest: str) -> dict[str, object]:
-        return self._run("get", [self._text(digest, "digest") or ""])
+        return self._read("get", self._text(digest, "digest") or "")
 
     def conversation(self, digest: str) -> dict[str, object]:
-        return self._run("conversation", [self._text(digest, "digest") or ""])
+        return self._read("conversation", self._text(digest, "digest") or "")
 
     def evidence(self, digest: str) -> dict[str, object]:
-        return self._run("evidence", [self._text(digest, "digest") or ""])
+        return self._read("evidence", self._text(digest, "digest") or "")
 
     def sync(self, cursor: dict[str, object] | None = None, limit: int = 1000) -> dict[str, object]:
-        argv = ["--limit", str(self._limit(limit))]
         if cursor is not None:
             encoded = json.dumps(cursor, sort_keys=True, separators=(",", ":"))
             if len(encoded.encode("utf-8")) > self.MAX_CURSOR_BYTES:
                 raise ControlError("INVALID_INPUT", "cursor exceeds the configured bound")
-            argv.extend(["--cursor", encoded])
-        return self._run("sync", argv)
+        return self._read("sync", cursor, limit=self._limit(limit))
 
 
 @dataclass(frozen=True, slots=True)

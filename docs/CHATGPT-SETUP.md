@@ -105,7 +105,8 @@ authenticated worker backend is configured and reachable. In that case
 `execution_transport=persistent-service`. If the connected controller does not
 advertise execution, Control reports `FABRIC_SERVICE_EXECUTION_UNSUPPORTED`;
 select transitional mode only when direct embedded execution compatibility is
-intended. Worker-initiated rendezvous is a separate planned Fabric feature.
+intended. A configured controller backend, including authenticated worker
+rendezvous, advertises support through the same live feature projection.
 
 Convenience commands are available through:
 

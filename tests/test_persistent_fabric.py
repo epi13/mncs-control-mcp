@@ -12,6 +12,7 @@ from mncs_control_mcp.adapters import FabricAdapter
 from mncs_control_mcp.config import ControlConfig, load_config
 from mncs_control_mcp.errors import ControlError
 from mncs_control_mcp.runtime import prepare_fabric_runtime
+from mncs_control_mcp.workspace import WorkspacePolicy
 
 fabric = pytest.importorskip("mncs_fabric")
 
@@ -107,6 +108,70 @@ def test_service_dispatch_fails_explicitly_without_fallback(config, persistent_s
     assert error.value.details["fleet_authority"] == "persistent-controller"
     assert error.value.details["execution_transport"] == "unsupported"
     assert error.value.details["persistent_service_support"]["persistent_service_execution"] is False
+
+
+def test_live_service_projection_enables_bounded_control_dispatch(
+    config, persistent_service
+) -> None:
+    service, socket = persistent_service
+
+    class BackendFixture:
+        archive: Path | None = None
+
+        def refresh_workers(self) -> None:
+            return
+
+        def workers(self):
+            return [
+                {
+                    "worker_id": "controller-owned-worker",
+                    "availability": "AVAILABLE",
+                    "capabilities": ["python"],
+                }
+            ]
+
+        def close(self) -> None:
+            return
+
+        def execute(self, _plan, _manifest, **kwargs):
+            self.archive = Path(kwargs["execution_bundle_archive"])
+            assert self.archive.is_file()
+            return [
+                {
+                    "disposition": "EXECUTED",
+                    "worker_identity": "controller-owned-worker",
+                    "record": {"outcome": "PASS"},
+                }
+            ]
+
+    backend = BackendFixture()
+    service._worker_client = backend
+    project = config.workspace_root / "fixture-repo"
+    project.mkdir()
+    (project / "task.py").write_text("print('control persistent fixture')\n", encoding="utf-8")
+    consumer_config = replace(
+        config,
+        fabric_mode="service",
+        fabric_socket=socket,
+        fabric_service_timeout_seconds=2.0,
+        fabric_execution_mode="unavailable-until-service-support",
+    )
+    adapter = FabricAdapter(consumer_config, WorkspacePolicy(consumer_config))
+
+    status = adapter.status()
+    result = adapter.dispatch(
+        "python",
+        "fixture-repo",
+        parameters={"script": "task.py", "timeout_seconds": 5},
+    )
+
+    assert status["execution_transport"] == "persistent-service"
+    assert status["persistent_service_support"]["persistent_service_execution"] is True
+    assert result["execution_transport"] == "persistent-service"
+    assert result["results"][0]["worker_identity"] == "controller-owned-worker"
+    assert backend.archive is not None
+    assert backend.archive.is_relative_to(service.config.execution_bundle_root_value)
+    assert not backend.archive.is_relative_to(consumer_config.job_state_path.parent)
 
 
 def test_control_config_direct_and_loaded_defaults_use_persistent_service(tmp_path: Path) -> None:
