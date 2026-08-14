@@ -110,6 +110,42 @@ def test_async_job_output_input_timeout_and_stop(config) -> None:
     assert config.job_state_path.is_file()
 
 
+def test_workspace_host_path_is_aliased_for_venv_shebangs(config) -> None:
+    (config.workspace_root / "alpha").mkdir()
+    policy, sandbox = _sandbox(config)
+    argv, _enabled = sandbox.command_argv(
+        "true", policy.resolve_scope(scope="project", project="alpha", cwd="."), network=False
+    )
+    host_root = config.workspace_root.resolve()
+    joined = " ".join(argv)
+    assert "--symlink" in argv
+    assert "/workspace" in argv
+    assert str(host_root) in argv
+    assert f"--symlink /workspace {host_root}" in joined or (
+        argv[argv.index("--symlink") + 1] == "/workspace"
+        and argv[argv.index("--symlink") + 2] == str(host_root)
+    )
+
+
+@pytest.mark.requires_bwrap_namespace
+def test_host_workspace_shebang_path_resolves_inside_sandbox(config) -> None:
+    project = config.workspace_root / "alpha"
+    project.mkdir()
+    (project / "marker.txt").write_text("alias-ok\n", encoding="utf-8")
+    _, sandbox = _sandbox(config)
+    host_file = (project / "marker.txt").resolve()
+    result = sandbox.run(
+        f"test -r {host_file} && cat {host_file}",
+        scope="project",
+        project="alpha",
+        cwd=".",
+        timeout_seconds=20,
+        network=False,
+    )
+    assert result.exit_code == 0, result.stderr
+    assert "alias-ok" in result.stdout
+
+
 def test_network_policy_can_disable_opt_in(config) -> None:
     (config.workspace_root / "alpha").mkdir()
     from dataclasses import replace

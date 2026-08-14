@@ -208,6 +208,45 @@ class Sandbox:
             mountpoint(target)
             argv.extend(("--ro-bind", str(source), target.as_posix()))
 
+    def _workspace_host_alias_args(self) -> list[str]:
+        """Alias the host workspace path onto the already-mounted /workspace tree.
+
+        Project virtualenv console scripts embed the host interpreter path.
+        Recreating that path as a symlink to /workspace does not mount the real
+        home or credentials; it only makes already-authorized workspace files
+        reachable by the path compiled into those scripts.
+        """
+
+        host_root = self.policy.root.resolve()
+        reserved = {
+            "/",
+            "/bin",
+            "/dev",
+            "/etc",
+            "/home",
+            "/home/developer",
+            "/lib",
+            "/lib64",
+            "/opt",
+            "/proc",
+            "/run",
+            "/tmp",
+            "/usr",
+            "/var",
+            "/workspace",
+        }
+        if not host_root.is_absolute() or host_root.as_posix() in reserved:
+            return []
+        argv: list[str] = []
+        current = Path("/")
+        for part in host_root.parts[1:-1]:
+            current /= part
+            if current.as_posix() not in reserved:
+                argv.extend(("--dir", current.as_posix()))
+                reserved.add(current.as_posix())
+        argv.extend(("--symlink", "/workspace", host_root.as_posix()))
+        return argv
+
     def command_argv(
         self,
         command: str,
@@ -275,6 +314,7 @@ class Sandbox:
             str(self.config.sandbox_home),
             "/home/developer",
         ]
+        argv.extend(self._workspace_host_alias_args())
         if not network_enabled:
             argv.append("--unshare-net")
         else:
