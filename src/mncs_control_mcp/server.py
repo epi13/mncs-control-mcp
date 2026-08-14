@@ -600,6 +600,14 @@ def build_server(config: ControlConfig | None = None) -> Any:
     def fabric_work_list(limit: int = 100) -> dict[str, object]:
         return invoke("fabric_work_list", integrations.fabric.work_list, limit)  # type: ignore[return-value]
 
+    @server.tool(name="fabric_schedule_list", description="List Fabric scheduled work. Commons has no execution authority.", annotations=ro, structured_output=True)
+    def fabric_schedule_list() -> dict[str, object]:
+        return invoke("fabric_schedule_list", integrations.fabric.schedule_list)  # type: ignore[return-value]
+
+    @server.tool(name="fabric_schedule_tick", description="Evaluate availability windows and dispatch eligible queued Fabric work.", annotations=destructive, structured_output=True)
+    def fabric_schedule_tick(now: str | None = None) -> dict[str, object]:
+        return invoke("fabric_schedule_tick", integrations.fabric.schedule_tick, now)  # type: ignore[return-value]
+
     @server.tool(name="control_job_status", description="Inspect a local terminal or upstream control-plane job by stable control ID.", annotations=ro, structured_output=True)
     def control_job_status(job_id: str) -> dict[str, object]:
         return invoke("control_job_status", processes.status, job_id)  # type: ignore[return-value]

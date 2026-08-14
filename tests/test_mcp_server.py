@@ -217,7 +217,13 @@ fabric_execution_mode = "unavailable-until-service-support"
         assert by_name["file_delete"]["annotations"]["destructiveHint"] is True
         assert by_name["git_fetch"]["annotations"]["openWorldHint"] is True
         assert by_name["dispatch_fabric_job"]["annotations"]["readOnlyHint"] is False
-        assert {"fabric_work_status", "fabric_work_result", "fabric_work_list"} <= set(by_name)
+        assert {
+            "fabric_work_status",
+            "fabric_work_result",
+            "fabric_work_list",
+            "fabric_schedule_list",
+            "fabric_schedule_tick",
+        } <= set(by_name)
         assert by_name["fabric_work_status"]["inputSchema"]["required"] == ["work_id"]
         assert by_name["fabric_work_result"]["inputSchema"]["required"] == ["work_id"]
         assert "limit" in by_name["fabric_work_list"]["inputSchema"]["properties"]

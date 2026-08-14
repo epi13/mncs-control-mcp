@@ -96,6 +96,18 @@ def test_service_status_reads_persistent_fleet_and_closes_only_consumer(
     assert status["controller_contract_identity"] == service.status()["public_contract_identity"]
     assert status["compatibility"]["state"] == "compatible"
     assert status["compatibility"]["action"] == "dispatch_allowed"
+    assert status["persistent_service_support"]["last_known_fleet_status"] is True
+    assert status["persistent_service_support"]["persistent_fleet_refresh"] is True
+
+
+def test_service_compatibility_requires_running_controller_capabilities() -> None:
+    compatibility = FabricAdapter._version_compatibility(
+        type("Fabric", (), {"__version__": "0.2.0a19"})(),
+        {"fabric_version": "0.2.0a18", "service_features": {"persistent_fleet_read": True}},
+    )
+    assert compatibility["state"] == "restart_required"
+    assert compatibility["action"] == "restart_persistent_controller"
+    assert "last_known_fleet_status" in compatibility["missing_capabilities"]
 
 
 def test_service_dispatch_fails_explicitly_without_fallback(config, persistent_service) -> None:
@@ -123,7 +135,8 @@ def test_live_service_projection_enables_bounded_control_dispatch(
         def refresh_workers(self) -> None:
             return
 
-        def workers(self):
+        def workers(self, *, apply_lease: bool = True):
+            del apply_lease
             return [
                 {
                     "worker_id": "controller-owned-worker",
