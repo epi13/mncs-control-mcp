@@ -339,7 +339,8 @@ def test_fabric_status_uses_migrated_registry_lock_in_private_state(tmp_path: Pa
             lock.touch()
             return {"outcome": "PASS", "registry_path": str(path)}
 
-        def workers(self) -> list[dict[str, object]]:
+        def workers(self, *, apply_lease: bool = True) -> list[dict[str, object]]:
+            del apply_lease
             return []
 
         def refresh_workers(self) -> list[dict[str, object]]:

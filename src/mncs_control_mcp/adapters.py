@@ -647,13 +647,17 @@ class FabricContractSupport:
     """Service-boundary capabilities declared by Fabric's public contract."""
 
     persistent_fleet_read: bool = False
+    persistent_fleet_refresh: bool = False
+    last_known_fleet_status: bool = False
     persistent_service_execution: bool = False
     persistent_detached_execution: bool = False
     persistent_service_capability_ingestion: bool = False
     persistent_worker_observations: bool = False
+    scheduled_work_queue: bool = False
     worker_rendezvous: bool = False
     client_version: str | None = None
     contract_identity: str | None = None
+    operations: tuple[str, ...] = ()
 
     @classmethod
     def from_client(cls, fabric: Any) -> FabricContractSupport:
@@ -666,10 +670,13 @@ class FabricContractSupport:
             features = {}
         return cls(
             persistent_fleet_read=features.get("persistent_fleet_read") is True,
+            persistent_fleet_refresh=features.get("persistent_fleet_refresh") is True,
+            last_known_fleet_status=features.get("last_known_fleet_status") is True,
             persistent_service_execution=features.get("persistent_service_execution") is True,
             persistent_detached_execution=features.get("persistent_detached_execution") is True,
             persistent_service_capability_ingestion=features.get("persistent_service_capability_ingestion") is True,
             persistent_worker_observations=features.get("persistent_worker_observations") is True,
+            scheduled_work_queue=features.get("scheduled_work_queue") is True,
             worker_rendezvous=features.get("worker_rendezvous") is True,
             client_version=str(contract.get("package_version")) if contract.get("package_version") else None,
             contract_identity=str(contract.get("contract_identity")) if contract.get("contract_identity") else None,
@@ -678,29 +685,42 @@ class FabricContractSupport:
     @classmethod
     def from_service_status(cls, status: Any, fallback: FabricContractSupport) -> FabricContractSupport:
         features = status.get("service_features", {}) if isinstance(status, dict) else {}
+        capabilities = status.get("service_capabilities", {}) if isinstance(status, dict) else {}
         if not isinstance(features, dict):
             return fallback
+        operations = capabilities.get("operations") if isinstance(capabilities, dict) else {}
+        advertised = tuple(
+            sorted(str(name) for name, enabled in (operations or {}).items() if enabled)
+        )
         return cls(
             persistent_fleet_read=features.get("persistent_fleet_read") is True,
+            persistent_fleet_refresh=features.get("persistent_fleet_refresh") is True,
+            last_known_fleet_status=features.get("last_known_fleet_status") is True,
             persistent_service_execution=features.get("persistent_service_execution") is True,
             persistent_detached_execution=features.get("persistent_detached_execution") is True,
             persistent_service_capability_ingestion=features.get("persistent_service_capability_ingestion") is True,
             persistent_worker_observations=features.get("persistent_worker_observations") is True,
+            scheduled_work_queue=features.get("scheduled_work_queue") is True,
             worker_rendezvous=features.get("worker_rendezvous") is True,
             client_version=str(status.get("fabric_version") or fallback.client_version),
             contract_identity=str(status.get("public_contract_identity") or fallback.contract_identity),
+            operations=advertised,
         )
 
     def as_dict(self) -> dict[str, object]:
         return {
             "persistent_fleet_read": self.persistent_fleet_read,
+            "persistent_fleet_refresh": self.persistent_fleet_refresh,
+            "last_known_fleet_status": self.last_known_fleet_status,
             "persistent_service_execution": self.persistent_service_execution,
             "persistent_detached_execution": self.persistent_detached_execution,
             "persistent_service_capability_ingestion": self.persistent_service_capability_ingestion,
             "persistent_worker_observations": self.persistent_worker_observations,
+            "scheduled_work_queue": self.scheduled_work_queue,
             "worker_rendezvous": self.worker_rendezvous,
             "client_version": self.client_version,
             "contract_identity": self.contract_identity,
+            "operations": list(self.operations),
         }
 
 
@@ -743,15 +763,41 @@ class FabricAdapter:
         client_version = str(getattr(fabric, "__version__", "unknown"))
         controller_version = controller.get("fabric_version")
         controller_version = str(controller_version) if controller_version else "unknown"
-        if client_version == "unknown" or controller_version == "unknown":
+        features = controller.get("service_features") if isinstance(controller.get("service_features"), dict) else {}
+        capabilities = controller.get("service_capabilities") if isinstance(controller.get("service_capabilities"), dict) else {}
+        operations = capabilities.get("operations") if isinstance(capabilities.get("operations"), dict) else {}
+        required_features = ("persistent_fleet_read", "last_known_fleet_status", "persistent_fleet_refresh")
+        missing = [name for name in required_features if features.get(name) is not True]
+        if "fleet.refresh" in operations and operations.get("fleet.refresh") is not True:
+            missing.append("fleet.refresh")
+        elif missing and "fleet.refresh" not in operations:
+            missing.append("fleet.refresh")
+        if missing:
+            state = "restart_required"
+            action = "restart_persistent_controller"
+            reason = (
+                "source/client is newer than the running persistent controller service; "
+                f"missing {', '.join(missing)}"
+            )
+        elif client_version == "unknown" or controller_version == "unknown":
             state = "unknown"
+            action = "fail_closed"
+            reason = "Fabric version could not be determined"
+        elif client_version != controller_version:
+            state = "restart_required"
+            action = "restart_persistent_controller"
+            reason = "package versions differ; restart or update the persistent controller"
         else:
-            state = "compatible" if client_version == controller_version else "mismatch"
+            state = "compatible"
+            action = "dispatch_allowed"
+            reason = "service capabilities match the connected client"
         return {
             "state": state,
             "client_version": client_version,
             "controller_version": controller_version,
-            "action": "dispatch_allowed" if state == "compatible" else "fail_closed",
+            "action": action,
+            "reason": reason,
+            "missing_capabilities": missing,
         }
 
     def status(self) -> dict[str, object]:
@@ -871,10 +917,12 @@ class FabricAdapter:
                     },
                 )
             compatibility = self._version_compatibility(fabric, service_controller or {})
-            if compatibility["state"] == "mismatch":
+            if compatibility["state"] != "compatible":
                 raise ControlError(
-                    "FABRIC_VERSION_MISMATCH",
-                    "Fabric client and persistent controller versions are incompatible",
+                    "FABRIC_SERVICE_RESTART_REQUIRED"
+                    if compatibility["state"] == "restart_required"
+                    else "FABRIC_VERSION_MISMATCH",
+                    str(compatibility.get("reason") or "Fabric client and persistent controller are incompatible"),
                     details={"compatibility": compatibility},
                 )
         if self.config.fabric_mode == "transitional":
@@ -1066,6 +1114,32 @@ class FabricAdapter:
             raise ControlError("FABRIC_REQUEST_FAILED", redact_text(str(exc))) from exc
         finally:
             client.close()
+
+    def schedule_list(self) -> dict[str, object]:
+        fabric = self._module()
+        client = self._service_client(fabric)
+        try:
+            payload = dict(client.scheduled_work())
+        except Exception as exc:
+            raise ControlError("FABRIC_REQUEST_FAILED", redact_text(str(exc))) from exc
+        finally:
+            client.close()
+        payload["commons_authority"] = "none"
+        payload["authority"] = "persistent-fabric"
+        return payload
+
+    def schedule_tick(self, now: str | None = None) -> dict[str, object]:
+        fabric = self._module()
+        client = self._service_client(fabric)
+        try:
+            arguments = {} if now is None else {"now": now}
+            payload = dict(client.tick_schedule(**arguments))
+        except Exception as exc:
+            raise ControlError("FABRIC_REQUEST_FAILED", redact_text(str(exc))) from exc
+        finally:
+            client.close()
+        payload["commons_authority"] = "none"
+        return payload
 
     def _detached_read(self, operation: str, work_id: str) -> dict[str, object]:
         if not isinstance(work_id, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", work_id):
