@@ -67,6 +67,10 @@ journalctl --user -u mncs-control-tunnel.service -f
 
 ## Workspace and scope model
 
+The sandbox also aliases the host workspace path to `/workspace`. Project
+virtualenv scripts that embed a host-absolute interpreter shebang therefore
+still resolve, without mounting the real home directory.
+
 All MCP filesystem paths are POSIX-style paths relative to the workspace:
 
 ```text
