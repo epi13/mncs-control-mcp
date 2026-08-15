@@ -137,22 +137,34 @@ Optional hardening includes short key lifetimes or confirmation mode:
 ssh-add -c -t 8h ~/.ssh/<github-key>
 ```
 
-For GitHub, host `gh auth` may legitimately use the desktop keyring, but that token
-is intentionally unavailable inside MCP sandboxes. Register the public key that is
-already loaded in the session agent, switch the repository remote to SSH, and verify
-the same agent-backed path:
+For GitHub, host `gh auth` may legitimately use the desktop keyring. Control now
+projects that login into a 0600 `gh` hosts file in the dedicated sandbox home
+and configures `gh auth git-credential` for HTTPS remotes. Private keys, the
+real home, and the keyring socket are still not mounted.
+
+If you prefer a file that survives a locked keyring, create a dedicated token
+store outside the workspace:
+
+```bash
+umask 077
+printf 'GH_TOKEN=%s\n' "$(gh auth token -h github.com)" > ~/.config/mncs-control-mcp/github.env
+chmod 600 ~/.config/mncs-control-mcp/github.env
+```
+
+SSH remotes continue to work when the session agent has a GitHub-authorized key.
+That path is optional. The current Fedora key is not assumed to be registered
+with GitHub; do not rewrite remotes unless you have completed:
 
 ```bash
 gh auth refresh -h github.com -s admin:public_key
 gh ssh-key add ~/.ssh/id_ed25519.pub --title "fedora mncs-control"
-git remote set-url origin git@github.com:OWNER/REPOSITORY.git
 ssh -T git@github.com
 ```
 
-This keeps private keys in the agent and avoids placing tokens in `tunnel.env`, Git
-configuration, the workspace, or MCP sandbox state. If `gh ssh-key add` reports a
-missing scope, complete the one-time browser/device authorization requested by
-`gh auth refresh` and retry it.
+Verify the agent-visible path with `./scripts/doctor.sh --json` or the MCP tool
+`developer_readiness`. That report observes capabilities; it does not grant them.
+Rotate by replacing `github.env`, running `gh auth login` again, or revoking the
+GitHub token, then restarting `mncs-control-tunnel.service`.
 
 ## Reboot and lingering
 

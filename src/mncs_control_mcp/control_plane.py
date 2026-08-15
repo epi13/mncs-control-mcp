@@ -8,8 +8,10 @@ from pathlib import Path
 
 from .adapters import IntegrationBundle, TestAdapter
 from .config import ControlConfig
+from .developer import developer_readiness_payload
 from .errors import ControlError
 from .git_adapter import GitService
+from .github_auth import github_auth_status
 from .processes import ProcessManager
 from .sandbox import Sandbox, utc_now
 from .security import redact_text
@@ -45,6 +47,7 @@ class ControlPlaneService:
         harness = self.integrations.harness.status()
         forge = self.integrations.forge.status()
         commons = self.integrations.commons.status()
+        github = github_auth_status()
         fabric_support = fabric.get("persistent_service_support", {})
         service_execution = (
             fabric.get("execution_transport") == "persistent-service"
@@ -61,8 +64,7 @@ class ControlPlaneService:
                 "persistent service execution is not advertised by the connected Fabric controller"
             )
         rendezvous_supported = (
-            isinstance(fabric_support, dict)
-            and fabric_support.get("worker_rendezvous") is True
+            isinstance(fabric_support, dict) and fabric_support.get("worker_rendezvous") is True
         )
         if rendezvous_supported:
             fabric_operations.append("authenticated worker-initiated rendezvous")
@@ -73,17 +75,33 @@ class ControlPlaneService:
         return {
             "server": {
                 "name": self.config.name,
-                "package_version": __import__("mncs_control_mcp", fromlist=["__version__"]).__version__,
+                "package_version": __import__(
+                    "mncs_control_mcp", fromlist=["__version__"]
+                ).__version__,
                 "transport": "stdio",
-                "fabric_client_version": fabric.get("client_fabric_version") or fabric.get("version"),
+                "fabric_client_version": fabric.get("client_fabric_version")
+                or fabric.get("version"),
                 "fabric_mode": self.config.fabric_mode,
                 "fabric_consumer_identity": self.config.fabric_consumer_identity,
             },
             "workspace": {
                 "available": self.policy.root.is_dir(),
                 "version": None,
-                "supported_operations": ["inspect", "read", "write", "patch", "move", "copy", "delete", "create_project"],
-                "limitations": ["workspace-relative paths", "symlink escapes rejected", "root deletion protected"],
+                "supported_operations": [
+                    "inspect",
+                    "read",
+                    "write",
+                    "patch",
+                    "move",
+                    "copy",
+                    "delete",
+                    "create_project",
+                ],
+                "limitations": [
+                    "workspace-relative paths",
+                    "symlink escapes rejected",
+                    "root deletion protected",
+                ],
                 "security_boundary": str(self.policy.root),
                 "mutation": True,
                 "network_required": False,
@@ -92,8 +110,20 @@ class ControlPlaneService:
             "terminal": {
                 "available": self.sandbox.available,
                 "version": self.sandbox.backend,
-                "supported_operations": ["exec", "start", "status", "output", "stdin", "stop", "bounded upstream jobs"],
-                "limitations": ["Bubblewrap required", "project scope is default", "bounded jobs and output"],
+                "supported_operations": [
+                    "exec",
+                    "start",
+                    "status",
+                    "output",
+                    "stdin",
+                    "stop",
+                    "bounded upstream jobs",
+                ],
+                "limitations": [
+                    "Bubblewrap required",
+                    "project scope is default",
+                    "bounded jobs and output",
+                ],
                 "security_boundary": "Bubblewrap namespace with /workspace and dedicated HOME",
                 "mutation": True,
                 "network_required": self.config.terminal_network_allowed,
@@ -102,41 +132,148 @@ class ControlPlaneService:
             "git": {
                 "available": shutil.which("git") is not None,
                 "version": None,
-                "supported_operations": ["status", "diff", "log", "branch", "stage", "commit", "fetch", "pull", "push", "clone"],
-                "limitations": ["SSH agent forwarding only", "force push unavailable"],
+                "supported_operations": [
+                    "status",
+                    "diff",
+                    "log",
+                    "branch",
+                    "stage",
+                    "commit",
+                    "fetch",
+                    "pull",
+                    "push",
+                    "clone",
+                ],
+                "limitations": ["force push unavailable", "interactive askpass is disabled"],
                 "security_boundary": "Git executes inside the workspace sandbox",
                 "mutation": True,
                 "network_required": True,
                 "local": True,
             },
+            "github": self._github_capability(github),
+            "joern": self._named_capability(
+                "joern.analysis",
+                available=any(
+                    (Path.home() / ".local" / "bin" / name).exists()
+                    for name in ("joern", "joern-parse")
+                ),
+                operations=["parse", "query"],
+                limitation="Joern is exposed through a read-only install mount, not the real home",
+            ),
             "testing": {
                 "available": True,
                 "version": None,
                 "supported_operations": ["discover", "run", "check"],
-                "limitations": ["common ecosystems are detected; project-specific runners may need terminal_exec"],
+                "limitations": [
+                    "common ecosystems are detected; project-specific runners may need terminal_exec"
+                ],
                 "security_boundary": "project-scoped Bubblewrap",
                 "mutation": False,
                 "network_required": False,
                 "local": True,
             },
-            "harness": self._integration_capability(harness, ["status", "models", "bounded analysis"], "local model execution remains upstream-owned"),
+            "harness": self._integration_capability(
+                harness,
+                ["status", "models", "bounded analysis"],
+                "local model execution remains upstream-owned",
+            ),
             "fabric": self._integration_capability(
                 fabric,
                 fabric_operations,
-                "; ".join(fabric_limitations) if fabric_limitations else "controller-managed persistent execution is available",
+                "; ".join(fabric_limitations)
+                if fabric_limitations
+                else "controller-managed persistent execution is available",
                 authority="persistent-controller owns membership, presence, trust, and lifecycle",
             ),
-            "forge": self._integration_capability(forge, ["capability inventory", "configured evaluation"], "Forge remains authoritative for scoring and evidence"),
+            "forge": self._integration_capability(
+                forge,
+                ["capability inventory", "configured evaluation"],
+                "Forge remains authoritative for scoring and evidence",
+            ),
             "commons": self._integration_capability(
                 commons,
-                ["status", "work discovery", "query", "record read", "conversation graph", "evidence trace", "ledger sync"],
+                [
+                    "status",
+                    "work discovery",
+                    "query",
+                    "record read",
+                    "conversation graph",
+                    "evidence trace",
+                    "ledger sync",
+                ],
                 "read-only through the Commons consumer socket; publication is not exposed by Control",
                 authority="controller-local Commons owns records and its separate operator surface",
             ),
-            "models": {"available": True, "version": None, "supported_operations": ["inventory", "runtime and worker visibility"], "limitations": ["routing remains Harness/Fabric-owned"], "security_boundary": "read-only metadata", "mutation": False, "network_required": False, "local": False},
-            "gpu": {"available": shutil.which("nvidia-smi") is not None, "version": None, "supported_operations": ["host inventory"], "limitations": ["GPU device access is not enabled for general sandbox jobs"], "security_boundary": "host probe only", "mutation": False, "network_required": False, "local": True},
-            "network": {"available": self.config.terminal_network_allowed, "version": None, "supported_operations": ["explicit networked Git and terminal jobs"], "limitations": ["disabled by default for terminal jobs", "no domain allowlist"], "security_boundary": "Bubblewrap network namespace", "mutation": True, "network_required": True, "local": True},
-            "resources": {"available": True, "version": None, "supported_operations": ["wall-clock timeout", "output quota", "concurrency quota", "process-group cleanup", "stable control job IDs"], "limitations": ["per-job CPU, memory, and disk cgroup quotas are not yet enforced"], "security_boundary": "Bubblewrap plus service-level bounded jobs", "mutation": False, "network_required": False, "local": True},
+            "models": {
+                "available": True,
+                "version": None,
+                "supported_operations": ["inventory", "runtime and worker visibility"],
+                "limitations": ["routing remains Harness/Fabric-owned"],
+                "security_boundary": "read-only metadata",
+                "mutation": False,
+                "network_required": False,
+                "local": False,
+            },
+            "gpu": {
+                "available": shutil.which("nvidia-smi") is not None,
+                "version": None,
+                "supported_operations": ["host inventory"],
+                "limitations": ["GPU device access is not enabled for general sandbox jobs"],
+                "security_boundary": "host probe only",
+                "mutation": False,
+                "network_required": False,
+                "local": True,
+            },
+            "network": {
+                "available": self.config.terminal_network_allowed,
+                "version": None,
+                "supported_operations": ["explicit networked Git and terminal jobs"],
+                "limitations": ["disabled by default for terminal jobs", "no domain allowlist"],
+                "security_boundary": "Bubblewrap network namespace",
+                "mutation": True,
+                "network_required": True,
+                "local": True,
+            },
+            "resources": {
+                "available": True,
+                "version": None,
+                "supported_operations": [
+                    "wall-clock timeout",
+                    "output quota",
+                    "concurrency quota",
+                    "process-group cleanup",
+                    "stable control job IDs",
+                ],
+                "limitations": ["per-job CPU, memory, and disk cgroup quotas are not yet enforced"],
+                "security_boundary": "Bubblewrap plus service-level bounded jobs",
+                "mutation": False,
+                "network_required": False,
+                "local": True,
+            },
+            "developer": {
+                "available": True,
+                "supported_operations": [
+                    "git.read",
+                    "git.write",
+                    "github.read",
+                    "github.push",
+                    "github.pull_request.write",
+                    "joern.analysis",
+                    "forge.evaluate",
+                    "fabric.execute",
+                    "commons.read",
+                    "commons.publish",
+                ],
+                "limitations": [
+                    "developer_readiness observes capabilities and does not grant them",
+                    "commons.publish is not exposed by Control",
+                ],
+                "security_boundary": "same sandbox and consumer sockets as the rest of Control",
+                "mutation": False,
+                "network_required": False,
+                "local": True,
+                "github": github.public(),
+            },
         }
 
     @staticmethod
@@ -154,7 +291,8 @@ class ControlPlaneService:
             "available": bool(status.get("available")),
             "version": status.get("version") or status.get("package_version"),
             "supported_operations": operations,
-            "limitations": [limitation] + ([str(status["diagnostic"])] if status.get("diagnostic") else []),
+            "limitations": [limitation]
+            + ([str(status["diagnostic"])] if status.get("diagnostic") else []),
             "security_boundary": "upstream adapter plus workspace authorization",
             "mutation": "dispatch" in operations or "configured evaluation" in operations,
             "network_required": "dispatch" in operations,
@@ -176,6 +314,56 @@ class ControlPlaneService:
                 result[key] = status[key]
         return result
 
+    @staticmethod
+    def _github_capability(status: object) -> dict[str, object]:
+        public = status.public() if hasattr(status, "public") else {}
+        return {
+            "available": bool(getattr(status, "available", False)),
+            "version": None,
+            "supported_operations": ["status", "fetch", "pull", "push", "pull_request"],
+            "limitations": [
+                str(getattr(status, "detail", "GitHub authentication is observed, not granted"))
+            ],
+            "security_boundary": "networked sandbox receives gh credentials or SSH agent, never the host keyring or private keys",
+            "mutation": True,
+            "network_required": True,
+            "local": True,
+            "state": getattr(status, "state", "unknown"),
+            "account": getattr(status, "account", None),
+            "can_git_https": getattr(status, "can_git_https", False),
+            "can_pull_request": getattr(status, "can_pull_request", False),
+            "ssh_github": getattr(status, "ssh_github", "unavailable"),
+            "source": getattr(status, "source", None),
+            **({"detail": public.get("detail")} if isinstance(public, dict) else {}),
+        }
+
+    @staticmethod
+    def _named_capability(
+        name: str,
+        *,
+        available: bool,
+        operations: list[str],
+        limitation: str,
+    ) -> dict[str, object]:
+        return {
+            "available": available,
+            "version": None,
+            "supported_operations": operations,
+            "limitations": [limitation],
+            "security_boundary": name,
+            "mutation": False,
+            "network_required": False,
+            "local": True,
+        }
+
+    def developer_readiness(self, repository: str | None = None) -> dict[str, object]:
+        return developer_readiness_payload(
+            self.config,
+            sandbox=self.sandbox,
+            integrations=self.integrations,
+            repository=repository,
+        )
+
     def review(self, project: str, depth: str = "standard") -> dict[str, object]:
         if depth not in {"summary", "standard", "deep"}:
             raise ControlError("INVALID_INPUT", "depth must be summary, standard, or deep")
@@ -187,19 +375,49 @@ class ControlPlaneService:
             review["recent_commits"] = self.git.log(project, limit=5).get("commits", [])
         except Exception as exc:
             review["git_diagnostic"] = str(exc)[:500]
-        names = ["README.md", "README.rst", "README", "CONTRIBUTING.md", "pyproject.toml", "Cargo.toml", "package.json", "go.mod", "CMakeLists.txt", "Makefile", "Dockerfile"]
+        names = [
+            "README.md",
+            "README.rst",
+            "README",
+            "CONTRIBUTING.md",
+            "pyproject.toml",
+            "Cargo.toml",
+            "package.json",
+            "go.mod",
+            "CMakeLists.txt",
+            "Makefile",
+            "Dockerfile",
+        ]
         review["key_files"] = [name for name in names if (root / name).is_file()]
-        review["documentation"] = [path.name for path in root.iterdir() if path.is_dir() and path.name.lower() in {"docs", "doc", "documentation"}][:10]
-        review["ci"] = [str(path.relative_to(root)) for path in (root / ".github" / "workflows").glob("*") if path.is_file()][:50] if (root / ".github" / "workflows").is_dir() else []
+        review["documentation"] = [
+            path.name
+            for path in root.iterdir()
+            if path.is_dir() and path.name.lower() in {"docs", "doc", "documentation"}
+        ][:10]
+        review["ci"] = (
+            [
+                str(path.relative_to(root))
+                for path in (root / ".github" / "workflows").glob("*")
+                if path.is_file()
+            ][:50]
+            if (root / ".github" / "workflows").is_dir()
+            else []
+        )
         review["tests"] = self.tests.discover(project)
         review["integrations"] = {
             "forge_configured": (root / self.config.forge_config_name).is_file(),
-            "fabric_configured": any((root / name).is_file() for name in ("fabric.toml", "mncs-fabric.toml")),
+            "fabric_configured": any(
+                (root / name).is_file() for name in ("fabric.toml", "mncs-fabric.toml")
+            ),
             "harness_project": any((root / name).exists() for name in ("harness.toml", ".harness")),
             "commons_project": project == self.config.repositories.get("commons"),
         }
         if depth != "summary":
-            review["entry_points"] = [str(path.relative_to(root)) for path in root.iterdir() if path.is_file() and path.suffix in {".py", ".rs", ".go", ".js", ".ts"}][:50]
+            review["entry_points"] = [
+                str(path.relative_to(root))
+                for path in root.iterdir()
+                if path.is_file() and path.suffix in {".py", ".rs", ".go", ".js", ".ts"}
+            ][:50]
             review["todo_markers"] = self._todo_markers(root, deep=depth == "deep")
             review["package_metadata"] = self._package_metadata(root)
         return review
@@ -210,9 +428,16 @@ class ControlPlaneService:
         candidates = root.rglob("*") if deep else root.iterdir()
         seen = 0
         for path in candidates:
-            if seen >= 500 or not path.is_file() or path.is_symlink() or path.stat().st_size > 512 * 1024:
+            if (
+                seen >= 500
+                or not path.is_file()
+                or path.is_symlink()
+                or path.stat().st_size > 512 * 1024
+            ):
                 continue
-            if any(part in {".git", ".venv", "node_modules", "target", "build"} for part in path.parts):
+            if any(
+                part in {".git", ".venv", "node_modules", "target", "build"} for part in path.parts
+            ):
                 continue
             try:
                 text = path.read_text(encoding="utf-8", errors="ignore")
@@ -233,9 +458,14 @@ class ControlPlaneService:
             try:
                 if filename == "package.json":
                     value = json.loads(path.read_text(encoding="utf-8"))
-                    result[filename] = {key: value.get(key) for key in ("name", "version", "private") if key in value}
+                    result[filename] = {
+                        key: value.get(key)
+                        for key in ("name", "version", "private")
+                        if key in value
+                    }
                 else:
                     import tomllib
+
                     value = tomllib.loads(path.read_text(encoding="utf-8"))
                     result[filename] = value.get("project", {})
             except (OSError, ValueError, TypeError):
@@ -252,8 +482,17 @@ class ControlPlaneService:
         jobs = self.processes.list()
         return {
             "status": "available" if system.get("hostname") else "degraded",
-            "controller": {"hostname": system.get("hostname"), "workspace": str(self.policy.root), "sandbox": self.sandbox.backend},
-            "resources": {"cpu": system.get("cpu"), "ram": system.get("ram"), "disk": system.get("disk"), "gpu": system.get("gpu")},
+            "controller": {
+                "hostname": system.get("hostname"),
+                "workspace": str(self.policy.root),
+                "sandbox": self.sandbox.backend,
+            },
+            "resources": {
+                "cpu": system.get("cpu"),
+                "ram": system.get("ram"),
+                "disk": system.get("disk"),
+                "gpu": system.get("gpu"),
+            },
             "models": models,
             "fabric": fabric,
             "fabric_controller": {
@@ -298,7 +537,12 @@ class ControlPlaneService:
             "fabric_test_project": ("fabric_dispatch",),
             "harness_analyze_project": ("harness_status",),
             "review_and_check_project": ("project_review", "test_discover", "project_check"),
-            "review_check_and_fabric_test": ("project_review", "test_discover", "project_check", "fabric_dispatch"),
+            "review_check_and_fabric_test": (
+                "project_review",
+                "test_discover",
+                "project_check",
+                "fabric_dispatch",
+            ),
         }
         if workflow not in approved:
             raise ControlError("INVALID_WORKFLOW", "workflow is not an approved control workflow")
@@ -320,45 +564,103 @@ class ControlPlaneService:
                 "dependencies": [records[-1]["step_id"]] if records else [],
                 "status": "running",
                 "started_at": step_started,
-                "input_summary": {"project": project, "profile": profile, "task_type": task_type} if index == 1 else {"project": project},
+                "input_summary": {"project": project, "profile": profile, "task_type": task_type}
+                if index == 1
+                else {"project": project},
             }
             if failed:
-                step.update({"status": "skipped", "skip_reason": "dependency failed", "completed_at": utc_now()})
+                step.update(
+                    {
+                        "status": "skipped",
+                        "skip_reason": "dependency failed",
+                        "completed_at": utc_now(),
+                    }
+                )
                 records.append(step)
                 continue
-            if operation == "fabric_dispatch" and workflow == "review_check_and_fabric_test" and values.get("request_fabric") is not True:
-                step.update({"status": "skipped", "skip_reason": "Fabric dispatch requires parameters.request_fabric=true", "completed_at": utc_now()})
+            if (
+                operation == "fabric_dispatch"
+                and workflow == "review_check_and_fabric_test"
+                and values.get("request_fabric") is not True
+            ):
+                step.update(
+                    {
+                        "status": "skipped",
+                        "skip_reason": "Fabric dispatch requires parameters.request_fabric=true",
+                        "completed_at": utc_now(),
+                    }
+                )
                 records.append(step)
                 continue
             try:
                 timeout = values.get("timeout")
                 if operation == "project_review":
-                    result = self.review(project, profile if profile in {"summary", "standard", "deep"} else "standard")
+                    result = self.review(
+                        project,
+                        profile if profile in {"summary", "standard", "deep"} else "standard",
+                    )
                 elif operation == "test_discover":
                     result = self.tests.discover(project)
                 elif operation == "project_check":
-                    result = self.tests.check(project, profile, float(timeout) if timeout is not None else None)
+                    result = self.tests.check(
+                        project, profile, float(timeout) if timeout is not None else None
+                    )
                 elif operation == "test_run":
-                    result = self.tests.run(project, task_type or "repository", timeout=float(timeout) if timeout is not None else None)
+                    result = self.tests.run(
+                        project,
+                        task_type or "repository",
+                        timeout=float(timeout) if timeout is not None else None,
+                    )
                 elif operation == "forge_evaluation":
                     case_study = str(values.get("case_study", ""))
                     if not case_study:
-                        raise ControlError("INVALID_INPUT", "evaluate_project requires parameters.case_study")
+                        raise ControlError(
+                            "INVALID_INPUT", "evaluate_project requires parameters.case_study"
+                        )
                     result = self.integrations.forge.evaluate(project, case_study, model, profile)
                 elif operation == "fabric_dispatch":
-                    result = self.integrations.fabric.dispatch(task_type or "pytest", project, model, node, values)
+                    result = self.integrations.fabric.dispatch(
+                        task_type or "pytest", project, model, node, values
+                    )
                 else:
-                    result = {"status": "not_supported", "reason": "Harness exposes status and routing APIs, but no bounded project-run contract is currently public"}
-                step_status = "skipped" if isinstance(result, dict) and result.get("status") == "not_supported" else "failed" if isinstance(result, dict) and result.get("summary") == "FAIL" else "completed"
+                    result = {
+                        "status": "not_supported",
+                        "reason": "Harness exposes status and routing APIs, but no bounded project-run contract is currently public",
+                    }
+                step_status = (
+                    "skipped"
+                    if isinstance(result, dict) and result.get("status") == "not_supported"
+                    else "failed"
+                    if isinstance(result, dict) and result.get("summary") == "FAIL"
+                    else "completed"
+                )
                 if step_status == "failed":
                     failed = True
-                step.update({"status": step_status, "completed_at": utc_now(), "result_summary": self._workflow_summary(result)})
+                step.update(
+                    {
+                        "status": step_status,
+                        "completed_at": utc_now(),
+                        "result_summary": self._workflow_summary(result),
+                    }
+                )
                 results.append(result)
             except Exception as exc:
                 failed = True
-                step.update({"status": "failed", "completed_at": utc_now(), "failure": redact_text(str(exc))[:500]})
+                step.update(
+                    {
+                        "status": "failed",
+                        "completed_at": utc_now(),
+                        "failure": redact_text(str(exc))[:500],
+                    }
+                )
             records.append(step)
-        overall = "failed" if failed else "partial" if any(item["status"] == "skipped" for item in records) else "completed"
+        overall = (
+            "failed"
+            if failed
+            else "partial"
+            if any(item["status"] == "skipped" for item in records)
+            else "completed"
+        )
         summary: dict[str, object] = {
             "workflow": workflow,
             "workflow_execution_id": workflow_id,
@@ -369,10 +671,18 @@ class ControlPlaneService:
             "duration_seconds": round(time.monotonic() - started_mono, 3),
             "steps": records,
             "result": self._workflow_summary(results[-1]) if results else None,
-            "artifacts": [self._workflow_summary(item) for item in results if isinstance(item, dict) and item.get("artifacts")],
-            "limitations": ["Workflow output is summarized; raw runner output remains available from the underlying typed operation."],
+            "artifacts": [
+                self._workflow_summary(item)
+                for item in results
+                if isinstance(item, dict) and item.get("artifacts")
+            ],
+            "limitations": [
+                "Workflow output is summarized; raw runner output remains available from the underlying typed operation."
+            ],
         }
-        control_job = self.processes.record_external("workflow_" + workflow, project=project, status=overall, result_summary=summary)
+        control_job = self.processes.record_external(
+            "workflow_" + workflow, project=project, status=overall, result_summary=summary
+        )
         summary["control_job_id"] = control_job["job_id"]
         return summary
 

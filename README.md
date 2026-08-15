@@ -107,42 +107,55 @@ The sandbox creates mount, PID, IPC, UTS, and user namespaces, attempts a separa
 
 Ordinary terminal calls default to `network=false`, which adds a new network namespace. `network=true` retains host networking when `terminal_network_allowed` is enabled. This is a binary network policy, not domain-level egress filtering.
 
-Remote Git tools request network access explicitly. When `use_ssh_agent=true`, only the existing `SSH_AUTH_SOCK` and, if present, the regular `~/.ssh/known_hosts` file are mounted into that authorized networked Git sandbox. Private key files are never mounted. HTTPS token helpers or tokens in the real home are intentionally unavailable; configure an SSH agent before starting the MCP/tunnel:
+Remote Git tools request network access explicitly. Network-enabled terminal jobs
+receive the same developer GitHub path so agents can finish `fetch` / `push` /
+`gh pr` without leaving the sandbox.
+
+GitHub authentication inside the sandbox uses the official GitHub CLI credential
+helper. Control reads a token from, in order:
+
+1. `~/.config/mncs-control-mcp/github.env` (`GH_TOKEN=...`, mode `0600`);
+2. the host `gh auth token` login, typically the desktop keyring.
+
+That token is written only into the dedicated sandbox home as a 0600
+`~/.config/gh/hosts.yml` (inside `~/.local/share/mncs-control-mcp/sandbox-home`).
+It is never placed on the Bubblewrap command line, never written into the
+workspace, audit logs, Commons, or source-controlled config. Agent-supplied
+environment overrides named like `TOKEN` remain rejected.
+Interactive askpass (`ksshaskpass`) is unset in every sandbox command.
+
+SSH agent forwarding remains available for remotes that already use SSH. Only
+`SSH_AUTH_SOCK` and, if present, the regular `~/.ssh/known_hosts` file are
+mounted. Private key files are never mounted. The current workstation SSH key is
+not assumed to be registered with GitHub; HTTPS remotes therefore keep working
+without rewriting them.
+
+Optional dedicated token file:
 
 ```bash
-eval "$(ssh-agent -s)"
-ssh-add ~/.ssh/id_ed25519
-ssh -T git@github.com
+umask 077
+printf 'GH_TOKEN=%s\n' "$(gh auth token -h github.com)" > ~/.config/mncs-control-mcp/github.env
+chmod 600 ~/.config/mncs-control-mcp/github.env
 ```
 
-The socket lets Git ask the agent to sign without reading key material. `git push` has no force option, and hard reset is not exposed.
+Revoke or rotate by deleting that file, running `gh auth logout` / `gh auth login`
+on the host, or removing the GitHub token from the account. Restart the Control
+tunnel afterwards.
 
-Host HTTPS credential helpers and keyring tokens are intentionally unavailable inside the sandbox. For an existing HTTPS remote, add a GitHub-authorized key to the agent and switch the remote before using `git_fetch` or `git_push`:
+Joern is discovered from `~/.local/bin/joern*` and the canonical install under
+`~/.local/share/joern/<version>`. Only that install tree is bind-mounted
+read-only at its original host path. CPG output must stay in `/workspace` or
+`/tmp`.
+
+`git push` has no force option, and hard reset is not exposed. The user service
+recognizes Fedora's `/run/user/<uid>/ssh-agent.socket` and reports missing
+GitHub or agent identities without weakening the service sandbox.
+
+Before a large task, agents should call `developer_readiness` or run:
 
 ```bash
-ssh-add ~/.ssh/<github-key>
-ssh -T git@github.com
-git remote set-url origin git@github.com:OWNER/REPOSITORY.git
+./scripts/doctor.sh --json
 ```
-
-The normal host-side GitHub CLI login is compatible with host Git, but its keyring
-token is deliberately not mounted into MCP sandboxes. To authorize the agent-backed
-path, register the matching public key once through GitHub CLI (the account login
-may require the `admin:public_key` scope), then use SSH remotes:
-
-```bash
-gh auth status
-gh auth refresh -h github.com -s admin:public_key
-gh ssh-key add ~/.ssh/id_ed25519.pub --title "fedora mncs-control"
-git remote set-url origin git@github.com:OWNER/REPOSITORY.git
-ssh -T git@github.com
-```
-
-Only the session `SSH_AUTH_SOCK` is made available to the authorized networked Git
-sandbox; private key files and GitHub tokens are never copied into control-plane
-state or repository files. The user service recognizes Fedora's
-`/run/user/<uid>/ssh-agent.socket` and reports missing agent identities without
-weakening the service sandbox.
 
 ## MCP tools
 
@@ -175,7 +188,8 @@ Every Git command runs inside the same project sandbox, including repository hoo
 
 ### System and MNCS
 
-- `tool_inventory`, `system_status`, `control_capabilities`, `laboratory_status`, `list_repositories`
+- `tool_inventory`, `system_status`, `control_capabilities`, `developer_readiness`, `laboratory_status`, `list_repositories`
+- `forge_candidate_status`, `forge_candidate_refresh`
 - `project_review`, `test_discover`, `test_run`, `project_check`, `control_run`
 - `fabric_status`, `model_status`, `run_tests`, `run_mncs_evaluation`, `dispatch_fabric_job`
 - `commons_status`, `commons_work`, `commons_query`, `commons_get`, `commons_conversation`, `commons_evidence`, `commons_sync`
@@ -183,7 +197,7 @@ Every Git command runs inside the same project sandbox, including repository hoo
 
 `tool_inventory` reports safe executable paths and first-line versions for common Python, Rust, Node, C/C++, Go, Java, container, shell, search, Ollama, NVIDIA/CUDA, and sandbox tools. Each entry distinguishes absent, broken, healthy, and project-local candidates; a broken global wrapper does not hide a usable project virtualenv. It does not return the environment.
 
-`project_review` provides bounded project/Git/test/CI/documentation context. `test_discover`, `test_run`, and `project_check` cover detected pytest, Cargo, Node, Go, and CTest workflows; the legacy `run_tests` name remains supported. Test operations report a structured toolchain choice: Python prefers a safe project `.venv/bin/python`/`python3`, then an explicitly declared bounded path, then the approved system interpreter; Rust, Node, Go, and CMake use the same resolver shape with approved system tools. Runner-aware parsers annotate supported output, but process exit status remains authoritative. When the control repository tests itself, Bubblewrap integration tests are marked `requires_bwrap_namespace` and reported as an explicit skip because the outer production sandbox is already the security boundary; they are not falsely reported as passing. `control_capabilities` and `laboratory_status` expose the current dependency graph and compute topology for agent planning. Their Forge entry reports `configuration_missing`, `executable_missing`, `process_start_failed`, `mcp_initialization_failed`, `capability_unavailable`, or `healthy` after a real stdio MCP probe. `control_run` composes only named workflows, including `review_and_check_project` and the opt-in `review_check_and_fabric_test`; each returns bounded step records and a persisted control ID. `run_mncs_evaluation` uses Forge's current typed operation registry for declared development workflows. `dispatch_fabric_job` negotiates the connected controller's public service feature projection; when the controller-owned authenticated worker backend is configured it uses `FabricClient.connect()` and reports `execution_transport=persistent-service`, otherwise service mode returns `FABRIC_SERVICE_EXECUTION_UNSUPPORTED` and never silently creates an embedded client. Fabric owns fleet authority; Harness owns model/agent routing.
+`project_review` provides bounded project/Git/test/CI/documentation context. `test_discover`, `test_run`, and `project_check` cover detected pytest, Cargo, Node, Go, and CTest workflows; the legacy `run_tests` name remains supported. Test operations report a structured toolchain choice: Python prefers a safe project `.venv/bin/python`/`python3`, then an explicitly declared bounded path, then the approved system interpreter; Rust, Node, Go, and CMake use the same resolver shape with approved system tools. Runner-aware parsers annotate supported output, but process exit status remains authoritative. When the control repository tests itself, Bubblewrap integration tests are marked `requires_bwrap_namespace` and reported as an explicit skip because the outer production sandbox is already the security boundary; they are not falsely reported as passing. `developer_readiness` observes whether Git, GitHub, Joern, Forge, Fabric, Commons, and local models are actually usable from the sandbox. It does not grant those capabilities. `control_capabilities` and `laboratory_status` expose the current dependency graph and compute topology for agent planning. `forge_candidate_refresh` registers a successor candidate when working-tree content has drifted; prior evidence stays bound to the previous identity. Their Forge entry reports `configuration_missing`, `executable_missing`, `process_start_failed`, `mcp_initialization_failed`, `capability_unavailable`, or `healthy` after a real stdio MCP probe. `control_run` composes only named workflows, including `review_and_check_project` and the opt-in `review_check_and_fabric_test`; each returns bounded step records and a persisted control ID. `run_mncs_evaluation` uses Forge's current typed operation registry for declared development workflows. `dispatch_fabric_job` negotiates the connected controller's public service feature projection; when the controller-owned authenticated worker backend is configured it uses `FabricClient.connect()` and reports `execution_transport=persistent-service`, otherwise service mode returns `FABRIC_SERVICE_EXECUTION_UNSUPPORTED` and never silently creates an embedded client. Fabric owns fleet authority; Harness owns model/agent routing.
 
 In persistent service mode, `dispatch_fabric_job(wait=false)` delegates to Fabric's
 durable detached queue instead of a Control-owned background thread. It returns a

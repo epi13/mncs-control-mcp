@@ -28,7 +28,57 @@ from mncs_control_mcp.security import filtered_environment, resolve_repository, 
 from mncs_control_mcp.workspace import WorkspacePolicy
 
 
-def test_configuration_loads_new_model_and_legacy_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_sandbox_gh_config_is_private_and_absent_from_argv(config) -> None:
+    from mncs_control_mcp.github_auth import materialize_sandbox_gh_config, sandbox_github_token
+    from mncs_control_mcp.sandbox import Sandbox
+    from mncs_control_mcp.workspace import WorkspacePolicy
+
+    token = sandbox_github_token()
+    if not token:
+        pytest.skip("no host GitHub token available for this probe")
+    (config.workspace_root / "alpha").mkdir()
+    policy = WorkspacePolicy(config)
+    sandbox = Sandbox(config, policy)
+    argv, enabled = sandbox.command_argv(
+        "true",
+        policy.resolve_scope(scope="project", project="alpha", cwd="."),
+        network=True,
+    )
+    assert enabled is True
+    assert token not in " ".join(argv)
+    hosts = config.sandbox_home / ".config" / "gh" / "hosts.yml"
+    assert hosts.is_file()
+    assert hosts.stat().st_mode & 0o777 == 0o600
+    assert token in hosts.read_text(encoding="utf-8")
+    assert materialize_sandbox_gh_config(config.sandbox_home) is True
+
+
+def test_github_auth_status_never_includes_token_material(monkeypatch: pytest.MonkeyPatch) -> None:
+    from mncs_control_mcp.github_auth import (
+        clear_github_token_cache,
+        github_auth_status,
+        sandbox_github_token,
+    )
+
+    clear_github_token_cache()
+    status = github_auth_status()
+    rendered = str(status.public())
+    assert "gho_" not in rendered
+    assert "ghp_" not in rendered
+    assert "token" not in rendered.lower() or "token" in status.detail.lower()
+    token = sandbox_github_token()
+    if token:
+        assert token not in rendered
+        assert token.startswith("gh") or len(token) >= 20
+    monkeypatch.setenv("VERY_SECRET_TOKEN", "never-return-this")
+    with pytest.raises(ControlError) as error:
+        validate_environment({"GH_TOKEN": "gho_should-be-rejected"})
+    assert error.value.code == "UNSAFE_ENVIRONMENT"
+
+
+def test_configuration_loads_new_model_and_legacy_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     config_path = tmp_path / "control.toml"
     config_path.write_text(
         """
@@ -57,13 +107,17 @@ fixture = "fixture"
     assert config.max_concurrent_jobs == 2
 
 
-def test_new_workspace_environment_takes_precedence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_new_workspace_environment_takes_precedence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setenv("MNCS_PROJECTS_ROOT", str(tmp_path / "old"))
     monkeypatch.setenv("MNCS_CONTROL_WORKSPACE_ROOT", str(tmp_path / "new"))
     assert load_config(tmp_path / "missing.toml").workspace_root == (tmp_path / "new").resolve()
 
 
-def test_workspace_policy_rejects_traversal_absolute_and_symlink_escape(config, tmp_path: Path) -> None:
+def test_workspace_policy_rejects_traversal_absolute_and_symlink_escape(
+    config, tmp_path: Path
+) -> None:
     policy = WorkspacePolicy(config)
     outside = tmp_path / "outside"
     outside.mkdir()
@@ -162,7 +216,6 @@ def test_legacy_fabric_registry_is_migrated_into_private_control_state(tmp_path:
     assert (target.stat().st_mode & 0o777) == 0o600
 
 
-
 def test_legacy_fabric_trust_state_is_relocated_into_private_control_state(tmp_path: Path) -> None:
     legacy = tmp_path / ".local" / "state" / "mncs-fabric" / "workers.json"
     trust_state = (
@@ -254,7 +307,9 @@ def test_fabric_registry_migration_rejects_symlinks(tmp_path: Path, kind: str) -
 
 
 @pytest.mark.skipif(shutil.which("bwrap") is None, reason="bubblewrap is not installed")
-def test_runtime_mount_accepts_only_control_state_and_keeps_home_unmounted(config, tmp_path: Path) -> None:
+def test_runtime_mount_accepts_only_control_state_and_keeps_home_unmounted(
+    config, tmp_path: Path
+) -> None:
     policy = WorkspacePolicy(config)
     sandbox = Sandbox(config, policy)
     runtime = config.fabric_state.parent / "fabric"
@@ -285,8 +340,8 @@ def test_harness_config_is_deliberately_projected_into_sandbox(config, tmp_path:
     policy = WorkspacePolicy(projected)
     sandbox = Sandbox(projected, policy)
     result = sandbox.run(
-        "test \"$MNCS_HARNESS_CONFIG\" = /home/developer/.config/mncs-harness/config.toml "
-        "&& test \"$EPI13_HARNESS_CONFIG\" = /home/developer/.config/mncs-harness/config.toml "
+        'test "$MNCS_HARNESS_CONFIG" = /home/developer/.config/mncs-harness/config.toml '
+        '&& test "$EPI13_HARNESS_CONFIG" = /home/developer/.config/mncs-harness/config.toml '
         "&& grep -q 'enabled = true' \"$MNCS_HARNESS_CONFIG\"",
         scope="workspace",
         project=None,
@@ -382,15 +437,23 @@ def test_environment_filter_and_overrides_drop_secrets(monkeypatch: pytest.Monke
 
 
 def test_bounded_subprocess_timeout_and_output_limit() -> None:
-    timeout = run_bounded((sys.executable, "-c", "import time; time.sleep(2)"), timeout_seconds=0.1, output_limit_bytes=4096)
+    timeout = run_bounded(
+        (sys.executable, "-c", "import time; time.sleep(2)"),
+        timeout_seconds=0.1,
+        output_limit_bytes=4096,
+    )
     assert timeout.timed_out is True
-    output = run_bounded((sys.executable, "-c", "print('x' * 20000)"), timeout_seconds=5, output_limit_bytes=512)
+    output = run_bounded(
+        (sys.executable, "-c", "print('x' * 20000)"), timeout_seconds=5, output_limit_bytes=512
+    )
     assert len(output.stdout.encode()) <= 512
     assert output.output_truncated is True
 
 
 def test_optional_integrations_fail_gracefully(config) -> None:
-    actions = __import__("mncs_control_mcp.server", fromlist=["_register_actions"])._register_actions()
+    actions = __import__(
+        "mncs_control_mcp.server", fromlist=["_register_actions"]
+    )._register_actions()
     system = SystemAdapter(config, actions, OllamaAdapter(config, actions)).status()
     assert "hostname" in system
     assert HarnessAdapter(config).status()["available"] in {True, False}

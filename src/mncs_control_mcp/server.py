@@ -355,6 +355,18 @@ def build_server(config: ControlConfig | None = None) -> Any:
     def control_capabilities() -> dict[str, object]:
         return invoke("control_capabilities", control_plane.capabilities)  # type: ignore[return-value]
 
+    @server.tool(name="developer_readiness", description="Observe whether the protected environment can carry a development task through analysis, GitHub, Joern, and Forge without granting those capabilities.", annotations=ro, structured_output=True)
+    def developer_readiness(repository: str | None = None) -> dict[str, object]:
+        return invoke("developer_readiness", control_plane.developer_readiness, repository, audit_metadata={"repository": repository})  # type: ignore[return-value]
+
+    @server.tool(name="forge_candidate_status", description="Inspect whether the current Forge candidate still matches the working tree.", annotations=ro, structured_output=True)
+    def forge_candidate_status(repository: str) -> dict[str, object]:
+        return invoke("forge_candidate_status", integrations.forge.candidate_status, repository, audit_metadata={"repository": repository})  # type: ignore[return-value]
+
+    @server.tool(name="forge_candidate_refresh", description="Rebind the active Forge candidate to current content and keep prior evidence attached to the previous identity.", annotations=mutate, structured_output=True)
+    def forge_candidate_refresh(repository: str, hypothesis: str = "working-tree content changed after the previous candidate binding", changed_files: list[str] | None = None) -> dict[str, object]:
+        return invoke("forge_candidate_refresh", integrations.forge.refresh_candidate, repository, hypothesis=hypothesis, changed_files=changed_files, audit_metadata={"repository": repository})  # type: ignore[return-value]
+
     @server.tool(name="laboratory_status", description="Aggregate controller resources, models, Fabric workers, MNCS integrations, and running jobs.", annotations=ro, structured_output=True)
     def laboratory_status() -> dict[str, object]:
         return invoke("laboratory_status", control_plane.laboratory_status)  # type: ignore[return-value]

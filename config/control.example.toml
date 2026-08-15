@@ -39,6 +39,8 @@ allow_push = true
 allow_clone = true
 allow_force_push = false
 use_ssh_agent = true
+# HTTPS GitHub remotes authenticate through host `gh` or
+# ~/.config/mncs-control-mcp/github.env. SSH agent forwarding remains optional.
 
 [limits]
 max_response_bytes = 2097152

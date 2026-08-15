@@ -33,14 +33,19 @@ class StdioClient:
 
     def notify(self, method: str, params: dict[str, object]) -> None:
         assert self.process.stdin is not None
-        self.process.stdin.write(json.dumps({"jsonrpc": "2.0", "method": method, "params": params}) + "\n")
+        self.process.stdin.write(
+            json.dumps({"jsonrpc": "2.0", "method": method, "params": params}) + "\n"
+        )
         self.process.stdin.flush()
 
     def request(self, method: str, params: dict[str, object]) -> dict[str, object]:
         request_id = self.next_id
         self.next_id += 1
         assert self.process.stdin is not None and self.process.stdout is not None
-        self.process.stdin.write(json.dumps({"jsonrpc": "2.0", "id": request_id, "method": method, "params": params}) + "\n")
+        self.process.stdin.write(
+            json.dumps({"jsonrpc": "2.0", "id": request_id, "method": method, "params": params})
+            + "\n"
+        )
         self.process.stdin.flush()
         ready, _, _ = select.select([self.process.stdout], [], [], 20)
         if not ready:
@@ -74,7 +79,9 @@ class StdioClient:
 @pytest.mark.skipif(shutil.which("bwrap") is None, reason="bubblewrap is not installed")
 def test_stdio_mcp_end_to_end_developer_workspace(tmp_path: Path) -> None:
     pytest.importorskip("mcp")
-    pytest.importorskip("mcp.server.fastmcp", reason="installed MCP SDK does not include the FastMCP server API")
+    pytest.importorskip(
+        "mcp.server.fastmcp", reason="installed MCP SDK does not include the FastMCP server API"
+    )
     workspace = tmp_path / "projects"
     workspace.mkdir()
     config_path = tmp_path / "control.toml"
@@ -85,11 +92,11 @@ root = {str(workspace)!r}
 [sandbox]
 backend = "bwrap"
 require_real_sandbox = true
-home = {str(tmp_path / 'sandbox-home')!r}
+home = {str(tmp_path / "sandbox-home")!r}
 [terminal]
-job_state_path = {str(tmp_path / 'state' / 'jobs.json')!r}
+job_state_path = {str(tmp_path / "state" / "jobs.json")!r}
 [server]
-audit_path = {str(tmp_path / 'state' / 'audit.jsonl')!r}
+audit_path = {str(tmp_path / "state" / "audit.jsonl")!r}
 """,
         encoding="utf-8",
     )
@@ -108,11 +115,28 @@ audit_path = {str(tmp_path / 'state' / 'audit.jsonl')!r}
         tools = client.request("tools/list", {})["tools"]
         names = {item["name"] for item in tools}
         assert {
-            "workspace_info", "list_projects", "file_write", "file_read", "terminal_exec",
-            "terminal_start", "git_status", "git_commit", "tool_inventory", "fabric_status",
-            "control_capabilities", "project_review", "control_job_status", "control_job_result",
-            "commons_status", "commons_work", "commons_query", "commons_get",
-            "commons_conversation", "commons_evidence", "commons_sync",
+            "workspace_info",
+            "list_projects",
+            "file_write",
+            "file_read",
+            "terminal_exec",
+            "terminal_start",
+            "git_status",
+            "git_commit",
+            "tool_inventory",
+            "fabric_status",
+            "control_capabilities",
+            "developer_readiness",
+            "project_review",
+            "control_job_status",
+            "control_job_result",
+            "commons_status",
+            "commons_work",
+            "commons_query",
+            "commons_get",
+            "commons_conversation",
+            "commons_evidence",
+            "commons_sync",
         } <= names
         assert "commons_publish" not in names
         terminal = next(item for item in tools if item["name"] == "terminal_exec")
@@ -133,7 +157,11 @@ audit_path = {str(tmp_path / 'state' / 'audit.jsonl')!r}
         assert shell["stdout"] == "hello\n"
         client.call(
             "terminal_exec",
-            {"command": "git init -q; git config user.email test@example.invalid; git config user.name Test", "scope": "project", "project": "e2e"},
+            {
+                "command": "git init -q; git config user.email test@example.invalid; git config user.name Test",
+                "scope": "project",
+                "project": "e2e",
+            },
         )
         status = client.call("git_status", {"repository": "e2e"})
         assert status["clean"] is False
@@ -145,7 +173,9 @@ audit_path = {str(tmp_path / 'state' / 'audit.jsonl')!r}
 
 def test_stdio_mcp_protocol_reads_persistent_fabric_without_admin_surface(tmp_path: Path) -> None:
     pytest.importorskip("mcp")
-    pytest.importorskip("mcp.server.fastmcp", reason="installed MCP SDK does not include the FastMCP server API")
+    pytest.importorskip(
+        "mcp.server.fastmcp", reason="installed MCP SDK does not include the FastMCP server API"
+    )
     fabric_source = Path(__file__).parents[2] / "mncs-fabric" / "src"
     if not fabric_source.is_dir():
         pytest.skip("sibling mncs-fabric source checkout is required")
@@ -182,11 +212,11 @@ root = {str(workspace)!r}
 [sandbox]
 backend = "none"
 require_real_sandbox = false
-home = {str(tmp_path / 'sandbox-home')!r}
+home = {str(tmp_path / "sandbox-home")!r}
 [server]
-audit_path = {str(tmp_path / 'state' / 'audit.jsonl')!r}
+audit_path = {str(tmp_path / "state" / "audit.jsonl")!r}
 [terminal]
-job_state_path = {str(tmp_path / 'state' / 'jobs.json')!r}
+job_state_path = {str(tmp_path / "state" / "jobs.json")!r}
 [integration]
 fabric_mode = "service"
 fabric_socket = {str(socket_path)!r}
@@ -208,8 +238,20 @@ fabric_execution_mode = "unavailable-until-service-support"
         client.notify("notifications/initialized", {})
         tools = client.request("tools/list", {})["tools"]
         by_name = {item["name"]: item for item in tools}
-        assert {"control_capabilities", "fabric_status", "laboratory_status", "workspace_info", "list_projects", "dispatch_fabric_job"} <= set(by_name)
-        assert not any("fabric_admin" in name or name.startswith("fabric_enrollment_") or name.startswith("fabric_worker_revoke") for name in by_name)
+        assert {
+            "control_capabilities",
+            "fabric_status",
+            "laboratory_status",
+            "workspace_info",
+            "list_projects",
+            "dispatch_fabric_job",
+        } <= set(by_name)
+        assert not any(
+            "fabric_admin" in name
+            or name.startswith("fabric_enrollment_")
+            or name.startswith("fabric_worker_revoke")
+            for name in by_name
+        )
         assert by_name["fabric_status"]["annotations"]["readOnlyHint"] is True
         assert by_name["commons_status"]["annotations"]["readOnlyHint"] is True
         assert by_name["commons_query"]["annotations"]["readOnlyHint"] is True
@@ -242,7 +284,11 @@ fabric_execution_mode = "unavailable-until-service-support"
         assert dispatch["error"] == "FABRIC_SERVICE_EXECUTION_UNSUPPORTED"
         smuggled = client.call(
             "control_run",
-            {"workflow": "fabric_admin", "project": "missing", "parameters": {"operation": "enrollment.create"}},
+            {
+                "workflow": "fabric_admin",
+                "project": "missing",
+                "parameters": {"operation": "enrollment.create"},
+            },
         )
         assert smuggled["error"] == "INVALID_WORKFLOW"
         assert "fabric_admin" not in json.dumps(by_name["terminal_exec"], sort_keys=True)

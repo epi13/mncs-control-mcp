@@ -1,3 +1,3 @@
 """Protected Fedora developer workspace and MNCS orchestration over MCP."""
 
-__version__ = "0.4.4"
+__version__ = "0.4.5"
