@@ -765,6 +765,7 @@ class FabricContractSupport:
 
     persistent_fleet_read: bool = False
     persistent_fleet_refresh: bool = False
+    classified_fleet_refresh: bool = False
     last_known_fleet_status: bool = False
     persistent_service_execution: bool = False
     persistent_detached_execution: bool = False
@@ -788,6 +789,7 @@ class FabricContractSupport:
         return cls(
             persistent_fleet_read=features.get("persistent_fleet_read") is True,
             persistent_fleet_refresh=features.get("persistent_fleet_refresh") is True,
+            classified_fleet_refresh=features.get("classified_fleet_refresh") is True,
             last_known_fleet_status=features.get("last_known_fleet_status") is True,
             persistent_service_execution=features.get("persistent_service_execution") is True,
             persistent_detached_execution=features.get("persistent_detached_execution") is True,
@@ -821,6 +823,7 @@ class FabricContractSupport:
         return cls(
             persistent_fleet_read=features.get("persistent_fleet_read") is True,
             persistent_fleet_refresh=features.get("persistent_fleet_refresh") is True,
+            classified_fleet_refresh=features.get("classified_fleet_refresh") is True,
             last_known_fleet_status=features.get("last_known_fleet_status") is True,
             persistent_service_execution=features.get("persistent_service_execution") is True,
             persistent_detached_execution=features.get("persistent_detached_execution") is True,
@@ -842,6 +845,7 @@ class FabricContractSupport:
         return {
             "persistent_fleet_read": self.persistent_fleet_read,
             "persistent_fleet_refresh": self.persistent_fleet_refresh,
+            "classified_fleet_refresh": self.classified_fleet_refresh,
             "last_known_fleet_status": self.last_known_fleet_status,
             "persistent_service_execution": self.persistent_service_execution,
             "persistent_detached_execution": self.persistent_detached_execution,
@@ -891,11 +895,17 @@ class FabricAdapter:
             for worker in workers
             if worker.get("presence") == "STALE" or worker.get("availability") == "UNKNOWN"
         )
+        stale_capability_inventory = sum(
+            1
+            for worker in workers
+            if worker.get("capability_inventory_status") == "STALE"
+        )
         return {
             "fleet_count": len(workers),
             "present_workers": present,
             "available_workers": available,
             "stale_workers": stale,
+            "stale_capability_inventory": stale_capability_inventory,
         }
 
     @staticmethod
@@ -1363,6 +1373,12 @@ class FabricAdapter:
             "model_inventory",
             "loaded_model_names",
             "capability_inventory_status",
+            "capability_observation_fresh",
+            "last_observed_at",
+            "description_captured_at",
+            "worker_service_version",
+            "refresh",
+            "deadline_fired",
             "runtime_observation",
         )
         return {key: worker[key] for key in allowed if key in worker}
