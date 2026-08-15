@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mncs-control-mcp"
-version = "0.4.6"
+version = "0.4.7"
 description = "Protected Fedora developer workspace and MNCS orchestration over MCP"
 readme = "README.md"
 requires-python = ">=3.11"

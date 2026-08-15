@@ -68,10 +68,9 @@ def test_capabilities_and_project_review_are_bounded(config) -> None:
     experiment = plane.experiment_readiness()
     assert experiment["status"] in {"READY", "DEGRADED", "BLOCKED", "UNKNOWN"}
     assert experiment["claim_boundary"] == "infrastructure validation"
-    assert "fabric_controller" in experiment["layers"]
-    assert experiment["layers"]["fleet"]["detail"]["note"] == (
-        "STALE capability inventory is not worker UNAVAILABLE"
-    )
+    assert experiment.get("schema") == "mncs.experiment-readiness.v1"
+    assert "control" in experiment["layers"]
+    assert experiment["layers"]["control"]["status"] in {"READY", "DEGRADED", "BLOCKED", "UNKNOWN"}
     rendered = str(readiness)
     assert "gho_" not in rendered
     assert "ghp_" not in rendered
