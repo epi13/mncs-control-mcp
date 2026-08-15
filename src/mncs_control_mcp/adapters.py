@@ -71,13 +71,19 @@ class TestAdapter:
             key, root = resolve_repository(self.config, repository)
             return key, root
         if self.policy is None:
-            raise ControlError("UNAUTHORIZED_REPOSITORY", f"repository alias is unknown: {repository}")
+            raise ControlError(
+                "UNAUTHORIZED_REPOSITORY", f"repository alias is unknown: {repository}"
+            )
         return repository, self.policy.project_path(repository)
 
     def _detected_suite(self, root: Path) -> str | None:
         if (root / "Cargo.toml").is_file():
             return "cargo"
-        if (root / "pyproject.toml").is_file() or (root / "pytest.ini").is_file() or (root / "tests").is_dir():
+        if (
+            (root / "pyproject.toml").is_file()
+            or (root / "pytest.ini").is_file()
+            or (root / "tests").is_dir()
+        ):
             return "pytest"
         if (root / "package.json").is_file():
             return "node"
@@ -93,52 +99,106 @@ class TestAdapter:
             raise ControlError("REPOSITORY_MISSING", f"approved repository does not exist: {key}")
         detected = self._detected_suite(root)
         commands: list[dict[str, object]] = []
-        toolchain = self.toolchains.resolve(root, "python" if detected == "pytest" else detected) if detected else None
+        toolchain = (
+            self.toolchains.resolve(root, "python" if detected == "pytest" else detected)
+            if detected
+            else None
+        )
         if detected == "pytest":
             executable = toolchain.executable if toolchain and toolchain.executable else "python"
-            commands.append({"suite": "pytest", "command": [executable, "-m", "pytest"], "toolchain": toolchain.public() if toolchain else None})
+            commands.append(
+                {
+                    "suite": "pytest",
+                    "command": [executable, "-m", "pytest"],
+                    "toolchain": toolchain.public() if toolchain else None,
+                }
+            )
         elif detected == "cargo":
             executable = toolchain.executable if toolchain and toolchain.executable else "cargo"
-            commands.append({"suite": "cargo", "command": [executable, "test"], "toolchain": toolchain.public() if toolchain else None})
+            commands.append(
+                {
+                    "suite": "cargo",
+                    "command": [executable, "test"],
+                    "toolchain": toolchain.public() if toolchain else None,
+                }
+            )
         elif detected == "node":
             executable = toolchain.executable if toolchain and toolchain.executable else "npm"
-            commands.append({"suite": "node", "command": [executable, "test", "--"], "toolchain": toolchain.public() if toolchain else None})
+            commands.append(
+                {
+                    "suite": "node",
+                    "command": [executable, "test", "--"],
+                    "toolchain": toolchain.public() if toolchain else None,
+                }
+            )
         elif detected == "go":
             executable = toolchain.executable if toolchain and toolchain.executable else "go"
-            commands.append({"suite": "go", "command": [executable, "test", "./..."], "toolchain": toolchain.public() if toolchain else None})
+            commands.append(
+                {
+                    "suite": "go",
+                    "command": [executable, "test", "./..."],
+                    "toolchain": toolchain.public() if toolchain else None,
+                }
+            )
         elif detected == "cmake":
             executable = toolchain.executable if toolchain and toolchain.executable else "ctest"
-            commands.append({"suite": "cmake", "command": [executable, "--test-dir", "build"], "toolchain": toolchain.public() if toolchain else None})
+            commands.append(
+                {
+                    "suite": "cmake",
+                    "command": [executable, "--test-dir", "build"],
+                    "toolchain": toolchain.public() if toolchain else None,
+                }
+            )
         return {
             "repository": key,
             "path": str(root),
             "detected_suite": detected,
             "supported_suites": list(self.SUITES),
             "commands": commands,
-            "test_directories": [name for name in ("tests", "test", "spec") if (root / name).is_dir()],
+            "test_directories": [
+                name for name in ("tests", "test", "spec") if (root / name).is_dir()
+            ],
             "toolchain": toolchain.public() if toolchain else None,
         }
 
-    def _command(self, root: Path, suite: str, component: str | None) -> tuple[tuple[str, ...], dict[str, object]]:
+    def _command(
+        self, root: Path, suite: str, component: str | None
+    ) -> tuple[tuple[str, ...], dict[str, object]]:
         if suite not in self.SUITES:
             raise ControlError("INVALID_TEST_SUITE", f"test suite must be one of {self.SUITES}")
         if suite == "repository":
             suite = self._detected_suite(root) or ""
             if not suite:
-                raise ControlError("TEST_SUITE_UNAVAILABLE", "no approved repository test runner was detected")
+                raise ControlError(
+                    "TEST_SUITE_UNAVAILABLE", "no approved repository test runner was detected"
+                )
         ecosystem = "python" if suite == "pytest" else suite
         toolchain = self.toolchains.resolve(root, ecosystem)
         if toolchain.executable is None:
-            raise ControlError("TOOLCHAIN_UNAVAILABLE", toolchain.diagnostic or f"{ecosystem} toolchain is unavailable")
+            raise ControlError(
+                "TOOLCHAIN_UNAVAILABLE",
+                toolchain.diagnostic or f"{ecosystem} toolchain is unavailable",
+            )
         executable = toolchain.executable
         if suite == "cargo":
-            return ((executable, "test", "--", component) if component else (executable, "test"), toolchain.public())
+            return (
+                (executable, "test", "--", component) if component else (executable, "test"),
+                toolchain.public(),
+            )
         if suite == "pytest":
-            return ((executable, "-m", "pytest", component) if component else (executable, "-m", "pytest"), toolchain.public())
+            return (
+                (executable, "-m", "pytest", component)
+                if component
+                else (executable, "-m", "pytest"),
+                toolchain.public(),
+            )
         if suite == "ruff":
             return ((executable, "check", component or "."), toolchain.public())
         if suite == "node":
-            return ((executable, "test", "--", component) if component else (executable, "test", "--"), toolchain.public())
+            return (
+                (executable, "test", "--", component) if component else (executable, "test", "--"),
+                toolchain.public(),
+            )
         if suite == "go":
             return ((executable, "test", component or "./..."), toolchain.public())
         if suite == "cmake":
@@ -156,8 +216,14 @@ class TestAdapter:
         if not root.is_dir():
             raise ControlError("REPOSITORY_MISSING", f"approved repository does not exist: {key}")
         if component is not None:
-            if not re.fullmatch(r"[A-Za-z0-9_.:\-/]{1,160}", component) or component.startswith("-") or ".." in Path(component).parts:
-                raise ControlError("INVALID_INPUT", "component must be a safe relative test selector")
+            if (
+                not re.fullmatch(r"[A-Za-z0-9_.:\-/]{1,160}", component)
+                or component.startswith("-")
+                or ".." in Path(component).parts
+            ):
+                raise ControlError(
+                    "INVALID_INPUT", "component must be a safe relative test selector"
+                )
         timeout_value = self.config.default_timeout_seconds if timeout is None else float(timeout)
         timeout_value = min(timeout_value, self.config.max_timeout_seconds)
         argv, toolchain = self._command(root, test_suite, component)
@@ -171,16 +237,20 @@ class TestAdapter:
                 pass
             else:
                 argv = ("./" + relative_executable.as_posix(), *argv[1:])
-        self.actions.resolve(f"test.{('cargo' if argv[0].endswith('cargo') else 'pytest')}") if argv[0].endswith(("cargo", "python", "python3")) else None
+        self.actions.resolve(
+            f"test.{('cargo' if argv[0].endswith('cargo') else 'pytest')}"
+        ) if argv[0].endswith(("cargo", "python", "python3")) else None
         self_test = root.name == "mncs-control-mcp"
         command = shlex.join(argv)
         security_skips: list[dict[str, str]] = []
         if self_test and argv[1:3] == ("-m", "pytest"):
             command += " -m 'not requires_bwrap_namespace'"
-            security_skips.append({
-                "marker": "requires_bwrap_namespace",
-                "reason": "the MCP invocation already runs inside the production Bubblewrap boundary; nested user namespaces are unavailable",
-            })
+            security_skips.append(
+                {
+                    "marker": "requires_bwrap_namespace",
+                    "reason": "the MCP invocation already runs inside the production Bubblewrap boundary; nested user namespaces are unavailable",
+                }
+            )
         started = utc_now()
         if self.sandbox is not None:
             sandbox_result = self.sandbox.run(
@@ -232,13 +302,19 @@ class TestAdapter:
             "duration_seconds": round(duration, 3),
             "sandbox_backend": backend,
             "summary": "PASS" if passed else "FAIL",
-            "test_counts": parse_test_output(test_suite if test_suite != "repository" else self._detected_suite(root) or "", stdout, stderr),
+            "test_counts": parse_test_output(
+                test_suite if test_suite != "repository" else self._detected_suite(root) or "",
+                stdout,
+                stderr,
+            ),
             "toolchain": toolchain,
             "security_tests_skipped": security_skips,
             "self_test_mode": self_test,
         }
 
-    def check(self, repository: str, profile: str = "standard", timeout: float | None = None) -> dict[str, object]:
+    def check(
+        self, repository: str, profile: str = "standard", timeout: float | None = None
+    ) -> dict[str, object]:
         if profile not in {"quick", "standard", "full"}:
             raise ControlError("INVALID_INPUT", "profile must be quick, standard, or full")
         key, root = self._root(repository)
@@ -287,14 +363,23 @@ class OllamaAdapter:
             return {"available": False, "status": "not_installed", "models": []}
         self.actions.resolve("model.ollama_list")
         result = run_bounded(
-            (executable, "list"), timeout_seconds=15, output_limit_bytes=self.config.max_output_bytes,
+            (executable, "list"),
+            timeout_seconds=15,
+            output_limit_bytes=self.config.max_output_bytes,
             env=safe_host_probe_environment(),
         )
         models: list[dict[str, object]] = []
         for line in result.stdout.splitlines()[1:]:
             columns = line.split()
             if columns:
-                models.append({"model": columns[0], "runtime": "ollama", "provider": "ollama", "available": True})
+                models.append(
+                    {
+                        "model": columns[0],
+                        "runtime": "ollama",
+                        "provider": "ollama",
+                        "available": True,
+                    }
+                )
         return {
             "available": result.returncode == 0,
             "status": "available" if result.returncode == 0 else "unavailable",
@@ -317,7 +402,9 @@ def _meminfo() -> dict[str, int]:
 
 
 class SystemAdapter:
-    def __init__(self, config: ControlConfig, actions: ActionRegistry, ollama: OllamaAdapter) -> None:
+    def __init__(
+        self, config: ControlConfig, actions: ActionRegistry, ollama: OllamaAdapter
+    ) -> None:
         self.config = config
         self.actions = actions
         self.ollama = ollama
@@ -328,7 +415,11 @@ class SystemAdapter:
             return {"available": False, "gpus": [], "driver": None, "cuda": None}
         self.actions.resolve("system.nvidia_smi")
         result = run_bounded(
-            (executable, "--query-gpu=name,driver_version,memory.total", "--format=csv,noheader,nounits"),
+            (
+                executable,
+                "--query-gpu=name,driver_version,memory.total",
+                "--format=csv,noheader,nounits",
+            ),
             timeout_seconds=10,
             output_limit_bytes=32 * 1024,
             env=safe_host_probe_environment(),
@@ -339,9 +430,20 @@ class SystemAdapter:
             fields = [item.strip() for item in line.split(",")]
             if fields:
                 driver = driver or (fields[1] if len(fields) > 1 else None)
-                gpus.append({"name": fields[0], "driver": fields[1] if len(fields) > 1 else None, "vram_mib": fields[2] if len(fields) > 2 else None})
+                gpus.append(
+                    {
+                        "name": fields[0],
+                        "driver": fields[1] if len(fields) > 1 else None,
+                        "vram_mib": fields[2] if len(fields) > 2 else None,
+                    }
+                )
         cuda = None
-        version = run_bounded((executable,), timeout_seconds=10, output_limit_bytes=16 * 1024, env=safe_host_probe_environment())
+        version = run_bounded(
+            (executable,),
+            timeout_seconds=10,
+            output_limit_bytes=16 * 1024,
+            env=safe_host_probe_environment(),
+        )
         match = re.search(r"CUDA Version:\s*([\d.]+)", version.stdout + version.stderr)
         if match:
             cuda = match.group(1)
@@ -357,13 +459,23 @@ class SystemAdapter:
                 "available_bytes": disk.free,
             }
         except OSError as exc:
-            disk_status = {"path": str(self.config.projects_root), "available": False, "diagnostic": redact_text(str(exc))}
+            disk_status = {
+                "path": str(self.config.projects_root),
+                "available": False,
+                "diagnostic": redact_text(str(exc)),
+            }
         return {
             "hostname": socket.gethostname(),
             "os": platform.platform(),
             "kernel": platform.release(),
-            "cpu": {"processor": platform.processor() or platform.machine(), "count": os.cpu_count()},
-            "ram": {"total_bytes": memory.get("MemTotal"), "available_bytes": memory.get("MemAvailable")},
+            "cpu": {
+                "processor": platform.processor() or platform.machine(),
+                "count": os.cpu_count(),
+            },
+            "ram": {
+                "total_bytes": memory.get("MemTotal"),
+                "available_bytes": memory.get("MemAvailable"),
+            },
             "disk": disk_status,
             "gpu": self._nvidia(),
             "ollama": self.ollama.status(),
@@ -386,7 +498,8 @@ class HarnessAdapter:
                 try:
                     fabric_package = _load_sibling_package(
                         "mncs_fabric",
-                        self.config.workspace_root / self.config.repositories.get("fabric", "mncs-fabric"),
+                        self.config.workspace_root
+                        / self.config.repositories.get("fabric", "mncs-fabric"),
                     )
                     service_support = FabricContractSupport.from_client(fabric_package)
                     service_client = fabric_package.FabricClient.connect(
@@ -409,12 +522,16 @@ class HarnessAdapter:
                 "config_path": str(path or "default"),
                 "fabric_enabled": bool(harness_config.fabric.enabled),
                 "fabric_controller_mode": harness_config.fabric.controller_mode,
-                "fabric_service_configured": harness_config.fabric.controller_mode in {"service", "transitional"},
+                "fabric_service_configured": harness_config.fabric.controller_mode
+                in {"service", "transitional"},
                 "fabric_controller_connected": None,
                 "fabric_execution_mode": (
-                    "persistent-service" if service_support and service_support.persistent_service_execution
-                    else "unsupported" if harness_config.fabric.controller_mode == "service"
-                    else "embedded-direct-compatibility" if harness_config.fabric.controller_mode == "transitional"
+                    "persistent-service"
+                    if service_support and service_support.persistent_service_execution
+                    else "unsupported"
+                    if harness_config.fabric.controller_mode == "service"
+                    else "embedded-direct-compatibility"
+                    if harness_config.fabric.controller_mode == "transitional"
                     else "embedded-direct"
                 ),
                 "fabric_service_support": (
@@ -448,14 +565,19 @@ class HarnessAdapter:
                     "device": harness_config.router.device,
                 },
                 "fabric_workers_configured": len(harness_config.fabric.workers)
-                if harness_config.fabric.controller_mode != "service" else 0,
+                if harness_config.fabric.controller_mode != "service"
+                else 0,
                 "policy": {
                     "approval_mode": harness_config.policy.approval_mode,
                     "allowed_executables": list(harness_config.policy.allowed_executables),
                 },
             }
         except Exception as exc:
-            return {"available": False, "status": "unavailable", "diagnostic": redact_text(str(exc))}
+            return {
+                "available": False,
+                "status": "unavailable",
+                "diagnostic": redact_text(str(exc)),
+            }
 
 
 class CommonsAdapter:
@@ -482,9 +604,7 @@ class CommonsAdapter:
                 timeout=self.config.commons_service_timeout_seconds,
             )
         except Exception as exc:
-            raise ControlError(
-                "COMMONS_SERVICE_UNAVAILABLE", redact_text(str(exc))
-            ) from exc
+            raise ControlError("COMMONS_SERVICE_UNAVAILABLE", redact_text(str(exc))) from exc
 
     def _operator(self) -> Any:
         try:
@@ -504,11 +624,11 @@ class CommonsAdapter:
                 "COMMONS_RESPONSE_MALFORMED", "Commons response was not JSON"
             ) from exc
         if len(encoded.encode("utf-8")) > self.config.max_response_bytes:
-            raise ControlError("COMMONS_RESPONSE_OVERSIZED", "Commons response exceeded Control policy")
-        if not isinstance(payload, dict):
             raise ControlError(
-                "COMMONS_RESPONSE_MALFORMED", "Commons response was not an object"
+                "COMMONS_RESPONSE_OVERSIZED", "Commons response exceeded Control policy"
             )
+        if not isinstance(payload, dict):
+            raise ControlError("COMMONS_RESPONSE_MALFORMED", "Commons response was not an object")
         result = dict(payload)
         result.setdefault("content_trust", "UNTRUSTED")
         return result
@@ -528,9 +648,7 @@ class CommonsAdapter:
                 "evidence",
                 "sync",
             }:
-                raise ControlError(
-                    "COMMONS_OPERATION_DENIED", "Commons operation is not allowed"
-                )
+                raise ControlError("COMMONS_OPERATION_DENIED", "Commons operation is not allowed")
             return self._bounded(operation(*args, **kwargs))
         except ControlError:
             raise
@@ -559,9 +677,7 @@ class CommonsAdapter:
             return {
                 "available": payload.get("storeHealthy") is True,
                 "reachable": True,
-                "status": (
-                    "available" if payload.get("storeHealthy") is True else "unavailable"
-                ),
+                "status": ("available" if payload.get("storeHealthy") is True else "unavailable"),
                 "ready": payload.get("storeHealthy") is True,
                 "transport": "local-unix-service",
                 "authority": "read-only Commons consumer socket",
@@ -675,16 +791,25 @@ class FabricContractSupport:
             last_known_fleet_status=features.get("last_known_fleet_status") is True,
             persistent_service_execution=features.get("persistent_service_execution") is True,
             persistent_detached_execution=features.get("persistent_detached_execution") is True,
-            persistent_service_capability_ingestion=features.get("persistent_service_capability_ingestion") is True,
+            persistent_service_capability_ingestion=features.get(
+                "persistent_service_capability_ingestion"
+            )
+            is True,
             persistent_worker_observations=features.get("persistent_worker_observations") is True,
             scheduled_work_queue=features.get("scheduled_work_queue") is True,
             worker_rendezvous=features.get("worker_rendezvous") is True,
-            client_version=str(contract.get("package_version")) if contract.get("package_version") else None,
-            contract_identity=str(contract.get("contract_identity")) if contract.get("contract_identity") else None,
+            client_version=str(contract.get("package_version"))
+            if contract.get("package_version")
+            else None,
+            contract_identity=str(contract.get("contract_identity"))
+            if contract.get("contract_identity")
+            else None,
         )
 
     @classmethod
-    def from_service_status(cls, status: Any, fallback: FabricContractSupport) -> FabricContractSupport:
+    def from_service_status(
+        cls, status: Any, fallback: FabricContractSupport
+    ) -> FabricContractSupport:
         features = status.get("service_features", {}) if isinstance(status, dict) else {}
         capabilities = status.get("service_capabilities", {}) if isinstance(status, dict) else {}
         if not isinstance(features, dict):
@@ -699,12 +824,17 @@ class FabricContractSupport:
             last_known_fleet_status=features.get("last_known_fleet_status") is True,
             persistent_service_execution=features.get("persistent_service_execution") is True,
             persistent_detached_execution=features.get("persistent_detached_execution") is True,
-            persistent_service_capability_ingestion=features.get("persistent_service_capability_ingestion") is True,
+            persistent_service_capability_ingestion=features.get(
+                "persistent_service_capability_ingestion"
+            )
+            is True,
             persistent_worker_observations=features.get("persistent_worker_observations") is True,
             scheduled_work_queue=features.get("scheduled_work_queue") is True,
             worker_rendezvous=features.get("worker_rendezvous") is True,
             client_version=str(status.get("fabric_version") or fallback.client_version),
-            contract_identity=str(status.get("public_contract_identity") or fallback.contract_identity),
+            contract_identity=str(
+                status.get("public_contract_identity") or fallback.contract_identity
+            ),
             operations=advertised,
         )
 
@@ -756,18 +886,43 @@ class FabricAdapter:
             or ("presence" not in worker and worker.get("availability") == "AVAILABLE")
         )
         available = sum(1 for worker in workers if worker.get("availability") == "AVAILABLE")
-        stale = sum(1 for worker in workers if worker.get("presence") == "STALE" or worker.get("availability") == "UNKNOWN")
-        return {"fleet_count": len(workers), "present_workers": present, "available_workers": available, "stale_workers": stale}
+        stale = sum(
+            1
+            for worker in workers
+            if worker.get("presence") == "STALE" or worker.get("availability") == "UNKNOWN"
+        )
+        return {
+            "fleet_count": len(workers),
+            "present_workers": present,
+            "available_workers": available,
+            "stale_workers": stale,
+        }
 
     @staticmethod
     def _version_compatibility(fabric: Any, controller: dict[str, Any]) -> dict[str, object]:
         client_version = str(getattr(fabric, "__version__", "unknown"))
         controller_version = controller.get("fabric_version")
         controller_version = str(controller_version) if controller_version else "unknown"
-        features = controller.get("service_features") if isinstance(controller.get("service_features"), dict) else {}
-        capabilities = controller.get("service_capabilities") if isinstance(controller.get("service_capabilities"), dict) else {}
-        operations = capabilities.get("operations") if isinstance(capabilities.get("operations"), dict) else {}
-        required_features = ("persistent_fleet_read", "last_known_fleet_status", "persistent_fleet_refresh")
+        features = (
+            controller.get("service_features")
+            if isinstance(controller.get("service_features"), dict)
+            else {}
+        )
+        capabilities = (
+            controller.get("service_capabilities")
+            if isinstance(controller.get("service_capabilities"), dict)
+            else {}
+        )
+        operations = (
+            capabilities.get("operations")
+            if isinstance(capabilities.get("operations"), dict)
+            else {}
+        )
+        required_features = (
+            "persistent_fleet_read",
+            "last_known_fleet_status",
+            "persistent_fleet_refresh",
+        )
         missing = [name for name in required_features if features.get(name) is not True]
         if "fleet.refresh" in operations and operations.get("fleet.refresh") is not True:
             missing.append("fleet.refresh")
@@ -835,12 +990,18 @@ class FabricAdapter:
                     "fabric_mode": self.config.fabric_mode,
                     "fleet_authority": "persistent-controller",
                     "execution_transport": (
-                        "persistent-service" if self.config.fabric_mode == "service" and support.persistent_service_execution
-                        else "embedded-direct-compatibility" if self.config.fabric_mode == "transitional"
+                        "persistent-service"
+                        if self.config.fabric_mode == "service"
+                        and support.persistent_service_execution
+                        else "embedded-direct-compatibility"
+                        if self.config.fabric_mode == "transitional"
                         else "unsupported"
                     ),
                     "persistent_service_support": support.as_dict(),
-                    "controller": {"runtime": controller.get("service_runtime"), "worker_rendezvous": controller.get("worker_rendezvous")},
+                    "controller": {
+                        "runtime": controller.get("service_runtime"),
+                        "worker_rendezvous": controller.get("worker_rendezvous"),
+                    },
                     **counts,
                     "known_nodes": [self._public_worker(worker) for worker in workers],
                 }
@@ -879,8 +1040,12 @@ class FabricAdapter:
                 "status": "unavailable",
                 "controller_connected": False,
                 "fabric_mode": self.config.fabric_mode,
-                "fleet_authority": "persistent-controller" if self.config.fabric_mode in {"service", "transitional"} else "embedded-compatibility-controller",
-                "execution_transport": "unsupported" if self.config.fabric_mode == "service" else self.config.fabric_execution_mode,
+                "fleet_authority": "persistent-controller"
+                if self.config.fabric_mode in {"service", "transitional"}
+                else "embedded-compatibility-controller",
+                "execution_transport": "unsupported"
+                if self.config.fabric_mode == "service"
+                else self.config.fabric_execution_mode,
                 "known_nodes": [],
                 "diagnostic": redact_text(str(exc)),
             }
@@ -923,7 +1088,10 @@ class FabricAdapter:
                     "FABRIC_SERVICE_RESTART_REQUIRED"
                     if compatibility["state"] == "restart_required"
                     else "FABRIC_VERSION_MISMATCH",
-                    str(compatibility.get("reason") or "Fabric client and persistent controller are incompatible"),
+                    str(
+                        compatibility.get("reason")
+                        or "Fabric client and persistent controller are incompatible"
+                    ),
                     details={"compatibility": compatibility},
                 )
         if self.config.fabric_mode == "transitional":
@@ -973,10 +1141,17 @@ class FabricAdapter:
         if not artifact_root.is_dir() or artifact_root.is_symlink():
             raise ControlError("INVALID_INPUT", "artifact_path must be a real directory")
         arguments = values.get("arguments", [])
-        if not isinstance(arguments, list) or len(arguments) > 64 or not all(
-            isinstance(item, str) and item and len(item) <= 4096 and "\x00" not in item for item in arguments
+        if (
+            not isinstance(arguments, list)
+            or len(arguments) > 64
+            or not all(
+                isinstance(item, str) and item and len(item) <= 4096 and "\x00" not in item
+                for item in arguments
+            )
         ):
-            raise ControlError("INVALID_INPUT", "parameters.arguments must be a bounded string array")
+            raise ControlError(
+                "INVALID_INPUT", "parameters.arguments must be a bounded string array"
+            )
         if task_type == "pytest":
             argv = ["@python", "-m", "pytest", *arguments]
             capabilities = ["python"]
@@ -988,13 +1163,17 @@ class FabricAdapter:
             script_path = self.policy.normalize_relative(script, allow_root=False).as_posix()
             candidate_script = artifact_root / script_path
             if not candidate_script.is_file() or candidate_script.is_symlink():
-                raise ControlError("INVALID_INPUT", "python task script must be a regular artifact file")
+                raise ControlError(
+                    "INVALID_INPUT", "python task script must be a regular artifact file"
+                )
             argv = ["@python", script_path, *arguments]
             capabilities = ["python"]
         timeout = float(values.get("timeout_seconds", self.config.default_timeout_seconds))
         timeout = min(max(timeout, 0.05), self.config.max_timeout_seconds)
         result_paths = values.get("result_paths", [])
-        if not isinstance(result_paths, list) or not all(isinstance(item, str) for item in result_paths):
+        if not isinstance(result_paths, list) or not all(
+            isinstance(item, str) for item in result_paths
+        ):
             raise ControlError("INVALID_INPUT", "result_paths must be a string array")
         network = bool(values.get("network", False))
         try:
@@ -1046,12 +1225,19 @@ class FabricAdapter:
                 client = self._service_client(fabric)
             else:
                 registry_path = prepare_fabric_runtime(self.config)
-                client = fabric.FabricClient(self.config.fabric_controller_id, self.config.fabric_state)
+                client = fabric.FabricClient(
+                    self.config.fabric_controller_id, self.config.fabric_state
+                )
             try:
                 if self.config.fabric_mode != "service":
-                    registry_report = client.load_registry(registry_path) if registry_path.exists() else None
+                    registry_report = (
+                        client.load_registry(registry_path) if registry_path.exists() else None
+                    )
                 if detached:
-                    if self.config.fabric_mode != "service" or not support.persistent_detached_execution:
+                    if (
+                        self.config.fabric_mode != "service"
+                        or not support.persistent_detached_execution
+                    ):
                         raise ControlError(
                             "FABRIC_DETACHED_EXECUTION_UNSUPPORTED",
                             "detached execution requires live persistent Fabric support",
@@ -1088,9 +1274,15 @@ class FabricAdapter:
                 "manifest_identity": manifest["manifest_identity"],
                 "bundle": bundle_report,
                 "registry": registry_report,
-                "fabric_controller": "persistent-service" if self.config.fabric_mode in {"service", "transitional"} else "embedded-compatibility",
-                "fleet_authority": "persistent-controller" if self.config.fabric_mode in {"service", "transitional"} else "embedded-compatibility-controller",
-                "execution_transport": "persistent-service" if self.config.fabric_mode == "service" and support.persistent_service_execution else self.config.fabric_execution_mode,
+                "fabric_controller": "persistent-service"
+                if self.config.fabric_mode in {"service", "transitional"}
+                else "embedded-compatibility",
+                "fleet_authority": "persistent-controller"
+                if self.config.fabric_mode in {"service", "transitional"}
+                else "embedded-compatibility-controller",
+                "execution_transport": "persistent-service"
+                if self.config.fabric_mode == "service" and support.persistent_service_execution
+                else self.config.fabric_execution_mode,
                 "results": results,
             }
         except ControlError:
@@ -1158,9 +1350,20 @@ class FabricAdapter:
     @staticmethod
     def _public_worker(worker: dict[str, Any]) -> dict[str, object]:
         allowed = (
-            "worker_id", "availability", "available", "host", "port", "platform", "os",
-            "capabilities", "resource_snapshot", "model_names", "model_inventory",
-            "loaded_model_names", "capability_inventory_status", "runtime_observation",
+            "worker_id",
+            "availability",
+            "available",
+            "host",
+            "port",
+            "platform",
+            "os",
+            "capabilities",
+            "resource_snapshot",
+            "model_names",
+            "model_inventory",
+            "loaded_model_names",
+            "capability_inventory_status",
+            "runtime_observation",
         )
         return {key: worker[key] for key in allowed if key in worker}
 
@@ -1181,8 +1384,20 @@ class ModelAdapter:
                 continue
             host = node.get("worker_id")
             for name in node.get("model_names", []) or []:
-                inventory.append({"model": name, "runtime": "fabric", "provider": "ollama", "host_node": host, "available": node.get("availability") == "AVAILABLE", "capabilities": node.get("capabilities", [])})
-        return {"models": inventory, "sources": {"ollama": ollama.get("status"), "fabric": fabric.get("status")}}
+                inventory.append(
+                    {
+                        "model": name,
+                        "runtime": "fabric",
+                        "provider": "ollama",
+                        "host_node": host,
+                        "available": node.get("availability") == "AVAILABLE",
+                        "capabilities": node.get("capabilities", []),
+                    }
+                )
+        return {
+            "models": inventory,
+            "sources": {"ollama": ollama.get("status"), "fabric": fabric.get("status")},
+        }
 
 
 class ForgeAdapter:
@@ -1210,10 +1425,14 @@ class ForgeAdapter:
 
         def server_value(initialization: object, *names: str) -> object:
             return value(value(initialization, "serverInfo", "server_info"), *names)
+
         parameters = StdioServerParameters(
             command=str(executable),
             args=["--config", str(config), "--mode", "development"],
-            env={**os.environ, "MNCS_FORGE_STATE_DIR": str(self.config.job_state_path.parent / "forge-state")},
+            env={
+                **os.environ,
+                "MNCS_FORGE_STATE_DIR": str(self.config.job_state_path.parent / "forge-state"),
+            },
         )
         try:
             async with (
@@ -1231,7 +1450,9 @@ class ForgeAdapter:
                         "missing_capabilities": missing,
                         "server": server_value(initialization, "name"),
                         "version": server_value(initialization, "version"),
-                        "protocol_version": value(initialization, "protocolVersion", "protocol_version"),
+                        "protocol_version": value(
+                            initialization, "protocolVersion", "protocol_version"
+                        ),
                         "capabilities": sorted(names),
                     }
                 inspection = await session.call_tool("mncs_forge_project_inspect", {})
@@ -1242,7 +1463,9 @@ class ForgeAdapter:
                         "diagnostic": "project inspection tool returned an MCP error",
                         "server": server_value(initialization, "name"),
                         "version": server_value(initialization, "version"),
-                        "protocol_version": value(initialization, "protocolVersion", "protocol_version"),
+                        "protocol_version": value(
+                            initialization, "protocolVersion", "protocol_version"
+                        ),
                         "capabilities": sorted(names),
                     }
                 return {
@@ -1250,13 +1473,23 @@ class ForgeAdapter:
                     "reachable": True,
                     "server": server_value(initialization, "name"),
                     "version": server_value(initialization, "version"),
-                    "protocol_version": value(initialization, "protocolVersion", "protocol_version"),
+                    "protocol_version": value(
+                        initialization, "protocolVersion", "protocol_version"
+                    ),
                     "capabilities": sorted(names),
                 }
         except (FileNotFoundError, PermissionError) as exc:
-            return {"health_status": "process_start_failed", "reachable": False, "diagnostic": redact_text(str(exc))}
+            return {
+                "health_status": "process_start_failed",
+                "reachable": False,
+                "diagnostic": redact_text(str(exc)),
+            }
         except BaseException as exc:
-            return {"health_status": "mcp_initialization_failed", "reachable": False, "diagnostic": redact_text(str(exc))}
+            return {
+                "health_status": "mcp_initialization_failed",
+                "reachable": False,
+                "diagnostic": redact_text(str(exc)),
+            }
 
     def _probe(self, executable: Path, config: Path) -> dict[str, object]:
         try:
@@ -1294,10 +1527,16 @@ class ForgeAdapter:
             "operations": [],
         }
         if not executable.is_file() or not os.access(executable, os.X_OK):
-            base.update(available=False, status="executable_missing", health_status="executable_missing")
+            base.update(
+                available=False, status="executable_missing", health_status="executable_missing"
+            )
             return base
         if forge_config is None or not forge_config.is_file():
-            base.update(available=False, status="configuration_missing", health_status="configuration_missing")
+            base.update(
+                available=False,
+                status="configuration_missing",
+                health_status="configuration_missing",
+            )
             return base
         probe = self._probe(executable, forge_config)
         base.update(probe)
@@ -1314,18 +1553,145 @@ class ForgeAdapter:
                 for item in inventory.get("operations", [])
                 if isinstance(item, dict) and item.get("operation_id")
             )
-            base.update({
-                "available": True,
-                "status": "available",
-                "version": getattr(importlib.import_module("mncs_forge"), "__version__", probe.get("version", "unknown")),
-                "operations": names[:200],
-                "operation_count": len(names),
-                "authority": "Forge owns evaluation semantics, evidence, scoring, and claims",
-            })
+            base.update(
+                {
+                    "available": True,
+                    "status": "available",
+                    "version": getattr(
+                        importlib.import_module("mncs_forge"),
+                        "__version__",
+                        probe.get("version", "unknown"),
+                    ),
+                    "operations": names[:200],
+                    "operation_count": len(names),
+                    "authority": "Forge owns evaluation semantics, evidence, scoring, and claims",
+                }
+            )
             return base
         except Exception as exc:
-            base.update(available=False, status="library_unavailable", diagnostic=redact_text(str(exc)))
+            base.update(
+                available=False, status="library_unavailable", diagnostic=redact_text(str(exc))
+            )
             return base
+
+    def _repository_root(self, repository: str) -> Path:
+        if repository in self.config.repositories:
+            _, root = resolve_repository(self.config, repository)
+            return root
+        if self.policy is not None:
+            return self.policy.project_path(repository)
+        raise ControlError("UNAUTHORIZED_REPOSITORY", f"repository alias is unknown: {repository}")
+
+    def _load_project_forge(self, repository: str) -> dict[str, object]:
+        root = self._repository_root(repository)
+        forge_config_path = root / self.config.forge_config_name
+        if not forge_config_path.is_file():
+            return {
+                "status": "not_supported_yet",
+                "reason": "repository has no Forge configuration",
+                "forge_config": str(forge_config_path),
+                "repository": repository,
+            }
+        try:
+            _load_sibling_package("mncs_forge", self.config.forge_path)
+            config_module = importlib.import_module("mncs_forge.config")
+            engine_module = importlib.import_module("mncs_forge.engine")
+            operations = importlib.import_module("mncs_forge.operations")
+            forge_config = config_module.load_config(forge_config_path)
+            forge = engine_module.Forge(forge_config, mode="development")
+        except Exception as exc:
+            return {
+                "status": "not_supported_yet",
+                "reason": "Forge interface could not be loaded",
+                "diagnostic": redact_text(str(exc)),
+                "repository": repository,
+                "forge_config": str(forge_config_path),
+            }
+        return {
+            "status": "ready",
+            "repository": repository,
+            "root": root,
+            "forge": forge,
+            "forge_config": forge_config,
+            "operations": operations,
+            "config_path": forge_config_path,
+        }
+
+    @staticmethod
+    def _candidate_summary(inspection: dict[str, object]) -> dict[str, object]:
+        lifecycle = inspection.get("lifecycle") if isinstance(inspection, dict) else None
+        if not isinstance(lifecycle, dict):
+            lifecycle = inspection if isinstance(inspection, dict) else {}
+        candidate = lifecycle.get("candidate")
+        if not isinstance(candidate, dict):
+            candidate = {}
+        epoch = lifecycle.get("epoch")
+        if not isinstance(epoch, dict):
+            epoch = {}
+        return {
+            "stage": lifecycle.get("stage") or inspection.get("stage"),
+            "candidate_identity": candidate.get("identity"),
+            "candidate_freshness": candidate.get("freshness"),
+            "epoch": epoch.get("active_identity"),
+        }
+
+    def candidate_status(self, repository: str) -> dict[str, object]:
+        loaded = self._load_project_forge(repository)
+        if loaded.get("status") != "ready":
+            return loaded
+        forge = loaded["forge"]
+        inspection = forge.project_inspect()
+        summary = self._candidate_summary(inspection)
+        freshness = summary.get("candidate_freshness")
+        compatible = freshness in {None, "CURRENT"} or summary.get("candidate_identity") is None
+        return {
+            "status": "available",
+            "repository": repository,
+            "compatible": compatible,
+            "stale": freshness == "STALE",
+            "inspection": summary,
+            "note": (
+                "Forge keeps prior evidence bound to the previous candidate identity. "
+                "Refresh or register before evaluating modified content."
+            ),
+        }
+
+    def refresh_candidate(
+        self,
+        repository: str,
+        *,
+        hypothesis: str = "working-tree content changed after the previous candidate binding",
+        changed_files: list[str] | None = None,
+    ) -> dict[str, object]:
+        loaded = self._load_project_forge(repository)
+        if loaded.get("status") != "ready":
+            return loaded
+        forge = loaded["forge"]
+        operations = loaded["operations"]
+        try:
+            result = operations.DEFAULT_OPERATION_REGISTRY.invoke(
+                forge,
+                "candidates.refresh",
+                {
+                    "hypothesis": hypothesis,
+                    "generator_identity": "mncs-control-mcp",
+                    "generator_config_identity": "mncs-control-mcp/developer-refresh",
+                    "changed_files": changed_files,
+                },
+                interface=operations.OperationInterface.INTERNAL,
+            )
+        except Exception as exc:
+            return {
+                "status": "refresh_failed",
+                "repository": repository,
+                "diagnostic": redact_text(str(exc)),
+            }
+        return {
+            "status": "refreshed" if result.get("refreshed") else "current",
+            "repository": repository,
+            "result": result,
+            "note": result.get("note"),
+        }
 
     def evaluate(
         self,
@@ -1334,33 +1700,53 @@ class ForgeAdapter:
         model: str | None = None,
         evaluation_profile: str | None = None,
     ) -> dict[str, object]:
-        if repository in self.config.repositories:
-            _, root = resolve_repository(self.config, repository)
-        elif self.policy is not None:
-            root = self.policy.project_path(repository)
-        else:
-            raise ControlError("UNAUTHORIZED_REPOSITORY", f"repository alias is unknown: {repository}")
-        forge_config_path = root / self.config.forge_config_name
-        if not forge_config_path.is_file():
-            return {"status": "not_supported_yet", "reason": "repository has no Forge configuration", "forge_config": str(forge_config_path)}
+        loaded = self._load_project_forge(repository)
+        if loaded.get("status") != "ready":
+            return loaded
+        forge = loaded["forge"]
+        forge_config = loaded["forge_config"]
+        operations = loaded["operations"]
+        if case_study not in forge_config.workflows:
+            return {
+                "status": "not_supported_yet",
+                "reason": "case_study is not a configured Forge workflow",
+                "available_workflows": sorted(forge_config.workflows),
+            }
+        workflow = forge_config.workflows[case_study]
+        refresh = None
+        if getattr(workflow, "subject", "project") != "project":
+            status = self.candidate_status(repository)
+            if status.get("stale"):
+                refresh = self.refresh_candidate(repository)
+                if refresh.get("status") == "refresh_failed":
+                    return {
+                        "status": "stale_candidate",
+                        "reason": "candidate no longer matches current content",
+                        "refresh": refresh,
+                    }
         try:
-            _load_sibling_package("mncs_forge", self.config.forge_path)
-            config_module = importlib.import_module("mncs_forge.config")
-            engine_module = importlib.import_module("mncs_forge.engine")
-            operations = importlib.import_module("mncs_forge.operations")
-            forge_config = config_module.load_config(forge_config_path)
-            if case_study not in forge_config.workflows:
-                return {"status": "not_supported_yet", "reason": "case_study is not a configured Forge workflow", "available_workflows": sorted(forge_config.workflows)}
-            forge = engine_module.Forge(forge_config, mode="development")
             result = operations.DEFAULT_OPERATION_REGISTRY.invoke(
                 forge,
                 "development.checks.run",
                 {"workflow_names": [case_study], "candidate_identity": None},
                 interface=operations.OperationInterface.INTERNAL,
             )
-            return {"status": "completed", "repository": repository, "case_study": case_study, "model": model, "evaluation_profile": evaluation_profile, "forge_result": result}
         except Exception as exc:
-            return {"status": "not_supported_yet", "reason": "Forge interface could not be loaded", "diagnostic": redact_text(str(exc))}
+            return {
+                "status": "not_supported_yet",
+                "reason": "Forge interface could not be loaded",
+                "diagnostic": redact_text(str(exc)),
+                "refresh": refresh,
+            }
+        return {
+            "status": "completed",
+            "repository": repository,
+            "case_study": case_study,
+            "model": model,
+            "evaluation_profile": evaluation_profile,
+            "candidate_refresh": refresh,
+            "forge_result": result,
+        }
 
 
 class IntegrationBundle:

@@ -15,8 +15,22 @@ from typing import BinaryIO
 
 from .config import ControlConfig
 from .errors import ControlError
+from .github_auth import materialize_sandbox_gh_config, sandbox_github_environment
 from .security import bounded_text, validate_environment
 from .workspace import ScopeResolution, WorkspacePolicy
+
+_JOERN_NAMES = (
+    "joern",
+    "joern-parse",
+    "joern-export",
+    "joern-flow",
+    "joern-scan",
+    "joern-slice",
+)
+_ASKPASS_GUARD = (
+    "unset SSH_ASKPASS GIT_ASKPASS DISPLAY; "
+    "export SSH_ASKPASS_REQUIRE=never GIT_TERMINAL_PROMPT=0 GH_PROMPT_DISABLED=1; "
+)
 
 
 def utc_now() -> str:
@@ -66,7 +80,9 @@ class Sandbox:
         discovered = shutil.which("bwrap")
         requested = config.sandbox_backend
         if requested == "bwrap" and discovered is None:
-            raise ControlError("SANDBOX_UNAVAILABLE", "bubblewrap was explicitly requested but is not installed")
+            raise ControlError(
+                "SANDBOX_UNAVAILABLE", "bubblewrap was explicitly requested but is not installed"
+            )
         self.executable = discovered if requested in {"auto", "bwrap"} else None
         if config.require_real_sandbox and self.executable is None:
             raise ControlError("SANDBOX_UNAVAILABLE", "a real terminal sandbox is required")
@@ -100,9 +116,74 @@ class Sandbox:
         )
         return tuple(path for path in defaults if path.exists())
 
-    def _project_harness_runtime(
-        self, argv: list[str], safe_overrides: dict[str, str]
-    ) -> None:
+    def _joern_install_roots(self) -> tuple[Path, ...]:
+        """Locate the canonical Joern distribution without mounting the real home."""
+
+        roots: list[Path] = []
+        seen: set[Path] = set()
+
+        def add(path: Path) -> None:
+            try:
+                resolved = path.expanduser().resolve(strict=True)
+            except OSError:
+                return
+            if resolved in seen or not resolved.is_dir():
+                return
+            seen.add(resolved)
+            roots.append(resolved)
+
+        for directory in self._tool_paths():
+            if not directory.is_dir():
+                continue
+            for name in _JOERN_NAMES:
+                candidate = directory / name
+                try:
+                    target = candidate.resolve(strict=True)
+                except OSError:
+                    continue
+                if target.parent.name == "joern-cli":
+                    add(target.parent.parent)
+                elif "joern" in target.parts:
+                    add(target.parent)
+
+        share = Path.home() / ".local" / "share" / "joern"
+        if share.is_dir():
+            versions = sorted(
+                item for item in share.iterdir() if item.is_dir() and not item.is_symlink()
+            )
+            if versions:
+                add(versions[-1])
+        return tuple(roots)
+
+    def _bind_host_tree(self, argv: list[str], source: Path) -> None:
+        """Expose one existing host directory at its original path, read-only."""
+
+        reserved = {
+            "/",
+            "/bin",
+            "/dev",
+            "/etc",
+            "/home",
+            "/home/developer",
+            "/lib",
+            "/lib64",
+            "/opt",
+            "/proc",
+            "/run",
+            "/tmp",
+            "/usr",
+            "/var",
+            "/workspace",
+        }
+        current = Path("/")
+        for part in source.parts[1:-1]:
+            current /= part
+            if current.as_posix() not in reserved:
+                argv.extend(("--dir", current.as_posix()))
+                reserved.add(current.as_posix())
+        argv.extend(("--ro-bind", str(source), str(source)))
+
+    def _project_harness_runtime(self, argv: list[str], safe_overrides: dict[str, str]) -> None:
         """Project deliberate Harness config and consumer sockets read-only."""
 
         def mountpoint(target: Path) -> None:
@@ -166,9 +247,7 @@ class Sandbox:
                     "/workspace/"
                     + self.config.repositories.get("local_harness", "mncs-harness")
                     + "/src",
-                    "/workspace/"
-                    + self.config.repositories.get("fabric", "mncs-fabric")
-                    + "/src",
+                    "/workspace/" + self.config.repositories.get("fabric", "mncs-fabric") + "/src",
                     "/workspace/"
                     + self.config.repositories.get("commons", "MNCS-Commons")
                     + "/src",
@@ -261,10 +340,17 @@ class Sandbox:
         use_ssh_agent: bool = False,
         runtime_mounts: tuple[tuple[Path, str], ...] = (),
     ) -> tuple[list[str], bool]:
-        if not isinstance(command, str) or not command.strip() or len(command) > 131072 or "\x00" in command:
+        if (
+            not isinstance(command, str)
+            or not command.strip()
+            or len(command) > 131072
+            or "\x00" in command
+        ):
             raise ControlError("INVALID_COMMAND", "command must be non-empty bounded text")
         network_enabled = self._network(network)
-        safe_overrides = validate_environment({**self.config.safe_environment, **(environment or {})})
+        safe_overrides = validate_environment(
+            {**self.config.safe_environment, **(environment or {})}
+        )
         if self.executable is None:
             raise ControlError("SANDBOX_UNAVAILABLE", "terminal execution requires bubblewrap")
 
@@ -326,7 +412,11 @@ class Sandbox:
                 resolver = Path("/etc/resolv.conf").resolve(strict=True)
             except OSError:
                 resolver = None
-            if resolver is not None and resolver.is_file() and resolver.as_posix().startswith("/run/"):
+            if (
+                resolver is not None
+                and resolver.is_file()
+                and resolver.as_posix().startswith("/run/")
+            ):
                 current = Path("/run")
                 for part in resolver.parent.relative_to("/run").parts:
                     current /= part
@@ -353,7 +443,9 @@ class Sandbox:
             if not source_path.is_dir() or not any(
                 _is_relative_to(source_path, root) for root in allowed_runtime_roots
             ):
-                raise ControlError("INVALID_RUNTIME_MOUNT", "runtime mount must be a control-plane state directory")
+                raise ControlError(
+                    "INVALID_RUNTIME_MOUNT", "runtime mount must be a control-plane state directory"
+                )
             destination_path = Path(destination)
             destination_root = Path("/home/developer/.local/state")
             if (
@@ -361,12 +453,24 @@ class Sandbox:
                 or ".." in destination_path.parts
                 or not _is_relative_to(destination_path, destination_root)
             ):
-                raise ControlError("INVALID_RUNTIME_MOUNT", "runtime mount destination must be below the sandbox state directory")
+                raise ControlError(
+                    "INVALID_RUNTIME_MOUNT",
+                    "runtime mount destination must be below the sandbox state directory",
+                )
             # Bubblewrap requires the destination's parent to exist in the
             # namespace.  Creating only empty namespace directories does not
             # expose any additional host data.
             parent = Path("/")
-            existing = {"/", "/home", "/home/developer", "/run", "/tmp", "/workspace", "/opt", "/opt/mncs-tools"}
+            existing = {
+                "/",
+                "/home",
+                "/home/developer",
+                "/run",
+                "/tmp",
+                "/workspace",
+                "/opt",
+                "/opt/mncs-tools",
+            }
             for part in destination_path.parent.parts[1:]:
                 parent /= part
                 if parent.as_posix() not in existing:
@@ -393,15 +497,29 @@ class Sandbox:
             if source.name == ".rustup":
                 safe_overrides.setdefault("RUSTUP_HOME", destination)
 
+        for joern_root in self._joern_install_roots():
+            self._bind_host_tree(argv, joern_root)
+            safe_overrides.setdefault("JOERN_HOME", str(joern_root / "joern-cli"))
+            safe_overrides.setdefault("JOERN_INSTALL_ROOT", str(joern_root))
+
+        forward_ssh = (
+            network_enabled and self.config.git_use_ssh_agent and (use_ssh_agent or network_enabled)
+        )
         ssh_socket = os.environ.get("SSH_AUTH_SOCK")
-        if (
-            use_ssh_agent
-            and network_enabled
-            and self.config.git_use_ssh_agent
-            and ssh_socket
-            and Path(ssh_socket).exists()
-        ):
-            argv.extend(("--dir", "/run/mncs-control", "--ro-bind", ssh_socket, "/run/mncs-control/ssh-agent.sock"))
+        if not ssh_socket:
+            fallback_socket = Path(f"/run/user/{os.getuid()}/ssh-agent.socket")
+            if fallback_socket.is_socket():
+                ssh_socket = str(fallback_socket)
+        if forward_ssh and ssh_socket and Path(ssh_socket).exists():
+            argv.extend(
+                (
+                    "--dir",
+                    "/run/mncs-control",
+                    "--ro-bind",
+                    ssh_socket,
+                    "/run/mncs-control/ssh-agent.sock",
+                )
+            )
             safe_overrides["SSH_AUTH_SOCK"] = "/run/mncs-control/ssh-agent.sock"
             safe_overrides["GIT_SSH_COMMAND"] = (
                 "ssh -F /dev/null -o IdentitiesOnly=no "
@@ -433,9 +551,14 @@ class Sandbox:
             "PIP_DISABLE_PIP_VERSION_CHECK": "1",
         }
         base_env.update(safe_overrides)
+        base_env.update(sandbox_github_environment(network_enabled))
+        if network_enabled:
+            materialize_sandbox_gh_config(self.config.sandbox_home)
         for key, value in base_env.items():
             argv.extend(("--setenv", key, value))
-        argv.extend(("--chdir", resolution.sandbox_cwd, "/bin/bash", "-lc", command))
+        argv.extend(
+            ("--chdir", resolution.sandbox_cwd, "/bin/bash", "-lc", _ASKPASS_GUARD + command)
+        )
         return argv, network_enabled
 
     def run(
@@ -454,7 +577,11 @@ class Sandbox:
         if not self.config.allow_terminal:
             raise ControlError("TERMINAL_DISABLED", "terminal execution is disabled")
         resolution = self.policy.resolve_scope(scope=scope, project=project, cwd=cwd)
-        timeout = self.config.default_timeout_seconds if timeout_seconds is None else float(timeout_seconds)
+        timeout = (
+            self.config.default_timeout_seconds
+            if timeout_seconds is None
+            else float(timeout_seconds)
+        )
         if timeout <= 0 or timeout > self.config.max_timeout_seconds:
             raise ControlError("INVALID_TIMEOUT", "timeout exceeds the configured terminal limit")
         argv, network_enabled = self.command_argv(
@@ -479,7 +606,9 @@ class Sandbox:
             )
         except OSError as exc:
             raise ControlError("COMMAND_START_FAILED", str(exc)) from exc
-        stdout, stderr, truncated = _communicate_bounded(process, self.config.max_output_bytes, timeout)
+        stdout, stderr, truncated = _communicate_bounded(
+            process, self.config.max_output_bytes, timeout
+        )
         timed_out = process.poll() is None
         if timed_out:
             _terminate_group(process)

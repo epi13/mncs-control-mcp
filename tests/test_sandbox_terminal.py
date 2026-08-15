@@ -34,13 +34,15 @@ def test_real_bwrap_blocks_home_and_project_sibling_mutation(config) -> None:
         "test -r /etc/passwd && echo passwd-readable; "
         "(echo mutation >> /etc/passwd) 2>/dev/null || echo etc-readonly; "
         f"test ! -e {real_home}/.ssh && echo ssh-hidden; "
-        "test \"$HOME\" = /home/developer && echo dedicated-home; "
+        'test "$HOME" = /home/developer && echo dedicated-home; '
         'python -c "from pathlib import Path; '
         f"p=Path('{real_home}')/'.ssh'; print('python-hidden', not p.exists())\"; "
         "bash -c 'test ! -r ~/.ssh/id_ed25519 && echo key-hidden'; "
         "sh -c 'echo subprocess-ok'"
     )
-    result = sandbox.run(command, scope="project", project="alpha", cwd=".", timeout_seconds=20, network=False)
+    result = sandbox.run(
+        command, scope="project", project="alpha", cwd=".", timeout_seconds=20, network=False
+    )
     assert result.exit_code == 0, result.stderr
     assert str(os.getuid()) in result.stdout
     assert "sibling-blocked" in result.stdout
@@ -54,7 +56,9 @@ def test_real_bwrap_blocks_home_and_project_sibling_mutation(config) -> None:
     assert not (config.workspace_root / "beta" / "escape.txt").exists()
     assert not (config.workspace_root / "beta" / "from-parent.txt").exists()
     assert (config.workspace_root / "alpha" / "own.txt").is_file()
-    argv, enabled = sandbox.command_argv("true", policy.resolve_scope(scope="project", project="alpha", cwd="."), network=False)
+    argv, enabled = sandbox.command_argv(
+        "true", policy.resolve_scope(scope="project", project="alpha", cwd="."), network=False
+    )
     assert "--unshare-net" in argv
     assert enabled is False
     network_argv, enabled = sandbox.command_argv(
@@ -144,6 +148,46 @@ def test_host_workspace_shebang_path_resolves_inside_sandbox(config) -> None:
     )
     assert result.exit_code == 0, result.stderr
     assert "alias-ok" in result.stdout
+
+
+def test_sandbox_disables_askpass_and_does_not_put_tokens_in_argv_names_only(config) -> None:
+    (config.workspace_root / "alpha").mkdir()
+    policy, sandbox = _sandbox(config)
+    argv, enabled = sandbox.command_argv(
+        "true",
+        policy.resolve_scope(scope="project", project="alpha", cwd="."),
+        network=True,
+    )
+    assert enabled is True
+    joined = " ".join(argv)
+    assert "SSH_ASKPASS_REQUIRE" in joined
+    assert "GIT_TERMINAL_PROMPT" in joined
+    assert "unset SSH_ASKPASS" in joined
+    assert "gho_" not in joined
+    assert "ghp_" not in joined
+    assert "GH_TOKEN" not in argv
+    assert "oauth_token" not in joined
+
+
+@pytest.mark.requires_bwrap_namespace
+def test_sandbox_askpass_is_inactive_and_joern_or_guard_is_visible(config) -> None:
+    (config.workspace_root / "alpha").mkdir()
+    _, sandbox = _sandbox(config)
+    result = sandbox.run(
+        'printf \'%s\\n\' "${SSH_ASKPASS-unset}" "${GIT_TERMINAL_PROMPT-unset}" "${SSH_ASKPASS_REQUIRE-unset}"; '
+        "command -v joern-parse >/dev/null && echo JOERN_VISIBLE || echo JOERN_ABSENT",
+        scope="project",
+        project="alpha",
+        cwd=".",
+        timeout_seconds=30,
+        network=False,
+    )
+    assert result.exit_code == 0, result.stderr
+    assert "unset" in result.stdout or result.stdout.splitlines()[0] == ""
+    assert "never" in result.stdout
+    assert "JOERN_VISIBLE" in result.stdout or "JOERN_ABSENT" in result.stdout
+    if (Path.home() / ".local" / "bin" / "joern").exists():
+        assert "JOERN_VISIBLE" in result.stdout
 
 
 def test_network_policy_can_disable_opt_in(config) -> None:

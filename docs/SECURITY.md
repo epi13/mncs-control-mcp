@@ -12,7 +12,15 @@ No string allowlist is presented as a sandbox. If Bubblewrap is unavailable, ter
 
 ## Network and authentication
 
-No-network commands receive a new network namespace. Network-enabled commands retain host networking. There is no domain allowlist. Remote Git can receive an SSH-agent socket and regular known-hosts data; it never receives the real `.ssh` directory or token environment. The agent can sign, so networked Git remains high-impact.
+No-network commands receive a new network namespace. Network-enabled commands retain host networking. There is no domain allowlist. Remote Git can receive an SSH-agent socket and regular known-hosts data; it never receives the real `.ssh` directory. The agent can sign, so networked Git remains high-impact.
+
+Network-enabled sandboxes may receive a GitHub CLI hosts file in the dedicated
+sandbox home so HTTPS remotes and `gh` can operate non-interactively. The token
+is taken from `~/.config/mncs-control-mcp/github.env` or the host `gh` login and
+written mode `0600` under the sandbox home, never onto the `bwrap` command line
+or into the workspace. It is not accepted from agent-supplied environment
+overrides. `developer_readiness` can observe that this capability exists; it
+cannot create or widen it.
 
 ## Environment
 
