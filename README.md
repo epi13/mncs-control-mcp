@@ -14,7 +14,7 @@ ChatGPT / Codex / MCP clients
       mncs-control-mcp
        /             \
 developer workspace   MNCS adapters
- |  |  |  |           |-- epi13-local-harness
+ |  |  |  |           |-- mncs-harness
  |  |  |  +-- tools   |-- mncs-fabric
  |  |  +----- Git     |-- mncs-forge-mcp
  |  +-------- Bash    |-- MNCS-Commons
@@ -27,7 +27,7 @@ developer workspace   MNCS adapters
 
 Fabric integration is a consumer boundary: the persistent
 `mncs-fabric-controller.service` owns fleet lifecycle and worker presence;
-Control reads the same consumer AF_UNIX socket as Local Harness. Service mode
+Control reads the same consumer AF_UNIX socket as MNCS Harness. Service mode
 does not copy a worker registry or trust material and does not expose Fabric
 administration. Control derives execution support from the connected service's
 live feature projection, using persistent dispatch only when it is advertised

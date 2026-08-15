@@ -378,6 +378,7 @@ class HarnessAdapter:
         path = self.config.harness_config
         try:
             package = _load_sibling_package("epi13_local_harness", self.config.harness_path)
+            # Implementation package remains epi13_local_harness in this release.
             loader = importlib.import_module("epi13_local_harness.config").load_config
             harness_config = loader(path)
             service_support = None

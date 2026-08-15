@@ -170,7 +170,7 @@ unattended remote Git authentication therefore still depends on the chosen agent
 and key policy.
 
 Fabric workers have the same systemd user-session consideration. For example,
-the Fedora worker `fabric-worker-01` can remain available after the enrollment
+a representative Linux worker can remain available after the enrollment
 SSH session closes only after an administrator enables lingering for its
 dedicated `fabric` account, then enables its worker unit as that account:
 
@@ -210,25 +210,25 @@ For the physical worker/model path, refresh the Harness inventory from the host 
 use an exact pin so unavailable workers fail closed:
 
 ```bash
-~/Documents/Projects/epi13-local-harness/.venv/bin/elh fabric refresh
-~/Documents/Projects/epi13-local-harness/.venv/bin/elh models --worker collamore02-windows --json
-~/Documents/Projects/epi13-local-harness/.venv/bin/elh ask \
+"$HOME/Documents/Projects/mncs-harness/.venv/bin/mncs-harness" fabric refresh
+"$HOME/Documents/Projects/mncs-harness/.venv/bin/mncs-harness" models --worker worker-01-windows --json
+"$HOME/Documents/Projects/mncs-harness/.venv/bin/mncs-harness" ask \
   'Compute 17 + 25 and reply with RESULT=42 plus one short explanation.' \
-  --worker collamore02-windows --model-name gemma4:e4b
-~/Documents/Projects/epi13-local-harness/.venv/bin/elh models --worker fabric-worker-01 --json
-~/Documents/Projects/epi13-local-harness/.venv/bin/elh ask \
+  --worker worker-01-windows --model-name "$WINDOWS_MODEL"
+"$HOME/Documents/Projects/mncs-harness/.venv/bin/mncs-harness" models --worker worker-01-linux --json
+"$HOME/Documents/Projects/mncs-harness/.venv/bin/mncs-harness" ask \
   'Compute 17 + 25 and reply with RESULT=42 plus one short explanation.' \
-  --worker fabric-worker-01 --model-name granite3.3:2b
-~/Documents/Projects/epi13-local-harness/.venv/bin/elh residency status
+  --worker worker-01-linux --model-name "$LINUX_MODEL"
+"$HOME/Documents/Projects/mncs-harness/.venv/bin/mncs-harness" residency status
 ```
 
 The expected evidence is `AVAILABLE`, a current worker observation, the selected
 worker/model, `execution_source=remote`, Fabric request/record/receipt identities,
-and residency still reporting `gemma4:e4b` loaded. Do not add
+and residency still reporting the configured resident model. Do not add
 `--allow-fallback` for an exact routing smoke test.
-For `fabric-worker-01`, the expected model is `granite3.3:2b`; its current Ollama
-capabilities are completion and tools, so Harness disables an incompatible
-thinking option while preserving the exact worker/model pin.
+A representative Linux worker should keep the operator-configured model pin;
+Harness disables an incompatible thinking option while preserving the exact
+worker/model pin. The `elh` command remains a compatibility alias.
 
 If the tunnel is not listed, verify the workspace association and Tunnels Read +
 Use permission. If discovery fails, confirm the service is active and rerun

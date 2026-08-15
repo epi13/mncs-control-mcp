@@ -171,19 +171,19 @@ def test_legacy_fabric_trust_state_is_relocated_into_private_control_state(tmp_p
         / "state"
         / "epi13-local-harness"
         / "fabric-enrollment"
-        / "collamore02-windows"
+        / "worker-01-windows"
         / "trust"
         / "controller-trust.jsonl"
     )
     trust_state.parent.mkdir(parents=True)
-    trust_state.write_text('{"record":{"identity":"collamore02-windows"}}\n', encoding="utf-8")
+    trust_state.write_text('{"record":{"identity":"worker-01-windows"}}\n', encoding="utf-8")
     legacy.parent.mkdir(parents=True)
     registry = {
         "schema_version": "mncs-fabric.worker-registry.v0.1",
         "controller_id": "epi13-local-harness",
         "workers": [
             {
-                "worker_id": "collamore02-windows",
+                "worker_id": "worker-01-windows",
                 "trust_state": str(trust_state),
             }
         ],
@@ -285,8 +285,9 @@ def test_harness_config_is_deliberately_projected_into_sandbox(config, tmp_path:
     policy = WorkspacePolicy(projected)
     sandbox = Sandbox(projected, policy)
     result = sandbox.run(
-        "test \"$EPI13_HARNESS_CONFIG\" = /home/developer/.config/epi13-local-harness/config.toml "
-        "&& grep -q 'enabled = true' \"$EPI13_HARNESS_CONFIG\"",
+        "test \"$MNCS_HARNESS_CONFIG\" = /home/developer/.config/mncs-harness/config.toml "
+        "&& test \"$EPI13_HARNESS_CONFIG\" = /home/developer/.config/mncs-harness/config.toml "
+        "&& grep -q 'enabled = true' \"$MNCS_HARNESS_CONFIG\"",
         scope="workspace",
         project=None,
         cwd=".",

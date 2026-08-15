@@ -8,14 +8,17 @@ from pathlib import Path
 from .errors import ControlError
 
 DEFAULT_REPOSITORIES = {
-    "local_harness": "epi13-local-harness",
+    "local_harness": "mncs-harness",
     "fabric": "mncs-fabric",
     "forge": "mncs-forge-mcp",
     "language": "mncs-language",
     "standard": "machine-native-complexity-standard",
+    "mncds": "machine-native-complexity-development-specification",
     "commons": "MNCS-Commons",
+    "atlas": "mncs-atlas",
     "reference_studies": "mncs-reference-studies",
 }
+LEGACY_HARNESS_DIRECTORIES = ("mncs-harness", "epi13-local-harness")
 
 
 @dataclass(frozen=True)
@@ -90,7 +93,7 @@ class ControlConfig:
     )
     commons_service_timeout_seconds: float = 5.0
     fabric_execution_mode: str = "unavailable-until-service-support"
-    fabric_controller_id: str = "epi13-local-harness"
+    fabric_controller_id: str = "mncs-harness"
     forge_config_name: str = "mncs-forge.toml"
     forge_mcp_executable: Path | None = None
     forge_mcp_config: Path | None = None
@@ -102,15 +105,23 @@ class ControlConfig:
 
     @property
     def harness_path(self) -> Path:
-        return self.workspace_root / self.repositories.get("local_harness", "epi13-local-harness")
+        configured = self.workspace_root / self.repositories.get("local_harness", "mncs-harness")
+        if configured.exists():
+            return configured
+        for name in LEGACY_HARNESS_DIRECTORIES:
+            candidate = self.workspace_root / name
+            if candidate.exists():
+                return candidate
+        return configured
 
     @property
     def harness_config_path(self) -> Path:
-        return (
-            self.harness_config
-            if self.harness_config is not None
-            else Path.home() / ".config" / "epi13-local-harness" / "config.toml"
-        ).expanduser().resolve()
+        if self.harness_config is not None:
+            return self.harness_config.expanduser().resolve()
+        preferred = Path.home() / ".config" / "mncs-harness" / "config.toml"
+        legacy = Path.home() / ".config" / "epi13-local-harness" / "config.toml"
+        selected = preferred if preferred.exists() or not legacy.exists() else legacy
+        return selected.expanduser().resolve()
 
     @property
     def fabric_path(self) -> Path:
@@ -344,7 +355,7 @@ def load_config(path: Path | str | None = None) -> ControlConfig:
         ),
         commons_service_timeout_seconds=commons_timeout,
         fabric_execution_mode=fabric_execution_mode,
-        fabric_controller_id=str(integration.get("fabric_controller_id", "epi13-local-harness")),
+        fabric_controller_id=str(integration.get("fabric_controller_id", "mncs-harness")),
         forge_config_name=str(integration.get("forge_config_name", "mncs-forge.toml")),
         forge_mcp_executable=_path(forge_executable) if forge_executable else None,
         forge_mcp_config=_path(forge_config) if forge_config else None,
