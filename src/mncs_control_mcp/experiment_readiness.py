@@ -191,6 +191,53 @@ def evaluate_experiment_readiness(
         "tested": artifact_paths,
     }
 
+    if harness is not None and hasattr(harness, "inspect_live_config"):
+        try:
+            from epi13_local_harness.config import load_config
+
+            live = harness.inspect_live_config(load_config(config.harness_config_path), profile=profile)
+            layers = dict(live.get("layers") or {})
+            layers["control"] = {
+                "name": "control",
+                "status": control["status"],
+                "detail": control,
+                "evidence": control.get("evidence"),
+            }
+            layers["joern"] = {
+                "name": "joern",
+                "status": joern.get("status") or UNKNOWN,
+                "detail": joern,
+                "evidence": None,
+            }
+            layers["forge"] = {
+                "name": "forge",
+                "status": forge.get("status") or UNKNOWN,
+                "detail": forge,
+                "evidence": None,
+            }
+            layers["artifact_write"] = {
+                "name": "artifact_write",
+                "status": READY if artifact_write.get("writable") else BLOCKED,
+                "detail": artifact_write,
+                "evidence": None,
+            }
+            required = tuple(live.get("required_layers") or [])
+            if hasattr(harness, "_overall"):
+                status, warnings = harness._overall(list(layers.values()), required)
+            else:
+                status, warnings = live.get("status") or UNKNOWN, live.get("optional_warnings") or []
+            live["layers"] = layers
+            live["status"] = status
+            live["profile_status"] = status
+            live["optional_warnings"] = warnings
+            live["inspected_at"] = utc_now()
+            live["local_fallback"] = False
+            live["ssh_used"] = False
+            live["control_projection"] = True
+            return live
+        except Exception:
+            pass
+
     if harness is None or not hasattr(harness, "evaluate_layers"):
         return {
             "schema": READINESS_SCHEMA,
