@@ -4,7 +4,7 @@ These adapters were reviewed against the sibling sources present in `$HOME/Docum
 
 ## Harness
 
-`epi13-local-harness` 0.6.1 exposes `LocalAgent.run`, model inventory/routing sessions, policy-aware tools, and Fabric integration. MNCS Control reports the configured provider/model roles, router mode, policy approval mode, Fabric enablement, and configured worker count. It does not create a second agent loop. Direct Harness agent execution remains intentionally unexposed until its command/file tools can be placed under the same Bubblewrap boundary without weakening Harness policy semantics.
+`mncs-harness` 0.6.6 exposes `LocalAgent.run`, model inventory/routing sessions, policy-aware tools, and Fabric integration. The implementation package remains `epi13_local_harness` as a compatibility surface. MNCS Control reports the configured provider/model roles, router mode, policy approval mode, Fabric enablement, and configured worker count. It does not create a second agent loop. Direct Harness agent execution remains intentionally unexposed until its command/file tools can be placed under the same Bubblewrap boundary without weakening Harness policy semantics.
 
 ## Fabric
 

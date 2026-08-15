@@ -153,14 +153,18 @@ class Sandbox:
                     "HARNESS_CONFIG_UNSAFE",
                     "Harness configuration must be a regular non-symlink file",
                 )
-            target = Path("/home/developer/.config/epi13-local-harness/config.toml")
+            target = Path("/home/developer/.config/mncs-harness/config.toml")
+            legacy_target = Path("/home/developer/.config/epi13-local-harness/config.toml")
             mountpoint(target)
+            mountpoint(legacy_target)
             argv.extend(("--ro-bind", str(harness_config), target.as_posix()))
+            argv.extend(("--ro-bind", str(harness_config), legacy_target.as_posix()))
+            safe_overrides["MNCS_HARNESS_CONFIG"] = target.as_posix()
             safe_overrides["EPI13_HARNESS_CONFIG"] = target.as_posix()
             safe_overrides["PYTHONPATH"] = ":".join(
                 (
                     "/workspace/"
-                    + self.config.repositories.get("local_harness", "epi13-local-harness")
+                    + self.config.repositories.get("local_harness", "mncs-harness")
                     + "/src",
                     "/workspace/"
                     + self.config.repositories.get("fabric", "mncs-fabric")

@@ -47,16 +47,18 @@ max_listing_entries = 2000
 max_search_results = 500
 
 [mncs.repos]
-local_harness = "epi13-local-harness"
+local_harness = "mncs-harness"
 fabric = "mncs-fabric"
 forge = "mncs-forge-mcp"
 language = "mncs-language"
 standard = "machine-native-complexity-standard"
+mncds = "machine-native-complexity-development-specification"
 commons = "MNCS-Commons"
+atlas = "mncs-atlas"
 reference_studies = "mncs-reference-studies"
 
 [integration]
-# harness_config = "~/.config/epi13-local-harness/config.toml"
+# harness_config = "~/.config/mncs-harness/config.toml"
 fabric_mode = "service"
 fabric_socket = "~/.local/state/mncs-fabric/controller.sock"
 fabric_service_timeout_seconds = 30.0
@@ -70,7 +72,7 @@ fabric_execution_mode = "unavailable-until-service-support"
 # fabric_execution_mode = "embedded-direct-compatibility"
 # fabric_registry = "~/.local/state/mncs-control-mcp/fabric/workers.json"
 # fabric_state = "~/.local/state/mncs-control-mcp/fabric.jsonl"
-fabric_controller_id = "epi13-local-harness"
+fabric_controller_id = "mncs-harness"
 forge_config_name = "mncs-forge.toml"
 # Optional explicit MCP probe paths. When omitted, Control uses the Forge
 # checkout's .venv entry point and the migrated reference-studies config.
