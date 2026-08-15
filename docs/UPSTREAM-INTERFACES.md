@@ -4,11 +4,12 @@ These adapters were reviewed against the sibling sources present in `$HOME/Docum
 
 ## Harness
 
-`mncs-harness` 0.6.6 exposes `LocalAgent.run`, model inventory/routing sessions, policy-aware tools, and Fabric integration. The implementation package remains `epi13_local_harness` as a compatibility surface. MNCS Control reports the configured provider/model roles, router mode, policy approval mode, Fabric enablement, and configured worker count. It does not create a second agent loop. Direct Harness agent execution remains intentionally unexposed until its command/file tools can be placed under the same Bubblewrap boundary without weakening Harness policy semantics.
+`mncs-harness` 0.6.8 exposes `LocalAgent.run`, model inventory/routing sessions, policy-aware tools, Fabric integration, and `elh experiment-readiness`. The implementation package remains `epi13_local_harness` as a compatibility surface. MNCS Control reports the configured provider/model roles, router mode, policy approval mode, Fabric enablement, and configured worker count. It does not create a second agent loop. Direct Harness agent execution remains intentionally unexposed until its command/file tools can be placed under the same Bubblewrap boundary without weakening Harness policy semantics.
 
 ## Fabric
 
-`mncs-fabric` 0.2.0a15 is the persistent fleet and controller authority. It
+`mncs-fabric` 0.2.0a28 is the experiment-certified persistent fleet and controller
+authority. The Harness/Control compatibility floor remains `0.2.0a17`. It
 owns durable lifecycle/membership state, the foreground controller runtime,
 worker presence, the consumer AF_UNIX socket, and the separate local operator
 socket. Ordinary consumers use `FabricClient.connect()`; `FabricAdminClient`

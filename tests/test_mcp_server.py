@@ -127,6 +127,7 @@ audit_path = {str(tmp_path / "state" / "audit.jsonl")!r}
             "fabric_status",
             "control_capabilities",
             "developer_readiness",
+            "experiment_readiness",
             "project_review",
             "control_job_status",
             "control_job_result",

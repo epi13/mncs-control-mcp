@@ -359,6 +359,10 @@ def build_server(config: ControlConfig | None = None) -> Any:
     def developer_readiness(repository: str | None = None) -> dict[str, object]:
         return invoke("developer_readiness", control_plane.developer_readiness, repository, audit_metadata={"repository": repository})  # type: ignore[return-value]
 
+    @server.tool(name="experiment_readiness", description="Inspect whether the MNCS experiment stack may start experiments. Observation only; does not repair, refresh, or publish.", annotations=ro, structured_output=True)
+    def experiment_readiness(profile: str = "base-inference") -> dict[str, object]:
+        return invoke("experiment_readiness", control_plane.experiment_readiness, profile, audit_metadata={"profile": profile})  # type: ignore[return-value]
+
     @server.tool(name="forge_candidate_status", description="Inspect whether the current Forge candidate still matches the working tree.", annotations=ro, structured_output=True)
     def forge_candidate_status(repository: str) -> dict[str, object]:
         return invoke("forge_candidate_status", integrations.forge.candidate_status, repository, audit_metadata={"repository": repository})  # type: ignore[return-value]

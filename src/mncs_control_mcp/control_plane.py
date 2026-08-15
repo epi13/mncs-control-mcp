@@ -10,6 +10,7 @@ from .adapters import IntegrationBundle, TestAdapter
 from .config import ControlConfig
 from .developer import developer_readiness_payload
 from .errors import ControlError
+from .experiment_readiness import evaluate_experiment_readiness
 from .git_adapter import GitService
 from .github_auth import github_auth_status
 from .processes import ProcessManager
@@ -362,6 +363,14 @@ class ControlPlaneService:
             sandbox=self.sandbox,
             integrations=self.integrations,
             repository=repository,
+        )
+
+    def experiment_readiness(self, profile: str = "base-inference") -> dict[str, object]:
+        return evaluate_experiment_readiness(
+            self.config,
+            integrations=self.integrations,
+            sandbox=self.sandbox,
+            profile=profile,
         )
 
     def review(self, project: str, depth: str = "standard") -> dict[str, object]:

@@ -333,6 +333,7 @@ def test_runtime_mount_accepts_only_control_state_and_keeps_home_unmounted(
 
 
 @pytest.mark.requires_bwrap_namespace
+@pytest.mark.skipif(shutil.which("bwrap") is None, reason="harness projection requires Bubblewrap")
 def test_harness_config_is_deliberately_projected_into_sandbox(config, tmp_path: Path) -> None:
     harness_config = tmp_path / "harness.toml"
     harness_config.write_text("[fabric]\nenabled = true\n", encoding="utf-8")
@@ -352,6 +353,7 @@ def test_harness_config_is_deliberately_projected_into_sandbox(config, tmp_path:
     assert result.exit_code == 0, result.stderr
 
 
+@pytest.mark.skipif(shutil.which("bwrap") is None, reason="sandbox construction requires Bubblewrap")
 def test_harness_projection_rejects_symlink_mountpoint(config, tmp_path: Path) -> None:
     harness_config = tmp_path / "harness.toml"
     harness_config.write_text("[fabric]\nenabled = true\n", encoding="utf-8")
