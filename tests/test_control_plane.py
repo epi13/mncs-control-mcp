@@ -65,6 +65,13 @@ def test_capabilities_and_project_review_are_bounded(config) -> None:
     readiness = plane.developer_readiness()
     assert "capabilities" in readiness
     assert "github.push" in readiness["capabilities"]
+    experiment = plane.experiment_readiness()
+    assert experiment["status"] in {"READY", "DEGRADED", "BLOCKED", "UNKNOWN"}
+    assert experiment["claim_boundary"] == "infrastructure validation"
+    assert "fabric_controller" in experiment["layers"]
+    assert experiment["layers"]["fleet"]["detail"]["note"] == (
+        "STALE capability inventory is not worker UNAVAILABLE"
+    )
     rendered = str(readiness)
     assert "gho_" not in rendered
     assert "ghp_" not in rendered
