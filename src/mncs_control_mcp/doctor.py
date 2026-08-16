@@ -13,7 +13,13 @@ from pathlib import Path
 from typing import Any
 
 from .config import ControlConfig, load_config
-from .deployment import DeploymentPaths, configured_runtime_key, runtime_environment
+from .deployment import (
+    DeploymentPaths,
+    configured_organization_id,
+    configured_runtime_key,
+    runtime_environment,
+)
+from .manifest import tool_surface_manifest
 from .runtime import effective_fabric_registry
 from .security import redact_text, safe_host_probe_environment
 
@@ -171,7 +177,10 @@ def probe_mcp_stdio(
         missing = sorted(_REQUIRED_TOOLS - names)
         if missing:
             raise RuntimeError("missing tools: " + ", ".join(missing))
-        return {"tool_count": len(names), "required_tools": sorted(_REQUIRED_TOOLS)}
+        return {
+            **tool_surface_manifest(str(name) for name in names if name),
+            "required_tools": sorted(_REQUIRED_TOOLS),
+        }
     finally:
         if process.stdin is not None:
             try:
@@ -245,6 +254,7 @@ def run_doctor(
 ) -> int:
     paths = DeploymentPaths.for_repository(config_path.parent, profile=profile)
     checks: list[Check] = []
+    local_mcp_probe: dict[str, Any] | None = None
     try:
         config: ControlConfig = load_config(config_path)
         workspace = config.workspace_root
@@ -281,8 +291,14 @@ def run_doctor(
         checks.append(Check("MCP executable", "OK", str(paths.mcp_executable), required=True))
         try:
             probe = probe_mcp_stdio(paths.mcp_executable, config_path)
+            local_mcp_probe = probe
             checks.append(
-                Check("Local MCP protocol", "OK", f"tools={probe['tool_count']}", required=True)
+                Check(
+                    "Local MCP protocol",
+                    "OK",
+                    f"tools={probe['tool_count']} manifest={probe['tool_names_sha256']}",
+                    required=True,
+                )
             )
         except Exception as exc:
             checks.append(Check("Local MCP protocol", "FAIL", redact_text(str(exc)), required=True))
@@ -349,7 +365,27 @@ def run_doctor(
             )
         )
 
-    if tunnel is not None and key_configured:
+    organization_configured = configured_organization_id(paths.tunnel_environment)
+    if organization_configured:
+        checks.append(
+            Check(
+                "Organization context",
+                "OK",
+                f"CONTROL_PLANE_ORGANIZATION_ID is configured in {paths.tunnel_environment} (value hidden)",
+                required=True,
+            )
+        )
+    else:
+        checks.append(
+            Check(
+                "Organization context",
+                "FAIL",
+                f"CONTROL_PLANE_ORGANIZATION_ID is not configured in {paths.tunnel_environment}; tunnel requests may fail with tunnel_active_organization_required",
+                required=True,
+            )
+        )
+
+    if tunnel is not None and key_configured and organization_configured:
         code, output = _capture(
             [str(tunnel), "doctor", "--profile", profile, "--explain"],
             timeout=30,
@@ -392,7 +428,7 @@ def run_doctor(
             Check(
                 "Tunnel profile",
                 "WARNING",
-                f"{profile} not checked until tunnel-client and runtime key are configured",
+                f"{profile} not checked until tunnel-client, runtime key, and organization context are configured",
             )
         )
 
@@ -590,6 +626,23 @@ def run_doctor(
         "checks": [asdict(check) for check in checks],
         "ok": all(check.ok for check in checks if check.required),
         "developer": developer,
+        "connector_diagnostics": {
+            "organization_context_configured": organization_configured,
+            "local_tool_surface": (
+                {
+                    "schema": local_mcp_probe.get("schema"),
+                    "tool_count": local_mcp_probe.get("tool_count"),
+                    "tool_names_sha256": local_mcp_probe.get("tool_names_sha256"),
+                    "experiment_tools_present": local_mcp_probe.get("experiment_tools_present"),
+                }
+                if local_mcp_probe is not None
+                else None
+            ),
+            "remote_manifest_verification": (
+                "compare the connector-visible tool count/manifest with local_tool_surface; "
+                "a mismatch requires connector refresh/re-registration"
+            ),
+        },
     }
     if json_output:
         print(json.dumps(result, indent=2, sort_keys=True))

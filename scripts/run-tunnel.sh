@@ -27,6 +27,9 @@ if [[ "${CONTROL_PLANE_API_KEY:-}" == "" || "${CONTROL_PLANE_API_KEY:-}" == "rep
     echo "mncs-control-mcp: CONTROL_PLANE_API_KEY is not configured in the service environment" >&2
     exit 78
 fi
+if [[ -z "${CONTROL_PLANE_ORGANIZATION_ID:-}" || "${CONTROL_PLANE_ORGANIZATION_ID:-}" == "replace-me" || "${CONTROL_PLANE_ORGANIZATION_ID:-}" == "<organization-id>" || "${CONTROL_PLANE_ORGANIZATION_ID:-}" == "org-..." ]]; then
+    echo "mncs-control-mcp: CONTROL_PLANE_ORGANIZATION_ID is not configured; tunnel control-plane requests may fail with tunnel_active_organization_required" >&2
+fi
 
 # KDE and other desktop sessions normally expose this socket through the user
 # manager. The fallback helps a lingered service find the existing session

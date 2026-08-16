@@ -246,6 +246,25 @@ If the tunnel is not listed, verify the workspace association and Tunnels Read +
 Use permission. If discovery fails, confirm the service is active and rerun
 `tunnel-client doctor --profile mncs-fedora --explain`.
 
+The tunnel runtime must also carry an explicit organization context when the
+control plane requires one. Configure it without committing the value:
+
+```bash
+cd ~/Documents/Projects/mncs-control-mcp
+./scripts/install-user-service.sh --organization-id org-...
+```
+
+The same value can be stored as `CONTROL_PLANE_ORGANIZATION_ID` in
+`~/.config/mncs-control-mcp/tunnel.env` (mode 0600). `doctor` treats a missing
+organization context as a required failure and passes it to `tunnel-client
+doctor`, preventing a misleading locally healthy / remotely unauthorized state.
+
+For connector-schema troubleshooting, compare the ChatGPT-visible tool list with
+`system_status.server.tool_surface`. The server reports a stable tool count and
+SHA-256 over sorted tool names. A mismatch means the remote connector registration
+is stale even if Control's runtime/source revisions match; refresh or re-register
+the connector instead of changing Harness/Fabric execution semantics.
+
 ## Updates
 
 ```bash
@@ -262,4 +281,7 @@ automatically recycles the tunnel/MCP child so an editable install cannot remain
 on already-imported stale source. `system_status.server` reports both the runtime
 and current source revisions and flags `restart_required` when they differ. A
 fresh server also exposes `control_reload` for an explicit supervised recycle.
-It does not commit or overwrite secrets.
+The status payload also publishes the local MCP tool-surface identity and whether
+the organization context reached the server, so connector registration skew and
+control-plane authentication skew are distinguishable. It does not commit or
+overwrite secrets.

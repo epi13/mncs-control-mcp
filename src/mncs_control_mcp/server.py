@@ -23,6 +23,7 @@ from .errors import ControlError
 from .experiments import ExperimentManager
 from .filesystem import FileService
 from .git_adapter import GitService
+from .manifest import tool_surface_manifest
 from .processes import ProcessManager
 from .sandbox import Sandbox
 from .security import redact_text
@@ -429,6 +430,10 @@ def build_server(config: ControlConfig | None = None) -> Any:
         def view() -> dict[str, object]:
             fabric = integrations.fabric.status()
             source_revision = repository_revision(source_repository)
+            manager = getattr(server, "_tool_manager", None)
+            registered = getattr(manager, "_tools", {})
+            tool_names = registered.keys() if isinstance(registered, dict) else ()
+            tool_surface = tool_surface_manifest(tool_names)
             return {
                 **integrations.system.status(),
                 "sandbox": {"backend": sandbox.backend, "available": sandbox.available, "required": selected.require_real_sandbox},
@@ -452,6 +457,11 @@ def build_server(config: ControlConfig | None = None) -> Any:
                         and source_revision is not None
                         and runtime_revision != source_revision
                     ),
+                    "tunnel_profile": os.environ.get("MNCS_CONTROL_TUNNEL_PROFILE"),
+                    "organization_context_configured": bool(
+                        os.environ.get("CONTROL_PLANE_ORGANIZATION_ID")
+                    ),
+                    "tool_surface": tool_surface,
                 },
             }
 
