@@ -49,11 +49,13 @@ cd ~/Documents/Projects/mncs-control-mcp
 
 The installer creates or updates `.venv`, installs the editable package, preserves an existing `control.toml`, creates private state/config directories, installs the tunnel unit plus the `mncs-control-update.path` source-revision watcher under `~/.config/systemd/user/`, and enables them. It is safe to rerun after `git pull`. Once the watcher has been installed, advancing the checked-out local `main` ref automatically recycles the tunnel so the long-lived MCP child imports the new source instead of remaining on stale code.
 
-For a normal operator setup, install the official `tunnel-client`, put `CONTROL_PLANE_API_KEY` in `~/.config/mncs-control-mcp/tunnel.env` with mode 0600, create a real tunnel in Platform settings, and initialize the profile:
+For a normal operator setup, install the official `tunnel-client`, put `CONTROL_PLANE_API_KEY` in `~/.config/mncs-control-mcp/tunnel.env` with mode 0600, create a real tunnel in Platform settings, and bind the tunnel to its OpenAI organization context. The installer persists the organization ID without printing it:
 
 ```bash
-./scripts/install-user-service.sh --tunnel-id tunnel_...
+./scripts/install-user-service.sh --tunnel-id tunnel_... --organization-id org-...
 ```
+
+`CONTROL_PLANE_ORGANIZATION_ID` may also be supplied through the environment. Control treats the organization context as a required deployment check because a runtime key that has no active organization can otherwise reach the tunnel daemon while control-plane calls fail with `tunnel_active_organization_required`.
 
 The server uses stdio and does not open a listener. `MNCS_CONTROL_WORKSPACE_ROOT` overrides configuration; the older `MNCS_PROJECTS_ROOT` remains supported at lower precedence. See [docs/CHATGPT-SETUP.md](docs/CHATGPT-SETUP.md) for persistent service, SSH-agent, reboot, and browser setup.
 
@@ -65,6 +67,12 @@ systemctl --user status mncs-control-update.path
 journalctl --user -u mncs-control-tunnel.service -f
 ./scripts/service.sh restart
 ```
+
+### Connector manifest diagnostics
+
+`system_status.server.tool_surface` exposes a non-secret identity for the MCP tool-name surface: `tool_count`, `tool_names_sha256`, and whether the durable experiment API is present. `system_status.server.organization_context_configured` reports only whether an organization context reached the MCP child; it never returns the organization ID.
+
+If a fresh local doctor reports (for example) 86 tools while ChatGPT still exposes an older 50-tool connector manifest, the controller process is not the stale component. Refresh or re-register the ChatGPT connector and compare its visible tool surface again. Do not add an alternate experiment execution route merely to bypass a stale connector manifest.
 
 ## Workspace and scope model
 

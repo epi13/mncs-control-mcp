@@ -4,6 +4,7 @@ set -euo pipefail
 repository="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 profile="mncs-fedora"
 tunnel_id="${TUNNEL_ID:-}"
+organization_id="${CONTROL_PLANE_ORGANIZATION_ID:-}"
 start_service=true
 repair_profile=false
 
@@ -16,12 +17,13 @@ Usage: ./scripts/install-user-service.sh [options]
 Options:
   --tunnel-id ID       Initialize the named tunnel profile when it is absent.
   --profile NAME       Use a different tunnel-client profile (default: mncs-fedora).
+  --organization-id ID Persist the OpenAI organization context used by tunnel-client.
   --repair-profile     Re-run tunnel-client init for an existing profile.
   --no-start           Enable and install the unit without starting it.
   -h, --help           Show this help.
 
-The runtime key is read from ~/.config/mncs-control-mcp/tunnel.env or the
-CONTROL_PLANE_API_KEY environment. The key and tunnel ID are never committed.
+The runtime key and organization context are read from ~/.config/mncs-control-mcp/tunnel.env
+or CONTROL_PLANE_API_KEY / CONTROL_PLANE_ORGANIZATION_ID. Values are never committed.
 EOF
 }
 
@@ -32,6 +34,7 @@ while (($#)); do
     case "$1" in
         --tunnel-id) (($# >= 2)) || fail "--tunnel-id requires a value"; tunnel_id="$2"; shift 2 ;;
         --profile) (($# >= 2)) || fail "--profile requires a value"; profile="$2"; shift 2 ;;
+        --organization-id) (($# >= 2)) || fail "--organization-id requires a value"; organization_id="$2"; shift 2 ;;
         --repair-profile) repair_profile=true; shift ;;
         --no-start) start_service=false; shift ;;
         -h|--help) usage; exit 0 ;;
@@ -42,6 +45,9 @@ done
 [[ "$profile" =~ ^[A-Za-z0-9._-]+$ ]] || fail "profile must contain only letters, numbers, dot, underscore, and hyphen"
 if [[ -n "$tunnel_id" && ! "$tunnel_id" =~ ^tunnel_[A-Za-z0-9._-]+$ ]]; then
     fail "tunnel ID must look like tunnel_..."
+fi
+if [[ -n "$organization_id" && ! "$organization_id" =~ ^org[-_][A-Za-z0-9][A-Za-z0-9._-]{1,127}$ ]]; then
+    fail "organization ID must look like org-... or org_..."
 fi
 
 command -v systemctl >/dev/null 2>&1 || fail "systemctl is required"
@@ -90,6 +96,47 @@ else
     printf 'Preserving existing %s\n' "$config_directory/tunnel.env"
 fi
 
+read_env_value() {
+    local key="$1"
+    sed -n "s/^${key}=//p" "$config_directory/tunnel.env" | head -n 1 | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//"
+}
+
+if [[ -z "$organization_id" ]]; then
+    organization_id="$(read_env_value CONTROL_PLANE_ORGANIZATION_ID)"
+fi
+if [[ -n "$organization_id" && "$organization_id" != '<organization-id>' && "$organization_id" != 'org-...' && ! "$organization_id" =~ ^org[-_][A-Za-z0-9][A-Za-z0-9._-]{1,127}$ ]]; then
+    fail "configured organization ID must look like org-... or org_..."
+fi
+if [[ -n "$organization_id" && "$organization_id" != '<organization-id>' && "$organization_id" != 'org-...' ]]; then
+    "$python_bin" - "$config_directory/tunnel.env" "$organization_id" <<'PYORG'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+value = sys.argv[2]
+lines = path.read_text(encoding="utf-8").splitlines()
+key = "CONTROL_PLANE_ORGANIZATION_ID"
+replacement = f"{key}={value}"
+updated = []
+found = False
+for line in lines:
+    if line.startswith(key + "="):
+        if not found:
+            updated.append(replacement)
+            found = True
+        continue
+    updated.append(line)
+if not found:
+    updated.append(replacement)
+path.write_text("\n".join(updated).rstrip() + "\n", encoding="utf-8")
+path.chmod(0o600)
+PYORG
+    printf 'Organization context: configured in tunnel.env (value hidden)\n'
+else
+    organization_id=""
+    warn "CONTROL_PLANE_ORGANIZATION_ID is not configured; tunnel requests can fail with tunnel_active_organization_required"
+fi
+
 install -m 0644 "$repository/deploy/systemd/mncs-control-tunnel.service" "$unit_directory/mncs-control-tunnel.service"
 install -m 0644 "$repository/deploy/systemd/mncs-control-update.path" "$unit_directory/mncs-control-update.path"
 install -m 0644 "$repository/deploy/systemd/mncs-control-update.service" "$unit_directory/mncs-control-update.service"
@@ -133,7 +180,7 @@ else
             warn "CONTROL_PLANE_API_KEY is not configured; add it to $config_directory/tunnel.env before profile initialization"
         else
             printf 'Initializing tunnel profile %s...\n' "$profile"
-            CONTROL_PLANE_API_KEY="$runtime_key" "$tunnel_client" init \
+            CONTROL_PLANE_API_KEY="$runtime_key" CONTROL_PLANE_ORGANIZATION_ID="$organization_id" "$tunnel_client" init \
                 --sample sample_mcp_stdio_local \
                 --profile "$profile" \
                 --tunnel-id "$tunnel_id" \

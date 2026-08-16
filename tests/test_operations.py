@@ -9,6 +9,7 @@ import pytest
 from mncs_control_mcp.actions import CommandResult, run_bounded
 from mncs_control_mcp.deployment import (
     DeploymentPaths,
+    configured_organization_id,
     configured_runtime_key,
     ensure_private_directory,
     ensure_private_file,
@@ -16,8 +17,10 @@ from mncs_control_mcp.deployment import (
     render_update_service,
     render_user_service,
     repository_revision,
+    runtime_environment,
 )
 from mncs_control_mcp.doctor import probe_mcp_stdio, run_doctor
+from mncs_control_mcp.manifest import tool_surface_manifest
 from mncs_control_mcp.security import safe_host_probe_environment
 from mncs_control_mcp.tooling import ToolchainResolver
 
@@ -125,14 +128,57 @@ def test_repository_revision_reads_loose_and_packed_refs(tmp_path: Path) -> None
 
 def test_private_runtime_files_are_idempotent_and_preserve_content(tmp_path: Path) -> None:
     directory = ensure_private_directory(tmp_path / "config")
-    env_file = ensure_private_file(directory / "tunnel.env", "CONTROL_PLANE_API_KEY=first\n")
+    env_file = ensure_private_file(
+        directory / "tunnel.env",
+        "CONTROL_PLANE_API_KEY=secret\nCONTROL_PLANE_ORGANIZATION_ID=org-test\n",
+    )
     assert directory.stat().st_mode & 0o777 == 0o700
     assert env_file.stat().st_mode & 0o777 == 0o600
-    ensure_private_file(env_file, "CONTROL_PLANE_API_KEY=second\n")
-    assert env_file.read_text(encoding="utf-8") == "CONTROL_PLANE_API_KEY=first\n"
+    ensure_private_file(env_file, "CONTROL_PLANE_API_KEY=other\n")
+    assert env_file.read_text(encoding="utf-8") == (
+        "CONTROL_PLANE_API_KEY=secret\nCONTROL_PLANE_ORGANIZATION_ID=org-test\n"
+    )
     assert configured_runtime_key(env_file)
-    env_file.write_text("CONTROL_PLANE_API_KEY=replace-me\n", encoding="utf-8")
+    assert configured_organization_id(env_file)
+    filtered = runtime_environment(env_file)
+    assert filtered["CONTROL_PLANE_API_KEY"] == "secret"
+    assert filtered["CONTROL_PLANE_ORGANIZATION_ID"] == "org-test"
+    env_file.write_text(
+        "CONTROL_PLANE_API_KEY=<runtime-key>\nCONTROL_PLANE_ORGANIZATION_ID=<organization-id>\n",
+        encoding="utf-8",
+    )
     assert not configured_runtime_key(env_file)
+    assert not configured_organization_id(env_file)
+
+
+def test_tool_surface_manifest_is_stable_and_detects_experiment_api() -> None:
+    expected = tool_surface_manifest(
+        [
+            "experiment_status",
+            "experiment_stop",
+            "experiment_start",
+            "experiment_result",
+            "experiment_readiness",
+            "experiment_list",
+            "system_status",
+        ]
+    )
+    reordered = tool_surface_manifest(
+        [
+            "system_status",
+            "experiment_list",
+            "experiment_readiness",
+            "experiment_result",
+            "experiment_start",
+            "experiment_stop",
+            "experiment_status",
+        ]
+    )
+    assert expected == reordered
+    assert expected["tool_count"] == 7
+    assert expected["tool_names_sha256"].startswith("sha256:")
+    assert expected["experiment_tools_present"] is True
+    assert tool_surface_manifest(["system_status"])["experiment_tools_present"] is False
 
 
 def test_doctor_reports_missing_required_tunnel_dependencies(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -144,6 +190,7 @@ def test_doctor_reports_missing_required_tunnel_dependencies(tmp_path: Path, cap
     output = capsys.readouterr().out
     assert "Tunnel client" in output
     assert "Runtime key" in output
+    assert "Organization context" in output
     assert "Remote connector" in output
 
 
@@ -151,6 +198,8 @@ def test_installer_help_is_safe_and_idempotence_contract_is_documented() -> None
     script = Path(__file__).parents[1] / "scripts" / "install-user-service.sh"
     result = subprocess.run([str(script), "--help"], capture_output=True, text=True, check=True)
     assert "--tunnel-id" in result.stdout
+    assert "--organization-id" in result.stdout
+    assert "CONTROL_PLANE_ORGANIZATION_ID" in result.stdout
     assert "--no-start" in result.stdout
 
 
@@ -167,4 +216,6 @@ def test_doctor_mcp_probe_performs_real_stdio_handshake(tmp_path: Path) -> None:
     config.write_text(f"[workspace]\nroot = {str(workspace)!r}\n", encoding="utf-8")
     result = probe_mcp_stdio(executable, config)
     assert result["tool_count"] >= 50
+    assert result["tool_names_sha256"].startswith("sha256:")
+    assert result["experiment_tools_present"] is True
     assert "workspace_info" in result["required_tools"]

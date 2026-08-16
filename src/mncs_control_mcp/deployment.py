@@ -219,20 +219,42 @@ def configured_runtime_key(path: Path) -> bool:
     return False
 
 
+def configured_organization_id(path: Path) -> bool:
+    """Check for a configured OpenAI organization context without exposing its value."""
+
+    try:
+        for raw_line in path.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            if key.strip() != "CONTROL_PLANE_ORGANIZATION_ID":
+                continue
+            value = value.strip().strip("\"'")
+            return bool(value and value not in {"replace-me", "<organization-id>", "org-..."})
+    except (OSError, UnicodeError):
+        return False
+    return False
+
 def runtime_environment(path: Path) -> dict[str, str]:
     """Return a filtered environment with the local tunnel key for tunnel-client only."""
     from .security import safe_host_probe_environment
 
-    value = ""
+    values: dict[str, str] = {}
+    allowed = {"CONTROL_PLANE_API_KEY", "CONTROL_PLANE_ORGANIZATION_ID"}
     try:
         for raw_line in path.read_text(encoding="utf-8").splitlines():
             line = raw_line.strip()
-            if line and not line.startswith("#") and line.startswith("CONTROL_PLANE_API_KEY="):
-                value = line.split("=", 1)[1].strip().strip("\"'")
-                break
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, raw_value = line.split("=", 1)
+            key = key.strip()
+            if key in allowed:
+                value = raw_value.strip().strip("\"'")
+                if value:
+                    values[key] = value
     except (OSError, UnicodeError):
         pass
     environment = safe_host_probe_environment()
-    if value:
-        environment["CONTROL_PLANE_API_KEY"] = value
+    environment.update(values)
     return environment

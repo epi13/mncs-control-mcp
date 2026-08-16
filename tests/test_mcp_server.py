@@ -150,6 +150,12 @@ audit_path = {str(tmp_path / "state" / "audit.jsonl")!r}
         assert terminal["annotations"]["destructiveHint"] is True
         assert terminal["annotations"]["openWorldHint"] is True
 
+        system = client.call("system_status", {})
+        assert system["server"]["tool_surface"]["tool_count"] == len(names)
+        assert system["server"]["tool_surface"]["tool_names_sha256"].startswith("sha256:")
+        assert system["server"]["tool_surface"]["experiment_tools_present"] is True
+        assert system["server"]["organization_context_configured"] is False
+
         info = client.call("workspace_info", {})
         assert info["root"] == str(workspace)
         client.call("project_create", {"name": "e2e", "kind": "empty", "git_init": False})
