@@ -255,5 +255,11 @@ git pull
 ```
 
 The update flow preserves `control.toml`, `tunnel.env`, and the existing tunnel
-profile, reloads the user manager, restarts only when prerequisites are present,
-and reruns the doctor. It does not commit or overwrite secrets.
+profile, installs/enables `mncs-control-update.path`, reloads the user manager,
+restarts only when prerequisites are present, and reruns the doctor. After this
+one-time watcher bootstrap, a later fast-forward of the local `main` ref
+automatically recycles the tunnel/MCP child so an editable install cannot remain
+on already-imported stale source. `system_status.server` reports both the runtime
+and current source revisions and flags `restart_required` when they differ. A
+fresh server also exposes `control_reload` for an explicit supervised recycle.
+It does not commit or overwrite secrets.

@@ -47,7 +47,7 @@ cd ~/Documents/Projects/mncs-control-mcp
 ./scripts/doctor.sh
 ```
 
-The installer creates or updates `.venv`, installs the editable package, preserves an existing `control.toml`, creates private state/config directories, installs the user unit under `~/.config/systemd/user/`, and enables it. It is safe to rerun after `git pull`.
+The installer creates or updates `.venv`, installs the editable package, preserves an existing `control.toml`, creates private state/config directories, installs the tunnel unit plus the `mncs-control-update.path` source-revision watcher under `~/.config/systemd/user/`, and enables them. It is safe to rerun after `git pull`. Once the watcher has been installed, advancing the checked-out local `main` ref automatically recycles the tunnel so the long-lived MCP child imports the new source instead of remaining on stale code.
 
 For a normal operator setup, install the official `tunnel-client`, put `CONTROL_PLANE_API_KEY` in `~/.config/mncs-control-mcp/tunnel.env` with mode 0600, create a real tunnel in Platform settings, and initialize the profile:
 
@@ -61,6 +61,7 @@ Service operation:
 
 ```bash
 systemctl --user status mncs-control-tunnel.service
+systemctl --user status mncs-control-update.path
 journalctl --user -u mncs-control-tunnel.service -f
 ./scripts/service.sh restart
 ```

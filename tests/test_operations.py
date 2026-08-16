@@ -12,7 +12,10 @@ from mncs_control_mcp.deployment import (
     configured_runtime_key,
     ensure_private_directory,
     ensure_private_file,
+    render_update_path,
+    render_update_service,
     render_user_service,
+    repository_revision,
 )
 from mncs_control_mcp.doctor import probe_mcp_stdio, run_doctor
 from mncs_control_mcp.security import safe_host_probe_environment
@@ -93,6 +96,31 @@ def test_deployment_paths_and_unit_rendering(tmp_path: Path) -> None:
     assert "EnvironmentFile=-%h/.config/mncs-control-mcp/tunnel.env" in unit
     assert "ProtectHome=read-only" in unit
     assert "ReadWritePaths=%h/Documents/Projects" in unit
+
+
+def test_update_watcher_units_reload_tunnel_on_main_ref_change(tmp_path: Path) -> None:
+    repository = tmp_path / "mncs-control-mcp"
+    path_unit = render_update_path(repository=repository)
+    service_unit = render_update_service()
+    assert f"PathChanged={repository}/.git/refs/heads/main" in path_unit
+    assert f"PathChanged={repository}/.git/packed-refs" in path_unit
+    assert "Unit=mncs-control-update.service" in path_unit
+    assert "try-restart mncs-control-tunnel.service" in service_unit
+    assert "NoNewPrivileges=true" in service_unit
+
+
+def test_repository_revision_reads_loose_and_packed_refs(tmp_path: Path) -> None:
+    repository = tmp_path / "repo"
+    git_dir = repository / ".git"
+    (git_dir / "refs" / "heads").mkdir(parents=True)
+    (git_dir / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    loose = "a" * 40
+    (git_dir / "refs" / "heads" / "main").write_text(loose + "\n", encoding="utf-8")
+    assert repository_revision(repository) == loose
+    (git_dir / "refs" / "heads" / "main").unlink()
+    packed = "b" * 40
+    (git_dir / "packed-refs").write_text(f"# pack-refs\n{packed} refs/heads/main\n", encoding="utf-8")
+    assert repository_revision(repository) == packed
 
 
 def test_private_runtime_files_are_idempotent_and_preserve_content(tmp_path: Path) -> None:

@@ -55,6 +55,14 @@ class DeploymentPaths:
         return self.user_unit_directory / "mncs-control-tunnel.service"
 
     @property
+    def update_path_unit(self) -> Path:
+        return self.user_unit_directory / "mncs-control-update.path"
+
+    @property
+    def update_service_unit(self) -> Path:
+        return self.user_unit_directory / "mncs-control-update.service"
+
+    @property
     def tunnel_runner(self) -> Path:
         return self.repository / "scripts" / "run-tunnel.sh"
 
@@ -96,6 +104,80 @@ StandardError=journal
 [Install]
 WantedBy=default.target
 """
+
+
+def render_update_path(*, repository: Path) -> str:
+    """Watch the checked-out main ref so a fast-forward pull reloads Control.
+
+    The tunnel process is intentionally long-lived. An editable Python install
+    therefore makes new source available after ``git pull`` but does not make
+    the already-imported MCP process execute it. The path unit closes that gap
+    without granting the MCP sandbox access to the user systemd bus.
+    """
+
+    repo = repository.expanduser().resolve()
+    escaped_repo = str(repo).replace("%", "%%")
+    return f"""[Unit]
+Description=Watch MNCS Control source revision
+
+[Path]
+PathChanged={escaped_repo}/.git/refs/heads/main
+PathChanged={escaped_repo}/.git/packed-refs
+Unit=mncs-control-update.service
+
+[Install]
+WantedBy=default.target
+"""
+
+
+def render_update_service() -> str:
+    """Render the narrow systemd action used by the source revision watcher."""
+
+    return """[Unit]
+Description=Reload MNCS Control after source update
+After=mncs-control-tunnel.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/systemctl --user try-restart mncs-control-tunnel.service
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+"""
+
+
+def repository_revision(repository: Path) -> str | None:
+    """Read a normal Git worktree revision without invoking Git."""
+
+    repo = repository.expanduser().resolve()
+    git_dir = repo / ".git"
+    try:
+        head = (git_dir / "HEAD").read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeError):
+        return None
+    if head.startswith("ref: "):
+        ref_name = head[5:].strip()
+        if not ref_name or ref_name.startswith("/") or ".." in Path(ref_name).parts:
+            return None
+        ref_path = git_dir / ref_name
+        try:
+            value = ref_path.read_text(encoding="utf-8").strip()
+        except (OSError, UnicodeError):
+            value = ""
+        if value:
+            return value
+        try:
+            for line in (git_dir / "packed-refs").read_text(encoding="utf-8").splitlines():
+                if not line or line.startswith(("#", "^")):
+                    continue
+                revision, _, packed_ref = line.partition(" ")
+                if packed_ref == ref_name and revision:
+                    return revision
+        except (OSError, UnicodeError):
+            return None
+        return None
+    return head or None
 
 
 def ensure_private_directory(path: Path) -> Path:

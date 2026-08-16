@@ -133,6 +133,7 @@ audit_path = {str(tmp_path / "state" / "audit.jsonl")!r}
             "experiment_result",
             "experiment_list",
             "experiment_stop",
+            "control_reload",
             "project_review",
             "control_job_status",
             "control_job_result",
