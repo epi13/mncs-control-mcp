@@ -91,6 +91,8 @@ else
 fi
 
 install -m 0644 "$repository/deploy/systemd/mncs-control-tunnel.service" "$unit_directory/mncs-control-tunnel.service"
+install -m 0644 "$repository/deploy/systemd/mncs-control-update.path" "$unit_directory/mncs-control-update.path"
+install -m 0644 "$repository/deploy/systemd/mncs-control-update.service" "$unit_directory/mncs-control-update.service"
 chmod 0755 "$repository/scripts/run-tunnel.sh"
 
 if [[ -n "${SSH_AUTH_SOCK:-}" ]]; then
@@ -144,10 +146,11 @@ else
 fi
 
 systemctl --user daemon-reload
-systemctl --user enable mncs-control-tunnel.service >/dev/null
-printf 'Enabled: mncs-control-tunnel.service\n'
+systemctl --user enable mncs-control-tunnel.service mncs-control-update.path >/dev/null
+printf 'Enabled: mncs-control-tunnel.service, mncs-control-update.path\n'
 
 if [[ "$start_service" == true ]]; then
+    systemctl --user restart mncs-control-update.path || warn "source update watcher did not start"
     if [[ -n "$tunnel_client" && -x "$tunnel_client" && -n "$runtime_key" && "$runtime_key" != replace-me && "$runtime_key" != '<runtime-key>' ]]; then
         systemctl --user restart mncs-control-tunnel.service || warn "service did not start; inspect: journalctl --user -u mncs-control-tunnel.service -e"
     else
@@ -159,6 +162,7 @@ fi
 
 printf '\nRun health checks with:\n  %s/scripts/doctor.sh --profile %s\n' "$repository" "$profile"
 printf 'Service status:\n  systemctl --user status mncs-control-tunnel.service\n'
+printf 'Update watcher:\n  systemctl --user status mncs-control-update.path\n'
 printf 'Service logs:\n  journalctl --user -u mncs-control-tunnel.service -f\n'
 
 if [[ -x "$repository/.venv/bin/mncs-control-mcp" ]]; then

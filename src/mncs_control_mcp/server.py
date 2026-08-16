@@ -3,9 +3,13 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
+import signal
 import sys
+import threading
 import time
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 from . import __version__
@@ -14,6 +18,7 @@ from .adapters import IntegrationBundle
 from .audit import AuditLog
 from .config import ControlConfig, load_config
 from .control_plane import ControlPlaneService
+from .deployment import repository_revision
 from .errors import ControlError
 from .experiments import ExperimentManager
 from .filesystem import FileService
@@ -76,6 +81,8 @@ def build_server(config: ControlConfig | None = None) -> Any:
         selected, policy, sandbox, projects, git, integrations.tests, integrations, processes
     )
     experiments = ExperimentManager(selected)
+    source_repository = Path(__file__).resolve().parents[2]
+    runtime_revision = repository_revision(source_repository)
 
     server = FastMCP(
         selected.name,
@@ -421,6 +428,7 @@ def build_server(config: ControlConfig | None = None) -> Any:
     def system_status() -> dict[str, object]:
         def view() -> dict[str, object]:
             fabric = integrations.fabric.status()
+            source_revision = repository_revision(source_repository)
             return {
                 **integrations.system.status(),
                 "sandbox": {"backend": sandbox.backend, "available": sandbox.available, "required": selected.require_real_sandbox},
@@ -437,6 +445,13 @@ def build_server(config: ControlConfig | None = None) -> Any:
                     "fabric_client_version": fabric.get("client_fabric_version"),
                     "fabric_mode": selected.fabric_mode,
                     "fabric_consumer_identity": selected.fabric_consumer_identity,
+                    "runtime_revision": runtime_revision,
+                    "source_revision": source_revision,
+                    "restart_required": (
+                        runtime_revision is not None
+                        and source_revision is not None
+                        and runtime_revision != source_revision
+                    ),
                 },
             }
 
@@ -444,6 +459,56 @@ def build_server(config: ControlConfig | None = None) -> Any:
             "system_status",
             view,
         )  # type: ignore[return-value]
+
+    @server.tool(name="control_reload", description="Recycle a systemd/tunnel-supervised MNCS Control process so newly pulled source is imported. The request is refused unless both supervision layers can be verified.", annotations=destructive, structured_output=True)
+    def control_reload() -> dict[str, object]:
+        def reload_supervised_process() -> dict[str, object]:
+            if not os.environ.get("INVOCATION_ID") or not os.environ.get(
+                "MNCS_CONTROL_TUNNEL_PROFILE"
+            ):
+                raise ControlError(
+                    "CONTROL_RELOAD_UNAVAILABLE",
+                    "MNCS Control is not running inside the installed systemd tunnel service",
+                )
+            parent_pid = os.getppid()
+            try:
+                parent_command = (
+                    Path(f"/proc/{parent_pid}/cmdline")
+                    .read_bytes()
+                    .replace(b"\x00", b" ")
+                    .decode("utf-8", "replace")
+                )
+            except OSError as exc:
+                raise ControlError(
+                    "CONTROL_RELOAD_UNAVAILABLE",
+                    "cannot verify the supervising tunnel-client process",
+                ) from exc
+            if "tunnel-client" not in parent_command:
+                raise ControlError(
+                    "CONTROL_RELOAD_UNAVAILABLE",
+                    "MNCS Control is not running under the tunnel-client supervisor",
+                )
+
+            def terminate_supervisor() -> None:
+                try:
+                    os.kill(parent_pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    return
+
+            timer = threading.Timer(1.5, terminate_supervisor)
+            timer.daemon = True
+            timer.start()
+            return {
+                "status": "accepted",
+                "supervisor": "systemd -> tunnel-client -> mncs-control-mcp",
+                "runtime_revision": runtime_revision,
+                "source_revision": repository_revision(source_repository),
+                "expected_recovery": (
+                    "systemd Restart=always relaunches tunnel-client and the MCP child"
+                ),
+            }
+
+        return invoke("control_reload", reload_supervised_process)  # type: ignore[return-value]
 
     @server.tool(name="audit_summary", description="Show bounded aggregate control activity from the private audit log without exposing raw commands or secrets.", annotations=ro, structured_output=True)
     def audit_summary(limit: int = 50) -> dict[str, object]:

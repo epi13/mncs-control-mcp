@@ -1,0 +1,11 @@
+[Unit]
+Description=Reload MNCS Control after source update
+After=mncs-control-tunnel.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/systemctl --user try-restart mncs-control-tunnel.service
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
