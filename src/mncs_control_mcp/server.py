@@ -15,6 +15,7 @@ from .audit import AuditLog
 from .config import ControlConfig, load_config
 from .control_plane import ControlPlaneService
 from .errors import ControlError
+from .experiments import ExperimentManager
 from .filesystem import FileService
 from .git_adapter import GitService
 from .processes import ProcessManager
@@ -74,6 +75,7 @@ def build_server(config: ControlConfig | None = None) -> Any:
     control_plane = ControlPlaneService(
         selected, policy, sandbox, projects, git, integrations.tests, integrations, processes
     )
+    experiments = ExperimentManager(selected)
 
     server = FastMCP(
         selected.name,
@@ -362,6 +364,42 @@ def build_server(config: ControlConfig | None = None) -> Any:
     @server.tool(name="experiment_readiness", description="Inspect whether the MNCS experiment stack may start experiments. Observation only; does not repair, refresh, or publish.", annotations=ro, structured_output=True)
     def experiment_readiness(profile: str = "base-inference") -> dict[str, object]:
         return invoke("experiment_readiness", control_plane.experiment_readiness, profile, audit_metadata={"profile": profile})  # type: ignore[return-value]
+
+    @server.tool(name="experiment_start", description="Start a durable multi-turn experiment. Control persists coordinator state; Harness resolves exact model pins; Fabric owns detached execution. The MCP client may disconnect after acceptance.", annotations=network_mutate, structured_output=True)
+    def experiment_start(spec: dict[str, object]) -> dict[str, object]:
+        def start() -> dict[str, object]:
+            readiness = control_plane.experiment_readiness("multi-agent")
+            status = readiness.get("profile_status") or readiness.get("status")
+            if status != "READY":
+                required = set(readiness.get("required_layers") or [])
+                blockers = [
+                    name
+                    for name, layer in (readiness.get("layers") or {}).items()
+                    if name in required and isinstance(layer, dict) and layer.get("status") != "READY"
+                ]
+                raise ControlError(
+                    "EXPERIMENT_NOT_READY",
+                    f"multi-agent readiness is {status}; blockers={','.join(blockers) or 'unknown'}",
+                )
+            return experiments.start(spec)
+
+        return invoke("experiment_start", start, audit_metadata={"profile": "multi-agent"})  # type: ignore[return-value]
+
+    @server.tool(name="experiment_status", description="Inspect one durable experiment and its current Fabric-backed turn without executing work.", annotations=ro, structured_output=True)
+    def experiment_status(experiment_id: str) -> dict[str, object]:
+        return invoke("experiment_status", experiments.status, experiment_id)  # type: ignore[return-value]
+
+    @server.tool(name="experiment_result", description="Read retained outputs, failures, and Fabric evidence for one durable experiment.", annotations=ro, structured_output=True)
+    def experiment_result(experiment_id: str) -> dict[str, object]:
+        return invoke("experiment_result", experiments.result, experiment_id)  # type: ignore[return-value]
+
+    @server.tool(name="experiment_list", description="List bounded durable experiment state retained by Control.", annotations=ro, structured_output=True)
+    def experiment_list() -> dict[str, object]:
+        return invoke("experiment_list", experiments.list)  # type: ignore[return-value]
+
+    @server.tool(name="experiment_stop", description="Stop a durable experiment coordinator from starting more turns. Already-detached Fabric work remains Fabric-owned and may complete independently.", annotations=destructive, structured_output=True)
+    def experiment_stop(experiment_id: str) -> dict[str, object]:
+        return invoke("experiment_stop", experiments.stop, experiment_id)  # type: ignore[return-value]
 
     @server.tool(name="forge_candidate_status", description="Inspect whether the current Forge candidate still matches the working tree.", annotations=ro, structured_output=True)
     def forge_candidate_status(repository: str) -> dict[str, object]:
