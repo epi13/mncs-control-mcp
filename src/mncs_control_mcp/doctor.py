@@ -32,6 +32,8 @@ _REQUIRED_TOOLS = {
     "laboratory_status",
     "developer_readiness",
     "experiment_readiness",
+    "experiment_start",
+    "experiment_status",
 }
 
 
