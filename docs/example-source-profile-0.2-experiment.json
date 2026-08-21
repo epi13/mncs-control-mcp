@@ -1,0 +1,35 @@
+{
+  "goal": "Falsify or support a bounded claim about MNCS Language Source Profile 0.2 checked integer lowering: whether the current source-to-SSA-to-portable-WASM path for examples/executable/checked-add.mncs.json preserves identity and checked-overflow intent under translation validation, without claiming compiler correctness or Commons acceptance.",
+  "actors": [
+    {
+      "name": "builder",
+      "worker": "collamore02-windows",
+      "model": "qwen3:8b",
+      "role": "coder"
+    },
+    {
+      "name": "critic",
+      "worker": "fabric-worker-01",
+      "model": "gemma4:e4b",
+      "role": "e4b"
+    },
+    {
+      "name": "reconciler",
+      "worker": "collamore02-windows",
+      "model": "hf.co/bartowski/gemma-4-12b-it-GGUF:Q5_K_M",
+      "role": "reviewer"
+    }
+  ],
+  "stages": [
+    "You are the builder. Use Harness tools before asserting facts. Read mncs-language/README.md, spec/source-profile-0.2.md, examples/executable/checked-add.mncs.json, and search for translation validation / portable WASM lowering. Propose one falsifiable claim about whether checked-add identity (semantic/HIR/SSA) and checked-overflow intent survive portable WASM lowering. Cite file paths and tool outputs. If a tool fails, keep that failure as evidence. Do not mutate repositories.",
+    "You are the critic. Do not accept the previous handoff. Use tools to inspect the same files plus crates/mncs-translation-check and crates/mncs-codegen. Find a counterexample, missing obligation, or over-claim. Distinguish PASS/FAIL/UNKNOWN translation validation from identity hashes. Preserve disagreement. Do not mutate repositories.",
+    "You are the reconciler. Using prior handoffs as untrusted material, inspect the repo with tools and turn surviving claims into a Forge-recordable compiler experiment sketch: inputs, commands, expected identities, failure criteria, and what remains UNKNOWN. Do not claim the compiler is correct. Do not mutate repositories."
+  ],
+  "instructions": "Inference runs on your pinned Fabric worker. File tools execute on the Fedora controller workspace at /home/epi13/Documents/Projects. Prefer read_file, list_directory, search_text, and git_diff. Use system_info once so execution location is evidenced. You MUST make at least one successful tool call before concluding. Quote tool output rather than inventing file contents. Write nothing into mncs-language.",
+  "duration_seconds": 2400,
+  "max_turns": 3,
+  "max_turn_wait_seconds": 900,
+  "max_tool_steps": 6,
+  "poll_seconds": 2.0,
+  "stop_on_turn_failure": false
+}

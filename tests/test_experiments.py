@@ -31,7 +31,7 @@ class FakeRuntime:
             }
         }
 
-    def submit(self, actor, prompt: str, idempotency_key: str) -> str:
+    def submit(self, actor, prompt: str, idempotency_key: str, *, messages=None) -> str:
         work_id = f"work-{len(self.submissions) + 1}"
         self.submissions.append((dict(actor), prompt, idempotency_key))
         self.statuses[work_id] = "COMPLETED"
@@ -186,6 +186,159 @@ class ExperimentManagerTests(unittest.TestCase):
     def test_invalid_spec_fails_closed(self) -> None:
         with self.assertRaises(ControlError):
             validate_spec({"goal": "x", "actors": [], "stages": ["x"]})
+
+    def test_actor_role_and_tool_followup_are_retained(self) -> None:
+        spec = validate_spec(
+            {
+                **self.spec,
+                "actors": [
+                    {
+                        "name": "builder",
+                        "worker": "worker-a",
+                        "model": "model-a",
+                        "role": "coder",
+                    }
+                ],
+                "max_turns": 1,
+                "max_tool_steps": 2,
+            }
+        )
+        self.assertEqual(spec["actors"][0]["role"], "coder")
+        self.assertEqual(spec["max_tool_steps"], 2)
+
+        class ToolRuntime(FakeRuntime):
+            def offered_tools(self, actor):
+                return ["read_file"]
+
+            def execute_tools(self, actor, calls):
+                return [
+                    {
+                        "name": "read_file",
+                        "arguments": {"path": "mncs-language/README.md"},
+                        "output": "README contents",
+                        "success": True,
+                        "execution_target": "controller",
+                        "allowed": True,
+                        "risk": "low",
+                        "reason": "read",
+                    }
+                ]
+
+            def submit(self, actor, prompt: str, idempotency_key: str, *, messages=None) -> str:
+                work_id = super().submit(actor, prompt, idempotency_key, messages=messages)
+                if ":tool:" not in idempotency_key:
+                    self.results[work_id] = {
+                        "response": {
+                            "message": {
+                                "content": "",
+                                "tool_calls": [
+                                    {
+                                        "function": {
+                                            "name": "read_file",
+                                            "arguments": {"path": "mncs-language/README.md"},
+                                        }
+                                    }
+                                ],
+                            }
+                        },
+                        "inference_stages": ["worker-started", "completed"],
+                        "result": {
+                            "result": {
+                                "results": [
+                                    {
+                                        "worker_identity": actor["worker"],
+                                        "record_identity": "sha256:" + "a" * 64,
+                                        "receipt_identity": "sha256:" + "b" * 64,
+                                    }
+                                ]
+                            }
+                        },
+                    }
+                else:
+                    self.results[work_id]["response"] = {
+                        "message": {"content": "Inspected README via tools."}
+                    }
+                return work_id
+
+        runtime = ToolRuntime()
+        manager = ExperimentManager(self.config, runtime_factory=lambda _config: runtime, resume=False)
+        accepted = manager.start(
+            {
+                **self.spec,
+                "actors": [
+                    {
+                        "name": "builder",
+                        "worker": "worker-a",
+                        "model": "model-a",
+                        "role": "coder",
+                    }
+                ],
+                "max_turns": 1,
+                "max_tool_steps": 2,
+            }
+        )
+        experiment_id = str(accepted["experiment_id"])
+        status = self.wait_terminal(manager, experiment_id)
+        self.assertEqual(status["recorded_state"], "COMPLETED")
+        self.assertEqual(len(runtime.submissions), 2)
+        self.assertIn(":tool:1", runtime.submissions[1][2])
+        result = manager.result(experiment_id)
+        self.assertEqual(result["turns"][0]["content"].strip(), "Inspected README via tools.")
+        self.assertEqual(result["turns"][0]["tools_offered"], ["read_file"])
+        self.assertEqual(result["turns"][0]["tool_executions"][0]["name"], "read_file")
+        self.assertEqual(result["turns"][0]["tool_executions"][0]["execution_target"], "controller")
+
+    def test_tool_step_bound_without_final_text_is_retained_evidence(self) -> None:
+        class OnlyToolsRuntime(FakeRuntime):
+            def offered_tools(self, actor):
+                return ["system_info"]
+
+            def execute_tools(self, actor, calls):
+                return [
+                    {
+                        "name": "system_info",
+                        "arguments": {},
+                        "output": "linux",
+                        "success": True,
+                        "execution_target": "controller",
+                        "allowed": True,
+                        "risk": "low",
+                        "reason": "read",
+                    }
+                ]
+
+            def submit(self, actor, prompt: str, idempotency_key: str, *, messages=None) -> str:
+                work_id = super().submit(actor, prompt, idempotency_key, messages=messages)
+                self.results[work_id] = {
+                    "response": {
+                        "message": {
+                            "content": "",
+                            "tool_calls": [{"function": {"name": "system_info", "arguments": {}}}],
+                        }
+                    },
+                    "inference_stages": ["completed"],
+                    "result": {
+                        "result": {
+                            "results": [
+                                {
+                                    "worker_identity": actor["worker"],
+                                    "record_identity": "sha256:" + "a" * 64,
+                                    "receipt_identity": "sha256:" + "b" * 64,
+                                }
+                            ]
+                        }
+                    },
+                }
+                return work_id
+
+        runtime = OnlyToolsRuntime()
+        manager = ExperimentManager(self.config, runtime_factory=lambda _config: runtime, resume=False)
+        accepted = manager.start({**self.spec, "max_turns": 1, "max_tool_steps": 1})
+        status = self.wait_terminal(manager, str(accepted["experiment_id"]))
+        self.assertEqual(status["recorded_state"], "COMPLETED")
+        result = manager.result(str(accepted["experiment_id"]))
+        self.assertIn("tool-step bound reached", result["turns"][0]["content"])
+        self.assertEqual(result["turns"][0]["tool_executions"][0]["name"], "system_info")
 
 
 if __name__ == "__main__":

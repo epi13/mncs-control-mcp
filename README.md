@@ -236,7 +236,9 @@ not claim cancellation when Fabric has not exposed a matching persistent operati
 
 Long-running multi-model experiments use `experiment_start` rather than `terminal_start`.
 Control persists the semantic coordinator outside the bounded terminal sandbox, Harness owns
-exact model/worker resolution, and each turn is submitted as detached Fabric work.
+exact model/worker resolution and model-tool authorization, and each inference (including
+tool-followup steps inside a turn) is submitted as detached Fabric work. Actors may name a
+Harness `role` to select tools without weakening the exact worker/model pin.
 `experiment_status`, `experiment_result`, `experiment_list`, and `experiment_stop` remain
 reconnectable after the initiating MCP client disconnects; unfinished experiment state is
 resumed when the Control server process starts again. See
