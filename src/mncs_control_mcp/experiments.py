@@ -76,6 +76,8 @@ def validate_spec(value: object) -> dict[str, Any]:
             "worker": _bounded_text(item.get("worker"), "actor worker", 256),
             "model": _bounded_text(item.get("model"), "actor model", 256),
         }
+        if item.get("role"):
+            actor["role"] = _bounded_text(item.get("role"), "actor role", 64)
         if actor["name"] in names:
             raise ControlError("INVALID_INPUT", "experiment actor names must be unique")
         names.add(actor["name"])
@@ -94,6 +96,7 @@ def validate_spec(value: object) -> dict[str, Any]:
         poll_seconds = float(value.get("poll_seconds", 1.0))
         max_turn_wait_seconds = int(value.get("max_turn_wait_seconds", 900))
         max_handoff_chars = int(value.get("max_handoff_chars", 12_000))
+        max_tool_steps = int(value.get("max_tool_steps", 8))
     except (TypeError, ValueError) as exc:
         raise ControlError("INVALID_INPUT", "experiment numeric bounds are invalid") from exc
     if not 30 <= duration_seconds <= 7 * 24 * 3600:
@@ -106,6 +109,8 @@ def validate_spec(value: object) -> dict[str, Any]:
         raise ControlError("INVALID_INPUT", "max_turn_wait_seconds must be between 30 and 3600")
     if not 256 <= max_handoff_chars <= 100_000:
         raise ControlError("INVALID_INPUT", "max_handoff_chars must be between 256 and 100000")
+    if not 0 <= max_tool_steps <= 32:
+        raise ControlError("INVALID_INPUT", "max_tool_steps must be between 0 and 32")
     initial_handoff = str(value.get("initial_handoff") or "No prior handoff is available.")
     instructions = str(value.get("instructions") or "").strip()
     if len(initial_handoff) > max_handoff_chars:
@@ -122,6 +127,7 @@ def validate_spec(value: object) -> dict[str, Any]:
         "poll_seconds": poll_seconds,
         "max_turn_wait_seconds": max_turn_wait_seconds,
         "max_handoff_chars": max_handoff_chars,
+        "max_tool_steps": max_tool_steps,
         "initial_handoff": initial_handoff,
         "instructions": instructions,
         "stop_on_turn_failure": bool(value.get("stop_on_turn_failure", True)),
@@ -134,7 +140,14 @@ def validate_spec(value: object) -> dict[str, Any]:
 
 
 class ExperimentRuntime(Protocol):
-    def submit(self, actor: Mapping[str, str], prompt: str, idempotency_key: str) -> str: ...
+    def submit(
+        self,
+        actor: Mapping[str, str],
+        prompt: str,
+        idempotency_key: str,
+        *,
+        messages: list[dict[str, Any]] | None = None,
+    ) -> str: ...
     def status(self, work_id: str) -> str: ...
     def result(self, work_id: str) -> dict[str, Any]: ...
 
@@ -159,9 +172,14 @@ class HarnessFabricRuntime:
             session_type = importlib.import_module(
                 "epi13_local_harness.fabric_inventory_session"
             ).InventoryAwareFabricSession
-            self._routing_override = importlib.import_module(
-                "epi13_local_harness.models"
-            ).RoutingOverride
+            models_mod = importlib.import_module("epi13_local_harness.models")
+            self._routing_override = models_mod.RoutingOverride
+            self._policy_decision_type = models_mod.PolicyDecision
+            self._tool_execution_type = models_mod.ToolExecution
+            tools_mod = importlib.import_module("epi13_local_harness.tools")
+            fabric_tools_mod = importlib.import_module("epi13_local_harness.fabric_target_tools")
+            self._tool_registry_type = tools_mod.ToolRegistry
+            self._fabric_tool_executor_type = fabric_tools_mod.FabricTargetToolExecutor
         except Exception as exc:
             raise ControlError("HARNESS_UNAVAILABLE", redact_text(str(exc))) from exc
         finally:
@@ -171,6 +189,8 @@ class HarnessFabricRuntime:
                 except ValueError:
                     pass
         self._config = harness_config
+        self._workspace = config.workspace_root
+        self._tool_registry = None
         self._session = session_type(
             harness_config.fabric, residency_config=harness_config.model_residency
         )
@@ -179,31 +199,157 @@ class HarnessFabricRuntime:
         except Exception as exc:
             raise ControlError("HARNESS_UNAVAILABLE", redact_text(str(exc))) from exc
 
-    def submit(self, actor: Mapping[str, str], prompt: str, idempotency_key: str) -> str:
+    def _role_name(self, actor: Mapping[str, str]) -> str:
+        requested = str(actor.get("role") or "")
+        if requested:
+            if requested not in self._config.models:
+                raise ControlError("MODEL_ROUTE_UNAVAILABLE", f"Harness role {requested} is not configured")
+            return requested
+        if "coder" in self._config.models:
+            return "coder"
+        if "e4b" in self._config.models:
+            return "e4b"
+        return next(iter(self._config.models))
+
+    def _resolved(self, actor: Mapping[str, str]):
+        role = self._role_name(actor)
+        base = self._config.models[role]
         override = self._routing_override.from_values(
-            worker=str(actor["worker"]), model=str(actor["model"])
+            role=str(actor["role"]) if actor.get("role") else None,
+            worker=str(actor["worker"]),
+            model=str(actor["model"]),
         )
         model, selection = self._session.resolve_model(
-            "e2b",
-            replace(self._config.models["e2b"], name=str(actor["model"]), think=False),
+            role,
+            replace(base, name=str(actor["model"])),
             override,
         )
         if selection is None or not selection.available or selection.worker_id != actor["worker"]:
             reason = selection.reason if selection is not None else "exact model pin could not be resolved"
             raise ControlError("MODEL_ROUTE_UNAVAILABLE", redact_text(str(reason)))
+        return role, model, selection
+
+    def offered_tools(self, actor: Mapping[str, str]) -> list[str]:
+        role = self._role_name(actor)
+        return list(self._config.models[role].tools)
+
+    def _registry(self):
+        if self._tool_registry is None:
+            self._tool_registry = self._tool_registry_type(
+                self._workspace,
+                self._config.policy,
+                auto_approve=True,
+                interactive=False,
+            )
+        return self._tool_registry
+
+    def _tool_schemas(self, actor: Mapping[str, str]) -> list[dict[str, Any]]:
+        names = tuple(self.offered_tools(actor))
+        return self._registry().available_schemas(names)
+
+    @staticmethod
+    def _tool_call_parts(call: Mapping[str, Any]) -> tuple[str, dict[str, Any]]:
+        function = call.get("function", {})
+        if not isinstance(function, Mapping):
+            function = {}
+        name = str(function.get("name") or call.get("name") or "")
+        arguments = function.get("arguments", call.get("arguments", {}))
+        if isinstance(arguments, str):
+            try:
+                arguments = json.loads(arguments)
+            except json.JSONDecodeError:
+                arguments = {}
+        if not isinstance(arguments, dict):
+            arguments = {}
+        return name, arguments
+
+    def execute_tools(self, actor: Mapping[str, str], calls: list[Mapping[str, Any]]) -> list[dict[str, Any]]:
+        """Execute Harness model tools. File tools stay controller-workspace; run_command may go to the actor worker."""
+
+        registry = self._registry()
+        offered = set(self.offered_tools(actor))
+        records: list[dict[str, Any]] = []
+        for call in calls:
+            name, arguments = self._tool_call_parts(call)
+            if name not in offered:
+                records.append(
+                    {
+                        "name": name or "unknown",
+                        "arguments": arguments,
+                        "output": f"Tool {name!r} is not authorized for this experiment actor",
+                        "success": False,
+                        "execution_target": "controller",
+                        "allowed": False,
+                        "risk": "blocked",
+                        "reason": "tool not in the actor role",
+                    }
+                )
+                continue
+            execution_target = "controller"
+            if name == "run_command":
+                argv = arguments.get("argv")
+                if isinstance(argv, list) and argv and all(isinstance(item, str) for item in argv):
+                    try:
+                        executor = self._fabric_tool_executor_type(self._session, registry)
+                        result = executor.execute(str(actor["worker"]), [str(item) for item in argv])
+                        execution = result.execution
+                        execution_target = result.target.label
+                    except Exception as exc:
+                        execution = self._tool_execution_type(
+                            name,
+                            arguments,
+                            f"FABRIC_TARGET_EXECUTION_FAILED: {exc}",
+                            False,
+                            self._policy_decision_type(False, "blocked", redact_text(str(exc))),
+                        )
+                else:
+                    execution = registry.execute(name, arguments)
+            else:
+                execution = registry.execute(name, arguments)
+            decision = execution.decision
+            records.append(
+                {
+                    "name": name,
+                    "arguments": arguments,
+                    "output": redact_text(str(execution.output))[:16_000],
+                    "success": bool(execution.success),
+                    "execution_target": execution_target,
+                    "allowed": bool(decision.allowed),
+                    "risk": str(decision.risk),
+                    "reason": redact_text(str(decision.reason))[:1000],
+                }
+            )
+        return records
+
+    def submit(
+        self,
+        actor: Mapping[str, str],
+        prompt: str,
+        idempotency_key: str,
+        *,
+        messages: list[dict[str, Any]] | None = None,
+    ) -> str:
+        role, model, selection = self._resolved(actor)
+        chat_messages = [dict(item) for item in messages] if messages else [{"role": "user", "content": prompt}]
         self._session.set_consumer_context(
-            workload_identity=_identity({"idempotency_key": idempotency_key, "prompt": prompt}),
+            workload_identity=_identity({"idempotency_key": idempotency_key, "messages": chat_messages}),
             provider_identity=_identity(
-                {"provider": "ollama", "worker": actor["worker"], "model": actor["model"]}
+                {
+                    "provider": "ollama",
+                    "worker": actor["worker"],
+                    "model": actor["model"],
+                    "role": role,
+                }
             ),
             partition_identity=_identity({"worker": actor["worker"]}),
         )
         try:
             accepted = self._session.submit_chat(
                 model,
-                [{"role": "user", "content": prompt}],
+                chat_messages,
                 worker_id=selection.worker_id,
                 idempotency_key=idempotency_key,
+                tools=self._tool_schemas(actor) or None,
             )
         except Exception as exc:
             raise ControlError("FABRIC_SUBMIT_FAILED", redact_text(str(exc))) from exc
@@ -231,16 +377,37 @@ class HarnessFabricRuntime:
             raise ControlError("FABRIC_RESULT_FAILED", redact_text(str(exc))) from exc
 
 
-def _response_content(payload: Mapping[str, Any]) -> str:
+def _assistant_message(payload: Mapping[str, Any]) -> dict[str, Any] | None:
     response = payload.get("response")
     if not isinstance(response, Mapping):
-        return ""
+        return None
     message = response.get("message")
-    if isinstance(message, Mapping) and isinstance(message.get("content"), str):
+    if isinstance(message, Mapping):
+        return dict(message)
+    if isinstance(response.get("content"), str) or response.get("tool_calls"):
+        return {
+            "role": "assistant",
+            "content": str(response.get("content") or ""),
+            "tool_calls": list(response.get("tool_calls") or []),
+        }
+    return None
+
+
+def _response_content(payload: Mapping[str, Any]) -> str:
+    message = _assistant_message(payload)
+    if message and isinstance(message.get("content"), str):
         return str(message["content"]).strip()
-    if isinstance(response.get("content"), str):
-        return str(response["content"]).strip()
     return ""
+
+
+def _tool_calls(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
+    message = _assistant_message(payload)
+    if message is None:
+        return []
+    calls = message.get("tool_calls") or []
+    if not isinstance(calls, list):
+        return []
+    return [dict(item) for item in calls if isinstance(item, Mapping)]
 
 
 def _fabric_evidence(payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -286,7 +453,11 @@ EVIDENCE RULES:
 - Separate observation from inference and hypothesis when material.
 - Fabric execution success is provenance, not proof that a model statement is correct.
 - Preserve useful failures, disagreement, uncertainty, and negative evidence.
-- Do not mutate project repositories or claim external authority.
+- Use Harness tools to inspect the workspace instead of guessing file contents.
+- File tools execute on the controller workspace. Inference executes on your pinned Fabric worker.
+- run_command, when authorized, may execute on the pinned worker through Fabric.
+- Do not mutate project repositories. If you write files, write only under an experiment scratch path.
+- Do not claim external authority.
 - End with a concise handoff that the next actor can challenge.
 """
 
@@ -504,18 +675,86 @@ class ExperimentManager:
             "observed_at": _iso(),
         }
 
-    def _submit(self, runtime: ExperimentRuntime, state: dict[str, Any], turn: dict[str, Any]) -> None:
+    def _submit(
+        self,
+        runtime: ExperimentRuntime,
+        state: dict[str, Any],
+        turn: dict[str, Any],
+        *,
+        messages: list[dict[str, Any]] | None = None,
+        idempotency_key: str | None = None,
+    ) -> None:
         prompt = _turn_prompt(state["spec"], int(turn["turn"]), self._previous(state))
-        key = f"{state['experiment_id']}:turn:{turn['turn']}"
-        work_id = runtime.submit(turn["actor"], prompt, key)
+        chat_messages = messages or list(turn.get("messages") or [{"role": "user", "content": prompt}])
+        key = idempotency_key or f"{state['experiment_id']}:turn:{turn['turn']}"
+        offered = getattr(runtime, "offered_tools", None)
+        if callable(offered) and "tools_offered" not in turn:
+            try:
+                turn["tools_offered"] = list(offered(turn["actor"]))
+            except Exception:
+                turn["tools_offered"] = []
+        work_id = runtime.submit(turn["actor"], prompt, key, messages=chat_messages)
         turn.update(
             state="SUBMITTED",
             submitted_at=_iso(),
             work_id=work_id,
             idempotency_key=key,
             prompt_identity=_identity(prompt),
+            messages=chat_messages,
         )
         self._save(state)
+
+    def _maybe_tool_followup(
+        self,
+        runtime: ExperimentRuntime,
+        state: dict[str, Any],
+        turn: dict[str, Any],
+        payload: Mapping[str, Any],
+    ) -> bool:
+        execute = getattr(runtime, "execute_tools", None)
+        if not callable(execute):
+            return False
+        calls = _tool_calls(payload)
+        if not calls:
+            return False
+        maximum = int(state["spec"].get("max_tool_steps", 8))
+        step = int(turn.get("tool_step") or 0)
+        if step >= maximum:
+            turn["tool_step_limit_reached"] = True
+            return False
+        executions = execute(turn["actor"], calls)
+        turn.setdefault("tool_executions", []).extend(executions)
+        turn["tool_step"] = step + 1
+        assistant = _assistant_message(payload) or {
+            "role": "assistant",
+            "content": _response_content(payload),
+            "tool_calls": calls,
+        }
+        messages = list(turn.get("messages") or [])
+        messages.append(assistant)
+        for item in executions:
+            messages.append(
+                {
+                    "role": "tool",
+                    "tool_name": item.get("name"),
+                    "content": str(item.get("output") or ""),
+                }
+            )
+        turn.setdefault("inference_work", []).append(
+            {
+                "work_id": turn.get("work_id"),
+                "fabric_evidence": _fabric_evidence(payload),
+                "tool_calls": [item.get("name") for item in executions],
+            }
+        )
+        self._submit(
+            runtime,
+            state,
+            turn,
+            messages=messages,
+            idempotency_key=f"{state['experiment_id']}:turn:{turn['turn']}:tool:{step + 1}",
+        )
+        return True
 
     def _complete(self, state: dict[str, Any], turn: dict[str, Any], payload: Mapping[str, Any]) -> None:
         content = _response_content(payload)
@@ -568,7 +807,11 @@ class ExperimentManager:
                 continue
             turn["fabric_state"] = fabric_state
             if fabric_state == "COMPLETED":
-                self._complete(state, turn, runtime.result(str(turn["work_id"])))
+                payload = runtime.result(str(turn["work_id"]))
+                if self._maybe_tool_followup(runtime, state, turn, payload):
+                    submitted_at = _parse_time(str(turn.get("submitted_at") or _iso()))
+                    continue
+                self._complete(state, turn, payload)
                 return True
             if fabric_state in {"FAILED", "CANCELLED", "TIMED_OUT"}:
                 payload = runtime.result(str(turn["work_id"]))

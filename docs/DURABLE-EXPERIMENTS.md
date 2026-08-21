@@ -25,8 +25,8 @@ A resumed turn never blindly submits again. If durable state already contains a 
 {
   "goal": "Determine whether heterogeneous model critique improves an MNCS protocol under equal constraints.",
   "actors": [
-    {"name": "planner", "worker": "collamore02-windows", "model": "gemma4:e4b"},
-    {"name": "critic", "worker": "fabric-worker-01", "model": "granite3.3:2b"}
+    {"name": "planner", "worker": "collamore02-windows", "model": "qwen3:8b", "role": "coder"},
+    {"name": "critic", "worker": "fabric-worker-01", "model": "gemma4:e4b", "role": "e4b"}
   ],
   "stages": [
     "Propose one falsifiable design and its failure condition.",
@@ -36,6 +36,7 @@ A resumed turn never blindly submits again. If durable state already contains a 
   "duration_seconds": 3600,
   "max_turns": 48,
   "max_turn_wait_seconds": 900,
+  "max_tool_steps": 8,
   "stop_on_turn_failure": true
 }
 ```
@@ -57,3 +58,15 @@ Model outputs are untrusted experimental material. The coordinator prompt reinfo
 Fabric's current scheduled-work queue is an availability/admission plane. A schedule tick can select an eligible worker and mark a queued item dispatched, but the current controller path does not carry a chained semantic workflow or automatically feed one model's output into the next model's prompt. Treating that queue as a multi-turn experiment engine would overstate its present contract.
 
 The durable Control coordinator therefore delegates each turn to Fabric's already-supported detached execution API while leaving Fabric semantic-agnostic.
+
+## Roles and model tools
+
+Each actor may name a Harness `role`. The role does not override the exact worker/model pin. It selects the Harness tool set, sampling, and think settings that are serialized into the detached Fabric inference payload.
+
+When a role is omitted, Control still pins the requested worker and model exactly, and it borrows tools from the configured `coder` or `e4b` role so models are not invoked tool-blind.
+
+File tools (`read_file`, `list_directory`, `search_text`, `git_diff`, `write_file`) execute through Harness on the controller workspace. `run_command`, when the role authorizes it, may execute on the pinned Fabric worker through Harness's Fabric target-tool path. Control does not invent tool semantics, worker membership, or evaluation.
+
+If a completed Fabric inference returns `tool_calls`, the Control coordinator executes those tools via Harness, appends the results to the message list, and submits another detached Fabric inference for the same experiment turn. That follow-up uses the idempotency key `<experiment-id>:turn:<n>:tool:<step>`. The turn is not marked complete until the model returns ordinary content or `max_tool_steps` is reached. Tool executions, offered tool names, and per-inference Fabric work identities are retained on the turn record.
+
+Empty model content is valid only as a tool-call step. A finished turn still requires model text.
