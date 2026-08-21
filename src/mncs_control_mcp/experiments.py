@@ -759,7 +759,16 @@ class ExperimentManager:
     def _complete(self, state: dict[str, Any], turn: dict[str, Any], payload: Mapping[str, Any]) -> None:
         content = _response_content(payload)
         if not content:
-            raise ControlError("FABRIC_RESULT_INVALID", "completed Fabric turn returned no model content")
+            executions = turn.get("tool_executions") or []
+            if executions:
+                names = [str(item.get("name") or "unknown") for item in executions if isinstance(item, Mapping)]
+                bound = "tool-step bound reached" if turn.get("tool_step_limit_reached") else "no final model text after tools"
+                content = (
+                    f"Turn ended with {bound}. {len(executions)} Harness tool execution(s) are retained "
+                    f"as evidence ({', '.join(names[:16])}). This is not a successful semantic claim."
+                )
+            else:
+                raise ControlError("FABRIC_RESULT_INVALID", "completed Fabric turn returned no model content")
         directory = self._directory(str(state["experiment_id"]))
         turns_dir = directory / "turns"
         turns_dir.mkdir(parents=True, exist_ok=True)

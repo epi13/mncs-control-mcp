@@ -288,6 +288,58 @@ class ExperimentManagerTests(unittest.TestCase):
         self.assertEqual(result["turns"][0]["tool_executions"][0]["name"], "read_file")
         self.assertEqual(result["turns"][0]["tool_executions"][0]["execution_target"], "controller")
 
+    def test_tool_step_bound_without_final_text_is_retained_evidence(self) -> None:
+        class OnlyToolsRuntime(FakeRuntime):
+            def offered_tools(self, actor):
+                return ["system_info"]
+
+            def execute_tools(self, actor, calls):
+                return [
+                    {
+                        "name": "system_info",
+                        "arguments": {},
+                        "output": "linux",
+                        "success": True,
+                        "execution_target": "controller",
+                        "allowed": True,
+                        "risk": "low",
+                        "reason": "read",
+                    }
+                ]
+
+            def submit(self, actor, prompt: str, idempotency_key: str, *, messages=None) -> str:
+                work_id = super().submit(actor, prompt, idempotency_key, messages=messages)
+                self.results[work_id] = {
+                    "response": {
+                        "message": {
+                            "content": "",
+                            "tool_calls": [{"function": {"name": "system_info", "arguments": {}}}],
+                        }
+                    },
+                    "inference_stages": ["completed"],
+                    "result": {
+                        "result": {
+                            "results": [
+                                {
+                                    "worker_identity": actor["worker"],
+                                    "record_identity": "sha256:" + "a" * 64,
+                                    "receipt_identity": "sha256:" + "b" * 64,
+                                }
+                            ]
+                        }
+                    },
+                }
+                return work_id
+
+        runtime = OnlyToolsRuntime()
+        manager = ExperimentManager(self.config, runtime_factory=lambda _config: runtime, resume=False)
+        accepted = manager.start({**self.spec, "max_turns": 1, "max_tool_steps": 1})
+        status = self.wait_terminal(manager, str(accepted["experiment_id"]))
+        self.assertEqual(status["recorded_state"], "COMPLETED")
+        result = manager.result(str(accepted["experiment_id"]))
+        self.assertIn("tool-step bound reached", result["turns"][0]["content"])
+        self.assertEqual(result["turns"][0]["tool_executions"][0]["name"], "system_info")
+
 
 if __name__ == "__main__":
     unittest.main()

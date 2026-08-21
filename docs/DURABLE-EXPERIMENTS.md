@@ -69,4 +69,4 @@ File tools (`read_file`, `list_directory`, `search_text`, `git_diff`, `write_fil
 
 If a completed Fabric inference returns `tool_calls`, the Control coordinator executes those tools via Harness, appends the results to the message list, and submits another detached Fabric inference for the same experiment turn. That follow-up uses the idempotency key `<experiment-id>:turn:<n>:tool:<step>`. The turn is not marked complete until the model returns ordinary content or `max_tool_steps` is reached. Tool executions, offered tool names, and per-inference Fabric work identities are retained on the turn record.
 
-Empty model content is valid only as a tool-call step. A finished turn still requires model text.
+Empty model content is valid as a tool-call step. If the tool-step bound is reached without final model text, the turn completes with retained tool evidence rather than crashing the coordinator. That text is not a semantic claim.
