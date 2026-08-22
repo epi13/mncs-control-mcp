@@ -40,6 +40,10 @@ _REQUIRED_TOOLS = {
     "experiment_readiness",
     "experiment_start",
     "experiment_status",
+    "experiment_attach_reference",
+    "experiment_publish",
+    "experiment_rerun",
+    "experiment_graph",
 }
 
 

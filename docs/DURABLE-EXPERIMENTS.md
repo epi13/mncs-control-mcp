@@ -2,7 +2,7 @@
 
 Long-running multi-model experiments must not be owned by `terminal_start` or any other sandbox process whose lifetime is bounded by an MCP command. The protected terminal is a development execution surface, not a durable experiment scheduler.
 
-MNCS Control now exposes a durable experiment coordinator through `experiment_start`, `experiment_status`, `experiment_result`, `experiment_list`, and `experiment_stop`.
+MNCS Control now exposes a durable experiment coordinator through `experiment_start`, `experiment_status`, `experiment_result`, `experiment_list`, and `experiment_stop`. Concept Experiment integration adds `experiment_attach_reference`, `experiment_publish`, `experiment_rerun`, and `experiment_graph`.
 
 ## Ownership
 
@@ -11,7 +11,7 @@ The authority split is explicit:
 - **MNCS Control** owns only experiment lifecycle, durable turn state, handoff ordering, restart/recovery, and the client-facing experiment identity.
 - **MNCS Harness** owns exact model/worker resolution and the model-facing invocation contract.
 - **MNCS Fabric** owns every detached execution, worker placement evidence, execution record, and receipt.
-- **MNCS Commons** grants no execution authority. Experiment output may later be deliberately promoted through the normal Commons knowledge lifecycle, but successful experiment execution is not Commons acceptance.
+- **MNCS Commons** grants no execution authority. Control can publish only terminal Concept Experiment revisions through the separate operator socket; a successful ingestion receipt remains delivery, not acceptance.
 
 The coordinator runs in the Control MCP service process, not inside the bwrap terminal sandbox. State is written beneath the existing private Control state directory at `~/.local/state/mncs-control-mcp/experiments/`. On Control server startup, non-terminal experiments are discovered and resumed.
 
@@ -46,6 +46,25 @@ A resumed turn never blindly submits again. If durable state already contains a 
 `experiment_status` reports the durable state and current detached Fabric turn. `experiment_result` returns retained turn outputs and the Fabric evidence references captured for each completed turn. `experiment_list` is bounded to the most recent 100 experiment records.
 
 `experiment_stop` stops the **coordinator** from starting further work. If a turn is already detached, Control explicitly records that the Fabric work may continue independently; it does not pretend to have cancelled an upstream execution when Fabric has not exposed cancellation authority.
+
+## Frozen Concept Experiment record
+
+Acceptance now freezes `mncs-control.concept-experiment-manifest.v0.1` beside the existing state.
+The manifest retains concept and language/target profiles, hypothesis/task/falsifiers, governing
+contracts, protected properties, frozen/hidden inputs, actors, resource bounds, and rerun lineage.
+Its identity is checked on every load, and `family_record_id` remains the durable Control experiment
+ID across restart and publication retry.
+
+Producer-neutral references can be attached while work progresses. Harness actor references and
+Fabric execution identities are captured automatically when those native observations exist;
+Language compiler and Forge evaluation references use the same bounded attachment operation.
+Conflicting content digests for one producer stable ID fail closed.
+
+Only `COMPLETED`, `FAILED`, or `STOPPED` experiments can be synchronized. Control records every
+publication attempt and retry diagnostic. A retry republishes the same immutable revision and is
+safe if Commons already ingested it. New attached evidence after publication marks the experiment
+`SYNC_REQUIRED` and produces a revision linked by `previousDigest`. `experiment_rerun` creates a
+new frozen identity with explicit `rerun_of`/predecessor lineage; it never mutates the failed run.
 
 ## Failure and recovery semantics
 

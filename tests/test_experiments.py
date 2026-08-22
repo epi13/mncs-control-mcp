@@ -7,6 +7,8 @@ import unittest
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from mncs_control_mcp.config import ControlConfig
 from mncs_control_mcp.errors import ControlError
@@ -186,6 +188,178 @@ class ExperimentManagerTests(unittest.TestCase):
     def test_invalid_spec_fails_closed(self) -> None:
         with self.assertRaises(ControlError):
             validate_spec({"goal": "x", "actors": [], "stages": ["x"]})
+
+    def test_frozen_manifest_references_reruns_and_restart_identity(self) -> None:
+        runtime = FakeRuntime()
+        manager = ExperimentManager(self.config, runtime_factory=lambda _config: runtime, resume=False)
+        accepted = manager.start(
+            {
+                **self.spec,
+                "concept": {
+                    "concept_id": "mncs-language:bounded-handoff",
+                    "language_profile": "mncs-language:research-0.1",
+                    "target_profile": {"architecture": "portable", "backend": "candidate-a"},
+                    "hypothesis": "Bounded handoffs preserve falsifiable compiler evidence.",
+                    "falsifiers": ["UNKNOWN is strengthened to PASS"],
+                    "governing_contracts": ["rfc:family-record-spine"],
+                    "frozen_inputs": [{"identity": "sha256:" + "1" * 64}],
+                },
+            }
+        )
+        experiment_id = str(accepted["experiment_id"])
+        manifest_identity = accepted["concept_manifest"]["manifest_identity"]
+        self.wait_terminal(manager, experiment_id)
+        restarted = ExperimentManager(self.config, runtime_factory=lambda _config: runtime, resume=False)
+        self.assertEqual(
+            restarted.status(experiment_id)["concept_manifest"]["manifest_identity"],
+            manifest_identity,
+        )
+
+        reference = {
+            "producer": "mncs-language",
+            "recordKind": "CompilationStudyResult",
+            "schemaVersion": "0.1",
+            "stableId": "mncs:compiler:study:one",
+            "contentDigest": "sha256:" + "a" * 64,
+            "scope": {"backend": "candidate-a"},
+        }
+        restarted.attach_reference(experiment_id, "compiler_record", reference)
+        restarted.attach_reference(experiment_id, "compiler_record", reference)
+        compiler_references = [
+            item
+            for item in restarted.status(experiment_id)["producer_references"]
+            if item["relation"] == "compiler_record"
+        ]
+        self.assertEqual(len(compiler_references), 1)
+        with self.assertRaises(ControlError):
+            restarted.attach_reference(
+                experiment_id,
+                "compiler_record",
+                {**reference, "contentDigest": "sha256:" + "b" * 64},
+            )
+
+        rerun = restarted.rerun(experiment_id)
+        self.assertNotEqual(rerun["experiment_id"], experiment_id)
+        self.assertEqual(rerun["concept_manifest"]["rerun_of"], experiment_id)
+        self.assertEqual(
+            rerun["concept_manifest"]["concept_id"],
+            accepted["concept_manifest"]["concept_id"],
+        )
+        self.wait_terminal(restarted, str(rerun["experiment_id"]))
+
+    def test_terminal_publication_is_retryable_and_idempotent(self) -> None:
+        runtime = FakeRuntime()
+        manager = ExperimentManager(self.config, runtime_factory=lambda _config: runtime, resume=False)
+        accepted = manager.start({**self.spec, "max_turns": 1})
+        experiment_id = str(accepted["experiment_id"])
+        self.wait_terminal(manager, experiment_id)
+
+        def build_record(**kwargs):
+            return {
+                "kind": "ConceptExperiment",
+                "metadata": {"recordId": kwargs["experiment_id"], "revision": kwargs["revision"]},
+                "details": {"status": kwargs["status"], "references": kwargs["references"]},
+            }
+
+        receipts = [
+            ControlError("COMMONS_PUBLISH_FAILED", "operator unavailable"),
+            {
+                "contentDigest": "sha256:" + "c" * 64,
+                "deliveryStatus": "INGESTED",
+            },
+        ]
+
+        def publish_record(_self, _record):
+            result = receipts.pop(0)
+            if isinstance(result, Exception):
+                raise result
+            return result
+
+        module = SimpleNamespace(make_concept_experiment_record=build_record)
+        with patch("mncs_control_mcp.adapters.CommonsAdapter._module", return_value=module), patch(
+            "mncs_control_mcp.adapters.CommonsAdapter.publish_record", new=publish_record
+        ):
+            with self.assertRaises(ControlError):
+                manager.publish(experiment_id)
+            self.assertEqual(
+                manager.status(experiment_id)["publication"]["state"], "RETRY_PENDING"
+            )
+            published = manager.publish(experiment_id)
+            self.assertEqual(published["publication"]["state"], "PUBLISHED")
+            repeated = manager.publish(experiment_id)
+            self.assertEqual(repeated["publication"]["attempts"], 2)
+            self.assertEqual(receipts, [])
+
+    def test_coordinator_save_cannot_erase_concurrently_attached_reference(self) -> None:
+        manager = ExperimentManager(
+            self.config, runtime_factory=lambda _config: BlockingRuntime(), resume=False
+        )
+        accepted = manager.start({**self.spec, "max_turns": 1})
+        experiment_id = str(accepted["experiment_id"])
+        stale = manager._load(experiment_id)
+        reference = {
+            "producer": "mncs-forge",
+            "recordKind": "ConceptEvaluation",
+            "schemaVersion": "mncs-forge.concept-evaluation.v0.1",
+            "stableId": "mncs-forge://evaluation/concurrent",
+            "contentDigest": "sha256:" + "d" * 64,
+        }
+        manager.attach_reference(experiment_id, "evaluation", reference)
+        stale["coordinator_observation"] = "saved from an earlier snapshot"
+        manager._save(stale)
+        current = manager.status(experiment_id)
+        self.assertTrue(
+            any(
+                item["reference"]["stableId"] == reference["stableId"]
+                for item in current["producer_references"]
+            )
+        )
+        manager.stop(experiment_id)
+
+    def test_failed_experiment_remains_durable_and_publishable_as_failed(self) -> None:
+        class FailedRuntime(FakeRuntime):
+            def submit(self, actor, prompt: str, idempotency_key: str, *, messages=None) -> str:
+                work_id = super().submit(actor, prompt, idempotency_key, messages=messages)
+                self.statuses[work_id] = "FAILED"
+                self.results[work_id] = {"error": "bounded fixture failure"}
+                return work_id
+
+        runtime = FailedRuntime()
+        manager = ExperimentManager(self.config, runtime_factory=lambda _config: runtime, resume=False)
+        accepted = manager.start({**self.spec, "max_turns": 1})
+        experiment_id = str(accepted["experiment_id"])
+        failed = self.wait_terminal(manager, experiment_id)
+        self.assertEqual(failed["recorded_state"], "FAILED")
+
+        restarted = ExperimentManager(self.config, runtime_factory=lambda _config: runtime, resume=False)
+        durable = restarted.result(experiment_id)
+        self.assertEqual(durable["state"], "FAILED")
+        self.assertEqual(durable["family_record_id"], experiment_id)
+        self.assertEqual(
+            durable["concept_manifest"]["manifest_identity"],
+            accepted["concept_manifest"]["manifest_identity"],
+        )
+
+        observed: dict[str, object] = {}
+
+        def build_record(**kwargs):
+            observed.update(kwargs)
+            return {
+                "kind": "ConceptExperiment",
+                "metadata": {"recordId": kwargs["experiment_id"], "revision": kwargs["revision"]},
+            }
+
+        module = SimpleNamespace(make_concept_experiment_record=build_record)
+        with patch("mncs_control_mcp.adapters.CommonsAdapter._module", return_value=module), patch(
+            "mncs_control_mcp.adapters.CommonsAdapter.publish_record",
+            return_value={
+                "contentDigest": "sha256:" + "e" * 64,
+                "deliveryStatus": "INGESTED",
+            },
+        ):
+            published = restarted.publish(experiment_id)
+        self.assertEqual(observed["status"], "FAILED")
+        self.assertEqual(published["publication"]["state"], "PUBLISHED")
 
     def test_actor_role_and_tool_followup_are_retained(self) -> None:
         spec = validate_spec(

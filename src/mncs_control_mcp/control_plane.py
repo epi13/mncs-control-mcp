@@ -201,8 +201,9 @@ class ControlPlaneService:
                     "conversation graph",
                     "evidence trace",
                     "ledger sync",
+                    "terminal Concept Experiment publish/sync",
                 ],
-                "read-only through the Commons consumer socket; publication is not exposed by Control",
+                "reads use the consumer socket; only bounded terminal Concept Experiment publication uses the operator socket",
                 authority="controller-local Commons owns records and its separate operator surface",
             ),
             "models": {
@@ -267,7 +268,7 @@ class ControlPlaneService:
                 ],
                 "limitations": [
                     "developer_readiness observes capabilities and does not grant them",
-                    "commons.publish is not exposed by Control",
+                    "generic Commons publication is not exposed; Control publishes only durable terminal Concept Experiment revisions",
                 ],
                 "security_boundary": "same sandbox and consumer sockets as the rest of Control",
                 "mutation": False,

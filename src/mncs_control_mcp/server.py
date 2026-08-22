@@ -409,6 +409,22 @@ def build_server(config: ControlConfig | None = None) -> Any:
     def experiment_stop(experiment_id: str) -> dict[str, object]:
         return invoke("experiment_stop", experiments.stop, experiment_id)  # type: ignore[return-value]
 
+    @server.tool(name="experiment_attach_reference", description="Attach one exact producer-owned identity to a durable Concept Experiment without copying or reinterpreting its payload.", annotations=mutate, structured_output=True)
+    def experiment_attach_reference(experiment_id: str, relation: str, reference: dict[str, object]) -> dict[str, object]:
+        return invoke("experiment_attach_reference", experiments.attach_reference, experiment_id, relation, reference)  # type: ignore[return-value]
+
+    @server.tool(name="experiment_publish", description="Idempotently publish or synchronize a terminal Concept Experiment revision through the separate Commons operator boundary.", annotations=network_mutate, structured_output=True)
+    def experiment_publish(experiment_id: str) -> dict[str, object]:
+        return invoke("experiment_publish", experiments.publish, experiment_id)  # type: ignore[return-value]
+
+    @server.tool(name="experiment_rerun", description="Create a new frozen durable experiment with explicit rerun/predecessor lineage to an existing experiment.", annotations=network_mutate, structured_output=True)
+    def experiment_rerun(experiment_id: str) -> dict[str, object]:
+        return invoke("experiment_rerun", experiments.rerun, experiment_id)  # type: ignore[return-value]
+
+    @server.tool(name="experiment_graph", description="Inspect the Commons Family Record graph for one durable Concept Experiment.", annotations=ro, structured_output=True)
+    def experiment_graph(experiment_id: str) -> dict[str, object]:
+        return invoke("experiment_graph", integrations.commons.experiment, experiment_id)  # type: ignore[return-value]
+
     @server.tool(name="forge_candidate_status", description="Inspect whether the current Forge candidate still matches the working tree.", annotations=ro, structured_output=True)
     def forge_candidate_status(repository: str) -> dict[str, object]:
         return invoke("forge_candidate_status", integrations.forge.candidate_status, repository, audit_metadata={"repository": repository})  # type: ignore[return-value]
