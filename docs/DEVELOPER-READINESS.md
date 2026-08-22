@@ -1,3 +1,11 @@
+# Journal context readiness
+
+`journal_context_status` reports the bounded local evidence classes available to
+the Atlas editor. The same projection is included in `developer_readiness` when
+the full server is running. States are explicit (`AVAILABLE`, `PARTIAL`,
+`EMPTY`, `UNAVAILABLE`, `UNKNOWN`, `MALFORMED`) so no records and inaccessible
+records remain distinguishable.
+
 # Developer readiness
 
 `mncs-control-mcp doctor` and the MCP tool `developer_readiness` observe whether

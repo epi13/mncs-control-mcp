@@ -90,6 +90,131 @@ class GitService:
             **self._output(result),
         }
 
+    def journal_snapshot(
+        self,
+        repository: str,
+        *,
+        start: str,
+        end: str,
+        max_commits: int = 100,
+    ) -> dict[str, object]:
+        """Return bounded local developmental Git state for the journal projection.
+
+        Remote comparison is deliberately relative to each branch's configured
+        upstream. A missing upstream is represented as UNKNOWN rather than
+        inferred from an arbitrary remote ref.
+        """
+        if not 1 <= max_commits <= 500:
+            raise ControlError("INVALID_INPUT", "max_commits must be between 1 and 500")
+        self._repository(repository)
+
+        def run(args: list[str], *, allow_failure: bool = False) -> SandboxResult:
+            return self._run(repository, args, allow_failure=allow_failure)
+
+        head = run(["rev-parse", "--verify", "HEAD"], allow_failure=True).stdout.strip() or None
+        branch = run(["symbolic-ref", "--quiet", "--short", "HEAD"], allow_failure=True).stdout.strip() or None
+        upstream = run(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], allow_failure=True).stdout.strip() or None
+        remotes = run(["remote"], allow_failure=True).stdout.splitlines()
+        ahead_behind: dict[str, object] = {"status": "UNKNOWN", "ahead": None, "behind": None}
+        if upstream:
+            comparison = run(["rev-list", "--left-right", "--count", f"{upstream}...HEAD"], allow_failure=True)
+            fields = comparison.stdout.strip().split()
+            if comparison.exit_code == 0 and len(fields) == 2 and all(field.isdigit() for field in fields):
+                ahead_behind = {"status": "AVAILABLE", "ahead": int(fields[1]), "behind": int(fields[0]), "upstream": upstream}
+        elif not remotes:
+            ahead_behind["reason"] = "no configured remote or tracking branch"
+        else:
+            ahead_behind["reason"] = "current branch has no trusted tracking branch"
+
+        branches_result = run(
+            ["for-each-ref", "--format=%(refname:short)%x1f%(objectname)%x1f%(upstream:short)%x1f%(HEAD)", "refs/heads"],
+            allow_failure=True,
+        )
+        branches: list[dict[str, object]] = []
+        local_only: dict[str, dict[str, object]] = {}
+        local_only_commits: set[str] = set()
+        for line in branches_result.stdout.splitlines():
+            fields = line.split("\x1f", 3)
+            if len(fields) != 4:
+                continue
+            name, commit, tracking, current = fields
+            row: dict[str, object] = {
+                "name": name,
+                "head": commit,
+                "upstream": tracking or None,
+                "current": current == "*",
+                "comparison": "UNKNOWN" if not tracking else "AVAILABLE",
+            }
+            if tracking:
+                count = run(["rev-list", "--count", f"{tracking}..{name}"], allow_failure=True)
+                if count.exit_code == 0 and count.stdout.strip().isdigit():
+                    count_value = int(count.stdout.strip())
+                    row["local_only_commit_count"] = count_value
+                    row["comparison"] = "AVAILABLE"
+                    if count_value:
+                        local_only[name] = row
+                        local_log = run(
+                            [
+                                "log",
+                                f"{tracking}..{name}",
+                                f"--since={start}",
+                                f"--until={end}",
+                                f"--max-count={max_commits}",
+                                "--format=%H",
+                            ],
+                            allow_failure=True,
+                        )
+                        local_only_commits.update(
+                            item.strip() for item in local_log.stdout.splitlines() if re.fullmatch(r"[0-9a-f]{40}", item.strip())
+                        )
+            branches.append(row)
+
+        commit_result = run(
+            [
+                "log",
+                "--all",
+                f"--since={start}",
+                f"--until={end}",
+                f"--max-count={max_commits}",
+                "--date=iso-strict",
+                "--format=%H%x1f%ad%x1f%an%x1f%s",
+                "--name-status",
+            ],
+            allow_failure=True,
+        )
+        commits: list[dict[str, object]] = []
+        current: dict[str, object] | None = None
+        for line in commit_result.stdout.splitlines():
+            if "\x1f" in line:
+                fields = line.split("\x1f", 3)
+                if len(fields) == 4:
+                    current = {"commit": fields[0], "occurred_at": fields[1], "author": fields[2], "subject": fields[3], "files": []}
+                    commits.append(current)
+            elif current is not None and line.strip():
+                status, _, path = line.partition("\t")
+                safe_path = path.strip()
+                if safe_path and len(current["files"]) < 40:  # type: ignore[arg-type]
+                    current["files"].append({"status": status[:2], "path": safe_path})  # type: ignore[union-attr]
+        seen: set[str] = set()
+        deduped: list[dict[str, object]] = []
+        for item in commits:
+            commit_id = str(item["commit"])
+            if commit_id not in seen:
+                seen.add(commit_id)
+                item["local_only"] = commit_id in local_only_commits
+                deduped.append(item)
+        return {
+            "repository": repository,
+            "head": head,
+            "branch": branch,
+            "tracking_remote": upstream,
+            "ahead_behind": ahead_behind,
+            "branches": branches,
+            "local_only_branches": list(local_only.values()),
+            "commits": deduped,
+            "remote_names": [name.strip() for name in remotes if name.strip()][:20],
+        }
+
     def diff(
         self,
         repository: str,
