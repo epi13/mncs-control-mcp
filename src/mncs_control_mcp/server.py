@@ -376,7 +376,7 @@ def build_server(config: ControlConfig | None = None) -> Any:
     @server.tool(name="experiment_start", description="Start a durable multi-turn experiment. Control persists coordinator state; Harness resolves exact model pins; Fabric owns detached execution. The MCP client may disconnect after acceptance.", annotations=network_mutate, structured_output=True)
     def experiment_start(spec: dict[str, object]) -> dict[str, object]:
         def start() -> dict[str, object]:
-            readiness = control_plane.experiment_readiness("multi-agent")
+            readiness = control_plane.experiment_readiness("sustained-experiment")
             status = readiness.get("profile_status") or readiness.get("status")
             if status != "READY":
                 required = set(readiness.get("required_layers") or [])
@@ -387,11 +387,16 @@ def build_server(config: ControlConfig | None = None) -> Any:
                 ]
                 raise ControlError(
                     "EXPERIMENT_NOT_READY",
-                    f"multi-agent readiness is {status}; blockers={','.join(blockers) or 'unknown'}",
+                    "sustained-experiment readiness is "
+                    f"{status}; blockers={','.join(blockers) or 'unknown'}",
                 )
             return experiments.start(spec)
 
-        return invoke("experiment_start", start, audit_metadata={"profile": "multi-agent"})  # type: ignore[return-value]
+        return invoke(
+            "experiment_start",
+            start,
+            audit_metadata={"profile": "sustained-experiment"},
+        )  # type: ignore[return-value]
 
     @server.tool(name="experiment_status", description="Inspect one durable experiment and its current Fabric-backed turn without executing work.", annotations=ro, structured_output=True)
     def experiment_status(experiment_id: str) -> dict[str, object]:
