@@ -80,3 +80,15 @@ forge_config_name = "mncs-forge.toml"
 # checkout's .venv entry point and the migrated reference-studies config.
 # forge_mcp_executable = "~/Documents/Projects/mncs-forge-mcp/scripts/codex-mcp"
 # forge_mcp_config = "~/Documents/Projects/mncs-reference-studies/mncs-forge.toml"
+
+[journal]
+# Bounded local evidence projection for the Atlas Development Journal.
+enabled = true
+projects = ["mncs-harness", "mncs-fabric", "mncs-forge-mcp", "mncs-language", "machine-native-complexity-standard", "machine-native-complexity-development-specification", "MNCS-Commons", "mncs-atlas", "mncs-reference-studies", "mncs-control-mcp"]
+include_patterns = ["README*", "AGENTS.md", "docs/**", "rfcs/**", "spec/**", "notes/**", "experiments/**"]
+exclude_patterns = [".git/**", ".venv/**", "node_modules/**", "target/**", "build/**", "dist/**", "vendor/**", "__pycache__/**", "*.pyc"]
+max_items = 500
+max_bytes = 2097152
+excerpt_bytes = 1200
+bundle_state_path = "~/.local/state/mncs-control-mcp/journal-bundles"
+bundle_retention_seconds = 604800

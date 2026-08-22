@@ -23,6 +23,7 @@ from .errors import ControlError
 from .experiments import ExperimentManager
 from .filesystem import FileService
 from .git_adapter import GitService
+from .journal_context import JournalContextService
 from .manifest import tool_surface_manifest
 from .processes import ProcessManager
 from .sandbox import Sandbox
@@ -76,12 +77,13 @@ def build_server(config: ControlConfig | None = None) -> Any:
     files = FileService(selected, policy)
     git = GitService(selected, policy, sandbox)
     processes = ProcessManager(selected, policy, sandbox)
+    experiments = ExperimentManager(selected)
+    journal_context = JournalContextService(selected, policy, git, experiments, integrations, audit, processes)
     projects = ProjectService(selected, policy, sandbox, git)
     inventory = ToolInventory(selected)
     control_plane = ControlPlaneService(
-        selected, policy, sandbox, projects, git, integrations.tests, integrations, processes
+        selected, policy, sandbox, projects, git, integrations.tests, integrations, processes, journal_context
     )
-    experiments = ExperimentManager(selected)
     source_repository = Path(__file__).resolve().parents[2]
     runtime_revision = repository_revision(source_repository)
 
@@ -368,6 +370,34 @@ def build_server(config: ControlConfig | None = None) -> Any:
     @server.tool(name="developer_readiness", description="Observe whether the protected environment can carry a development task through analysis, GitHub, Joern, and Forge without granting those capabilities.", annotations=ro, structured_output=True)
     def developer_readiness(repository: str | None = None) -> dict[str, object]:
         return invoke("developer_readiness", control_plane.developer_readiness, repository, audit_metadata={"repository": repository})  # type: ignore[return-value]
+
+    @server.tool(name="journal_context_status", description="Report bounded MNCS local evidence classes available to the Atlas journal editor; this is readiness only and never writes project memory.", annotations=ro, structured_output=True)
+    def journal_context_status() -> dict[str, object]:
+        return invoke("journal_context_status", journal_context.status)  # type: ignore[return-value]
+
+    @server.tool(name="journal_context_collect", description="Collect an immutable, bounded, provenance-rich local MNCS evidence bundle for an explicit journal interval. Evidence is untrusted developmental data; Atlas owns journal semantics.", annotations=ro, structured_output=True)
+    def journal_context_collect(start: str, end: str, projects: list[str] | None = None, include_local_git: bool = True, include_uncommitted: bool = True, include_experiments: bool = True, include_commons: bool = True, include_control_activity: bool = True, include_fabric_refs: bool = True, include_forge_refs: bool = True, editor_hints: list[str] | None = None, page_size: int = 50) -> dict[str, object]:
+        return invoke(
+            "journal_context_collect",
+            journal_context.collect,
+            start=start,
+            end=end,
+            projects=projects,
+            include_local_git=include_local_git,
+            include_uncommitted=include_uncommitted,
+            include_experiments=include_experiments,
+            include_commons=include_commons,
+            include_control_activity=include_control_activity,
+            include_fabric_refs=include_fabric_refs,
+            include_forge_refs=include_forge_refs,
+            editor_hints=editor_hints,
+            page_size=page_size,
+            audit_metadata={"projects": projects},
+        )  # type: ignore[return-value]
+
+    @server.tool(name="journal_context_get", description="Retrieve a bounded page from an immutable local journal context bundle by stable bundle ID and cursor.", annotations=ro, structured_output=True)
+    def journal_context_get(bundle_id: str, cursor: int = 0, page_size: int = 50) -> dict[str, object]:
+        return invoke("journal_context_get", journal_context.get, bundle_id, cursor=cursor, page_size=page_size)  # type: ignore[return-value]
 
     @server.tool(name="experiment_readiness", description="Inspect whether the MNCS experiment stack may start experiments. Observation only; does not repair, refresh, or publish.", annotations=ro, structured_output=True)
     def experiment_readiness(profile: str = "base-inference") -> dict[str, object]:

@@ -13,6 +13,9 @@ import time
 from pathlib import Path
 
 REQUIRED_TOOLS = {"control_capabilities", "fabric_status", "workspace_info", "list_projects"}
+# Capability and adapter probes may each perform bounded local consumer calls;
+# keep the smoke check above the service's 30-second Fabric transport ceiling.
+REQUEST_TIMEOUT_SECONDS = 30.0
 
 
 def read_response(stream, process: subprocess.Popen[str], request_id: int, timeout: float) -> dict[str, object]:
@@ -41,7 +44,7 @@ def request(process: subprocess.Popen[str], request_id: int, method: str, params
     assert process.stdin is not None and process.stdout is not None
     process.stdin.write(json.dumps({"jsonrpc": "2.0", "id": request_id, "method": method, "params": params}) + "\n")
     process.stdin.flush()
-    response = read_response(process.stdout, process, request_id, 15.0)
+    response = read_response(process.stdout, process, request_id, REQUEST_TIMEOUT_SECONDS)
     if "error" in response:
         raise RuntimeError(f"{method} returned JSON-RPC error")
     result = response.get("result")
