@@ -139,7 +139,7 @@ class ExperimentManagerTests(unittest.TestCase):
         deadline = time.monotonic() + 4
         while time.monotonic() < deadline:
             status = manager.status(experiment_id)
-            if status["recorded_state"] in {"COMPLETED", "FAILED", "STOPPED"}:
+            if status["state"] in {"COMPLETED", "FAILED", "STOPPED"}:
                 return status
             time.sleep(0.02)
         raise AssertionError("experiment did not reach a terminal state")
@@ -267,16 +267,10 @@ class ExperimentManagerTests(unittest.TestCase):
         )
         accepted = manager.start({**self.spec, "max_turns": 1})
         experiment_id = str(accepted["experiment_id"])
-        self.wait_terminal(manager, experiment_id)
-        deadline = time.monotonic() + 4
-        while time.monotonic() < deadline:
-            result = manager.result(experiment_id)
-            teardown = (result.get("residency") or {}).get("teardown") or {}
-            if teardown.get("status") == "DEGRADED":
-                break
-            time.sleep(0.02)
-        else:
-            raise AssertionError("release failure was not persisted")
+        status = self.wait_terminal(manager, experiment_id)
+        self.assertEqual(status["state"], "COMPLETED")
+        teardown = (status.get("residency") or {}).get("teardown") or {}
+        self.assertEqual(teardown.get("status"), "DEGRADED")
         self.assertEqual(teardown["results"][0]["code"], "RESIDENCY_TEARDOWN_FAILED")
 
     def test_harness_policy_can_retain_residency_at_teardown(self) -> None:

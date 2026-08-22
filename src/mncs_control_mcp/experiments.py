@@ -1250,7 +1250,17 @@ class ExperimentManager:
                     else:
                         fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
         effective = str(state.get("state") or "UNKNOWN")
-        if effective not in _TERMINAL and not coordinator_live:
+        residency = state.get("residency")
+        teardown = residency.get("teardown") if isinstance(residency, Mapping) else None
+        teardown_status = teardown.get("status") if isinstance(teardown, Mapping) else None
+        finalization_pending = (
+            effective in _TERMINAL
+            and self._needs_residency_teardown(state)
+            and teardown_status != "DEGRADED"
+        )
+        if finalization_pending:
+            effective = "FINALIZING" if coordinator_live else "RECOVERY_PENDING"
+        elif effective not in _TERMINAL and not coordinator_live:
             effective = "RUNNING_EXTERNAL" if coordinator_external else "RECOVERY_PENDING"
         return {
             "schema": STATE_SCHEMA,

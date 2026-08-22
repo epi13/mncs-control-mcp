@@ -53,12 +53,17 @@ facts, warms or reuses the weights, and returns a durable lease. Every detached
 turn and tool-loop follow-up uses the experiment keep-alive, so request defaults
 cannot accidentally unload the model between steps.
 
-When the experiment becomes `COMPLETED`, `FAILED`, or `STOPPED`, Control asks
+When the recorded experiment becomes `COMPLETED`, `FAILED`, or `STOPPED`, Control asks
 Harness to release each managed lease. A model already warm before preparation is
 unmanaged and is not unloaded. A model shared with another active experiment is
 retained until the last reference ends. Cleanup is idempotent and is recovered
 after process restart; provider uncertainty is persisted as `DEGRADED`, never as
 a successful release.
+
+While teardown evidence is still being recorded, `experiment_status` reports the
+effective state as `FINALIZING` (or `RECOVERY_PENDING` when no coordinator owns
+cleanup yet). A terminal effective state therefore includes durable teardown
+evidence instead of racing the provider release operation.
 
 `residency: "request"` opts out and retains ordinary per-request provider behavior.
 `release_models_on_end: false` deliberately retains prepared residency and records
