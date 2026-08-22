@@ -30,8 +30,22 @@ from .security import redact_text
 EXPERIMENT_SCHEMA = "mncs-control.experiment.v0.1"
 STATE_SCHEMA = "mncs-control.experiment-state.v0.1"
 TURN_SCHEMA = "mncs-control.experiment-turn.v0.1"
+CONCEPT_MANIFEST_SCHEMA = "mncs-control.concept-experiment-manifest.v0.1"
+FAMILY_REFERENCE_SCHEMA = "commons.mncs.dev/producer-reference/v0alpha1"
 _TERMINAL = {"COMPLETED", "FAILED", "STOPPED"}
 _ACTIVE_FABRIC = {"ACCEPTED", "QUEUED", "RUNNING", "DISPATCHED", "SUBMITTED"}
+_REFERENCE_RELATIONS = {
+    "governed_by",
+    "actor",
+    "candidate",
+    "compiler_record",
+    "execution",
+    "evaluation",
+    "observation",
+    "failure",
+    "artifact",
+    "backend",
+}
 
 
 def _now() -> datetime:
@@ -58,6 +72,24 @@ def _bounded_text(value: object, field: str, maximum: int) -> str:
     if not text or len(text) > maximum or "\x00" in text:
         raise ControlError("INVALID_INPUT", f"experiment {field} must be bounded non-empty text")
     return text
+
+
+def _bounded_text_list(value: object, field: str, *, maximum: int = 128) -> list[str]:
+    if value is None:
+        return []
+    if not isinstance(value, list) or len(value) > maximum:
+        raise ControlError("INVALID_INPUT", f"experiment {field} must be a bounded list")
+    return [_bounded_text(item, f"{field} item", 4096) for item in value]
+
+
+def _bounded_json(value: object, field: str, *, maximum: int = 256_000) -> object:
+    try:
+        encoded = json.dumps(value, sort_keys=True, separators=(",", ":"))
+    except (TypeError, ValueError) as exc:
+        raise ControlError("INVALID_INPUT", f"experiment {field} must be JSON") from exc
+    if len(encoded.encode("utf-8")) > maximum:
+        raise ControlError("INVALID_INPUT", f"experiment {field} is oversized")
+    return json.loads(encoded)
 
 
 def validate_spec(value: object) -> dict[str, Any]:
@@ -120,9 +152,44 @@ def validate_spec(value: object) -> dict[str, Any]:
         raise ControlError("INVALID_INPUT", "initial_handoff exceeds max_handoff_chars")
     if len(instructions) > 20_000 or "\x00" in instructions:
         raise ControlError("INVALID_INPUT", "experiment instructions are invalid or oversized")
+    goal = _bounded_text(value.get("goal"), "goal", 20_000)
+    concept_raw = value.get("concept") or {}
+    if not isinstance(concept_raw, Mapping):
+        raise ControlError("INVALID_INPUT", "experiment concept must be an object")
+    target_profile = concept_raw.get("target_profile") or {"kind": "unspecified"}
+    if not isinstance(target_profile, Mapping):
+        raise ControlError("INVALID_INPUT", "experiment target_profile must be an object")
+    frozen_inputs = concept_raw.get("frozen_inputs") or []
+    hidden_inputs = concept_raw.get("hidden_inputs") or []
+    if not isinstance(frozen_inputs, list) or not isinstance(hidden_inputs, list):
+        raise ControlError("INVALID_INPUT", "experiment frozen_inputs and hidden_inputs must be lists")
+    concept_seed = _identity({"goal": goal, "language_profile": concept_raw.get("language_profile")})
+    concept = {
+        "concept_id": _bounded_text(
+            concept_raw.get("concept_id") or f"concept:{concept_seed.removeprefix('sha256:')}",
+            "concept_id",
+            512,
+        ),
+        "language_profile": _bounded_text(
+            concept_raw.get("language_profile") or "unspecified", "language_profile", 1024
+        ),
+        "target_profile": _bounded_json(dict(target_profile), "target_profile", maximum=64_000),
+        "hypothesis": _bounded_text(concept_raw.get("hypothesis") or goal, "hypothesis", 20_000),
+        "task": _bounded_text(concept_raw.get("task") or goal, "task", 20_000),
+        "falsifiers": _bounded_text_list(concept_raw.get("falsifiers"), "falsifiers"),
+        "protected_properties": _bounded_text_list(
+            concept_raw.get("protected_properties"), "protected_properties"
+        ),
+        "governing_contracts": _bounded_text_list(
+            concept_raw.get("governing_contracts"), "governing_contracts"
+        ),
+        "frozen_inputs": _bounded_json(frozen_inputs, "frozen_inputs"),
+        "hidden_inputs": _bounded_json(hidden_inputs, "hidden_inputs"),
+    }
     return {
         "schema": EXPERIMENT_SCHEMA,
-        "goal": _bounded_text(value.get("goal"), "goal", 20_000),
+        "goal": goal,
+        "concept": concept,
         "actors": actors,
         "stages": stages,
         "duration_seconds": duration_seconds,
@@ -144,6 +211,77 @@ def validate_spec(value: object) -> dict[str, Any]:
             "for messages and experiment context."
         ),
     }
+
+
+def build_concept_manifest(
+    experiment_id: str,
+    spec: Mapping[str, Any],
+    *,
+    frozen_at: str,
+    rerun_of: str | None = None,
+) -> dict[str, Any]:
+    """Freeze Control-owned CRE intent without claiming an experimental outcome."""
+
+    concept = spec["concept"]
+    manifest: dict[str, Any] = {
+        "schema": CONCEPT_MANIFEST_SCHEMA,
+        "experiment_id": experiment_id,
+        "family_record_id": experiment_id,
+        "frozen_at": frozen_at,
+        "concept_id": concept["concept_id"],
+        "language_profile": concept["language_profile"],
+        "target_profile": concept["target_profile"],
+        "hypothesis": concept["hypothesis"],
+        "task": concept["task"],
+        "falsifiers": concept["falsifiers"],
+        "protected_properties": concept["protected_properties"],
+        "governing_contracts": concept["governing_contracts"],
+        "frozen_inputs": concept["frozen_inputs"],
+        "hidden_inputs": concept["hidden_inputs"],
+        "actors": spec["actors"],
+        "resource_budget": {
+            "duration_seconds": spec["duration_seconds"],
+            "max_turns": spec["max_turns"],
+            "max_turn_wait_seconds": spec["max_turn_wait_seconds"],
+            "max_handoff_chars": spec["max_handoff_chars"],
+            "max_tool_steps": spec["max_tool_steps"],
+        },
+        "rerun_of": rerun_of,
+        "authority_boundary": (
+            "Control freezes intent and coordinates lifecycle; this manifest does not assert "
+            "scientific truth, compiler correctness, execution conformance, or evaluation success."
+        ),
+    }
+    manifest["manifest_identity"] = _identity(manifest)
+    return manifest
+
+
+def validate_family_reference(value: object) -> dict[str, Any]:
+    """Fail closed on the producer-neutral reference fields Commons accepts."""
+
+    if not isinstance(value, Mapping):
+        raise ControlError("INVALID_INPUT", "producer reference must be an object")
+    required = ("producer", "recordKind", "schemaVersion", "stableId")
+    reference = {
+        "schema": FAMILY_REFERENCE_SCHEMA,
+        **{name: _bounded_text(value.get(name), f"reference {name}", 2048) for name in required},
+    }
+    if value.get("schema", FAMILY_REFERENCE_SCHEMA) != FAMILY_REFERENCE_SCHEMA:
+        raise ControlError("INVALID_INPUT", "producer reference schema is unsupported")
+    digest = value.get("contentDigest")
+    if digest is not None:
+        digest = _bounded_text(digest, "reference contentDigest", 80)
+        if len(digest) != 71 or not digest.startswith("sha256:") or any(
+            char not in "0123456789abcdef" for char in digest[7:]
+        ):
+            raise ControlError("INVALID_INPUT", "reference contentDigest must be a sha256 identity")
+        reference["contentDigest"] = digest
+    for field in ("artifact", "scope"):
+        if value.get(field) is not None:
+            if not isinstance(value[field], Mapping):
+                raise ControlError("INVALID_INPUT", f"reference {field} must be an object")
+            reference[field] = _bounded_json(dict(value[field]), f"reference {field}", maximum=64_000)
+    return reference
 
 
 class ExperimentRuntime(Protocol):
@@ -199,6 +337,9 @@ class HarnessFabricRuntime:
             residency_mod = importlib.import_module("epi13_local_harness.residency")
             self._tool_registry_type = tools_mod.ToolRegistry
             self._fabric_tool_executor_type = fabric_tools_mod.FabricTargetToolExecutor
+            self._actor_provenance_builder = importlib.import_module(
+                "epi13_local_harness.actor_provenance"
+            ).build_actor_provenance
             self._residency_manager_type = residency_mod.ResidencyManager
         except Exception as exc:
             raise ControlError("HARNESS_UNAVAILABLE", redact_text(str(exc))) from exc
@@ -296,6 +437,48 @@ class HarnessFabricRuntime:
     def offered_tools(self, actor: Mapping[str, str]) -> list[str]:
         role = self._role_name(actor)
         return list(self._config.models[role].tools)
+
+    def actor_reference(
+        self, actor: Mapping[str, str], *, prompt: str, session_identity: str
+    ) -> dict[str, Any]:
+        role, _model, selection = self._resolved(actor)
+        route_identity = _identity(
+            {
+                "role": role,
+                "worker": selection.worker_id,
+                "model": actor["model"],
+                "provider": "ollama",
+            }
+        )
+        native = self._actor_provenance_builder(
+            role=role,
+            model_identity=str(actor["model"]),
+            provider_identity="ollama",
+            worker_identity=str(selection.worker_id),
+            route_identity=route_identity,
+            tool_exposure=self.offered_tools(actor),
+            policy_profile="harness-configured-policy",
+            prompt_digest=_identity(prompt),
+            session_identity=session_identity,
+            observed_at=_iso(),
+            extra={"control_actor_name": actor["name"]},
+        )
+        return {
+            "schema": FAMILY_REFERENCE_SCHEMA,
+            "producer": native["producer"],
+            "recordKind": "ActorProvenance",
+            "schemaVersion": native["schema_version"],
+            "stableId": native["stable_id"],
+            "contentDigest": native["content_digest"],
+            "scope": {
+                "role": role,
+                "model": actor["model"],
+                "provider": "ollama",
+                "worker": selection.worker_id,
+                "route": route_identity,
+                "tools": native["tool_exposure"],
+            },
+        }
 
     def _registry(self):
         if self._tool_registry is None:
@@ -590,6 +773,13 @@ class ExperimentManager:
             raise ControlError("EXPERIMENT_STATE_INVALID", "experiment state is invalid JSON") from exc
         if not isinstance(value, dict) or value.get("schema") != STATE_SCHEMA:
             raise ControlError("EXPERIMENT_STATE_INVALID", "experiment state schema is invalid")
+        manifest = value.get("concept_manifest")
+        if manifest is not None:
+            if not isinstance(manifest, dict) or manifest.get("schema") != CONCEPT_MANIFEST_SCHEMA:
+                raise ControlError("EXPERIMENT_STATE_INVALID", "concept manifest schema is invalid")
+            material = {key: item for key, item in manifest.items() if key != "manifest_identity"}
+            if manifest.get("manifest_identity") != _identity(material):
+                raise ControlError("EXPERIMENT_STATE_INVALID", "frozen concept manifest identity is invalid")
         return value
 
     def _save(self, state: dict[str, Any]) -> None:
@@ -610,9 +800,40 @@ class ExperimentManager:
                     state["stop_requested"] = True
                     if existing.get("stop_requested_at"):
                         state["stop_requested_at"] = existing["stop_requested_at"]
+                if isinstance(existing, dict):
+                    retained: dict[tuple[str, str], dict[str, Any]] = {}
+                    for item in [
+                        *(state.get("producer_references") or []),
+                        *(existing.get("producer_references") or []),
+                    ]:
+                        if isinstance(item, dict) and isinstance(item.get("reference"), dict):
+                            key = (str(item.get("relation")), str(item["reference"].get("stableId")))
+                            retained[key] = item
+                    state["producer_references"] = [retained[key] for key in sorted(retained)]
+                    if existing.get("publication") is not None:
+                        state["publication"] = existing["publication"]
+                    for field in ("family_record_id", "concept_manifest"):
+                        if existing.get(field) is not None:
+                            state[field] = existing[field]
             state["updated_at"] = _iso()
             self._atomic_json(existing_path, state)
             fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+
+    def _mutate(self, experiment_id: str, update: Callable[[dict[str, Any]], None]) -> dict[str, Any]:
+        """Serialize API mutations with coordinator saves and preserve their exact state."""
+
+        directory = self._directory(experiment_id)
+        lock_path = directory / "state.lock"
+        lock_path.touch(mode=0o600, exist_ok=True)
+        os.chmod(lock_path, 0o600)
+        with lock_path.open("r+b") as stream:
+            fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
+            state = self._load(experiment_id)
+            update(state)
+            state["updated_at"] = _iso()
+            self._atomic_json(directory / "state.json", state)
+            fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+        return state
 
     def _active_residency_leases(
         self,
@@ -848,8 +1069,10 @@ class ExperimentManager:
         }
         self._save(state)
 
-    def start(self, raw_spec: object) -> dict[str, Any]:
+    def start(self, raw_spec: object, *, rerun_of: str | None = None) -> dict[str, Any]:
         spec = validate_spec(raw_spec)
+        if rerun_of is not None:
+            self._load(rerun_of)
         experiment_id = "exp-" + uuid.uuid4().hex
         directory = self._directory(experiment_id)
         directory.mkdir(mode=0o700)
@@ -862,6 +1085,12 @@ class ExperimentManager:
             "deadline_at": _iso(accepted + timedelta(seconds=int(spec["duration_seconds"]))),
             "spec": spec,
             "spec_identity": _identity(spec),
+            "family_record_id": experiment_id,
+            "concept_manifest": build_concept_manifest(
+                experiment_id, spec, frozen_at=_iso(accepted), rerun_of=rerun_of
+            ),
+            "producer_references": [],
+            "publication": {"state": "NOT_PUBLISHED", "attempts": 0},
             "turns": [],
             "stop_requested": False,
             "authority": {
@@ -876,6 +1105,187 @@ class ExperimentManager:
         self._save(state)
         self._spawn(experiment_id)
         return self.status(experiment_id)
+
+    def attach_reference(
+        self, experiment_id: str, relation: str, raw_reference: object
+    ) -> dict[str, Any]:
+        if relation not in _REFERENCE_RELATIONS:
+            raise ControlError("INVALID_INPUT", "producer reference relation is unsupported")
+        reference = validate_family_reference(raw_reference)
+
+        def update(state: dict[str, Any]) -> None:
+            entries = list(state.get("producer_references") or [])
+            for entry in entries:
+                existing = entry.get("reference") if isinstance(entry, Mapping) else None
+                if not isinstance(existing, Mapping) or existing.get("stableId") != reference["stableId"]:
+                    continue
+                if existing.get("contentDigest") != reference.get("contentDigest"):
+                    raise ControlError(
+                        "REFERENCE_CONFLICT",
+                        "a stable producer identity cannot be rebound to another content digest",
+                    )
+                if entry.get("relation") == relation:
+                    return
+            entries.append({"relation": relation, "reference": reference, "attached_at": _iso()})
+            entries.sort(
+                key=lambda item: (str(item["relation"]), str(item["reference"]["stableId"]))
+            )
+            state["producer_references"] = entries
+            publication = state.get("publication", {})
+            if publication.get("state") == "PUBLISHED":
+                publication["state"] = "SYNC_REQUIRED"
+            elif publication.get("state") == "PUBLISHING":
+                publication["sync_requested"] = True
+
+        self._mutate(experiment_id, update)
+        return self.status(experiment_id)
+
+    def rerun(self, experiment_id: str) -> dict[str, Any]:
+        predecessor = self._load(experiment_id)
+        return self.start(predecessor["spec"], rerun_of=experiment_id)
+
+    @staticmethod
+    def _control_actor_reference(experiment_id: str, actor: Mapping[str, Any]) -> dict[str, Any]:
+        digest = _identity({"experiment_id": experiment_id, "actor": dict(actor)})
+        return {
+            "schema": FAMILY_REFERENCE_SCHEMA,
+            "producer": "mncs-control-mcp",
+            "recordKind": "ExperimentActorAssignment",
+            "schemaVersion": EXPERIMENT_SCHEMA,
+            "stableId": f"{experiment_id}:actor:{actor['name']}",
+            "contentDigest": digest,
+            "scope": {
+                "role": actor.get("role") or actor["name"],
+                "model": actor["model"],
+                "worker": actor["worker"],
+            },
+        }
+
+    def _family_record(self, state: Mapping[str, Any]) -> dict[str, Any]:
+        from .adapters import CommonsAdapter
+
+        manifest = state["concept_manifest"]
+        entries = [
+            {"relation": item["relation"], "reference": item["reference"]}
+            for item in state.get("producer_references") or []
+        ]
+        for contract in manifest["governing_contracts"]:
+            entries.append(
+                {
+                    "relation": "governed_by",
+                    "reference": {
+                        "schema": FAMILY_REFERENCE_SCHEMA,
+                        "producer": "mncs-control-mcp",
+                        "recordKind": "GoverningContractReference",
+                        "schemaVersion": CONCEPT_MANIFEST_SCHEMA,
+                        "stableId": contract,
+                        "contentDigest": _identity({"contract": contract}),
+                    },
+                }
+            )
+        actor_entries = [
+            item
+            for item in entries
+            if item["relation"] == "actor" and isinstance(item["reference"], Mapping)
+        ]
+        actors: list[dict[str, Any]] = []
+        for actor in manifest["actors"]:
+            role = actor.get("role") or actor["name"]
+            matched = next(
+                (
+                    item["reference"]
+                    for item in actor_entries
+                    if (item["reference"].get("scope") or {}).get("role") in {role, actor["name"]}
+                ),
+                None,
+            )
+            actors.append(
+                {
+                    "role": role,
+                    "model": actor["model"],
+                    "worker": actor["worker"],
+                    "reference": matched
+                    or self._control_actor_reference(str(state["experiment_id"]), actor),
+                }
+            )
+        publication = state.get("publication") or {}
+        revision = int(publication.get("revision") or 0) + 1
+        status = {"COMPLETED": "TERMINAL", "FAILED": "FAILED", "STOPPED": "STOPPED"}.get(
+            str(state.get("state")), "UNKNOWN"
+        )
+        commons = CommonsAdapter(self.config)._module()
+        return commons.make_concept_experiment_record(
+            experiment_id=state["family_record_id"],
+            concept_id=manifest["concept_id"],
+            created_at=state["accepted_at"],
+            language_profile=manifest["language_profile"],
+            target_profile=manifest["target_profile"],
+            hypothesis=manifest["hypothesis"],
+            task=manifest["task"],
+            falsifiers=manifest["falsifiers"],
+            protected_properties=manifest["protected_properties"],
+            frozen_inputs=manifest["frozen_inputs"],
+            hidden_inputs=manifest["hidden_inputs"],
+            resource_budget=manifest["resource_budget"],
+            actors=actors,
+            references=entries,
+            status=status,
+            rerun_of=manifest.get("rerun_of"),
+            predecessor=manifest.get("rerun_of"),
+            revision=revision,
+            previous_digest=publication.get("content_digest"),
+        )
+
+    def publish(self, experiment_id: str) -> dict[str, Any]:
+        from .adapters import CommonsAdapter
+
+        state = self._load(experiment_id)
+        if state.get("state") not in _TERMINAL:
+            raise ControlError("EXPERIMENT_NOT_TERMINAL", "only terminal experiments can be published")
+        publication = dict(state.get("publication") or {})
+        if publication.get("state") == "PUBLISHED":
+            return {"experiment": self.status(experiment_id), "publication": publication}
+        record = self._family_record(state)
+        record_identity = _identity(record)
+        publication.update(
+            state="PUBLISHING",
+            attempts=int(publication.get("attempts") or 0) + 1,
+            last_attempt_at=_iso(),
+            record_identity=record_identity,
+        )
+        self._mutate(experiment_id, lambda latest: latest.update(publication=publication))
+        try:
+            receipt = CommonsAdapter(self.config).publish_record(record)
+        except ControlError as exc:
+            error_code = exc.code
+            error_detail = exc.message
+
+            def retain_error(latest: dict[str, Any]) -> None:
+                latest["publication"].update(
+                    state="RETRY_PENDING",
+                    last_error={
+                        "code": error_code,
+                        "detail": error_detail,
+                        "observed_at": _iso(),
+                    },
+                )
+
+            self._mutate(experiment_id, retain_error)
+            raise
+        def retain_receipt(latest: dict[str, Any]) -> None:
+            needs_sync = bool(latest["publication"].pop("sync_requested", False))
+            latest["publication"].update(
+                state="SYNC_REQUIRED" if needs_sync else "PUBLISHED",
+                revision=int(record["metadata"]["revision"]),
+                content_digest=receipt.get("contentDigest"),
+                delivery_status=receipt.get("deliveryStatus"),
+                published_at=_iso(),
+                receipt=receipt,
+            )
+            latest["publication"].pop("last_error", None)
+
+        latest = self._mutate(experiment_id, retain_receipt)
+        return {"experiment": self.status(experiment_id), "publication": latest["publication"]}
 
     def _spawn(self, experiment_id: str) -> None:
         with self._lock:
@@ -1000,6 +1410,21 @@ class ExperimentManager:
                 turn["tools_offered"] = list(offered(turn["actor"]))
             except Exception:
                 turn["tools_offered"] = []
+        actor_reference = getattr(runtime, "actor_reference", None)
+        if callable(actor_reference) and "actor_reference" not in turn:
+            reference = validate_family_reference(
+                actor_reference(turn["actor"], prompt=prompt, session_identity=key)
+            )
+            turn["actor_reference"] = reference
+            known = {
+                item["reference"]["stableId"]
+                for item in state.get("producer_references") or []
+                if isinstance(item, Mapping) and isinstance(item.get("reference"), Mapping)
+            }
+            if reference["stableId"] not in known:
+                state.setdefault("producer_references", []).append(
+                    {"relation": "actor", "reference": reference, "attached_at": _iso()}
+                )
         work_id = runtime.submit(turn["actor"], prompt, key, messages=chat_messages)
         turn.update(
             state="SUBMITTED",
@@ -1081,14 +1506,42 @@ class ExperimentManager:
         turns_dir.mkdir(parents=True, exist_ok=True)
         output = turns_dir / f"turn-{int(turn['turn']):04d}-{turn['actor']['name']}.md"
         output.write_text(content + "\n", encoding="utf-8")
+        fabric_evidence = _fabric_evidence(payload)
         turn.update(
             state="COMPLETED",
             completed_at=_iso(),
             output_file=str(output.relative_to(directory)),
             output_sha256=hashlib.sha256(content.encode("utf-8")).hexdigest(),
             inference_stages=list(payload.get("inference_stages") or []),
-            fabric_evidence=_fabric_evidence(payload),
+            fabric_evidence=fabric_evidence,
         )
+        stable_id = fabric_evidence.get("record_identity") or fabric_evidence.get("receipt_identity")
+        if isinstance(stable_id, str) and stable_id:
+            reference: dict[str, Any] = {
+                "schema": FAMILY_REFERENCE_SCHEMA,
+                "producer": "mncs-fabric",
+                "recordKind": "ExecutionObservation",
+                "schemaVersion": "mncs-fabric.execution-observation.v0.1",
+                "stableId": stable_id,
+                "scope": {
+                    "worker": fabric_evidence.get("worker_identity"),
+                    "request": fabric_evidence.get("request_identity"),
+                    "job": fabric_evidence.get("job_identity"),
+                    "receipt": fabric_evidence.get("receipt_identity"),
+                    "bundle": fabric_evidence.get("bundle_identity"),
+                },
+            }
+            if stable_id.startswith("sha256:") and len(stable_id) == 71:
+                reference["contentDigest"] = stable_id
+            known = {
+                item["reference"]["stableId"]
+                for item in state.get("producer_references") or []
+                if isinstance(item, Mapping) and isinstance(item.get("reference"), Mapping)
+            }
+            if stable_id not in known:
+                state.setdefault("producer_references", []).append(
+                    {"relation": "execution", "reference": reference, "attached_at": _iso()}
+                )
         self._save(state)
 
     def _fail_turn(self, state: dict[str, Any], turn: dict[str, Any], reason: str) -> None:
@@ -1281,6 +1734,10 @@ class ExperimentManager:
             "spec_identity": state.get("spec_identity"),
             "claim_boundary": state.get("spec", {}).get("claim_boundary"),
             "authority": state.get("authority"),
+            "family_record_id": state.get("family_record_id"),
+            "concept_manifest": state.get("concept_manifest"),
+            "producer_references": state.get("producer_references", []),
+            "publication": state.get("publication"),
             "residency": state.get("residency"),
         }
 
@@ -1307,6 +1764,10 @@ class ExperimentManager:
             "reason": state.get("reason"),
             "spec_identity": state.get("spec_identity"),
             "claim_boundary": state.get("spec", {}).get("claim_boundary"),
+            "family_record_id": state.get("family_record_id"),
+            "concept_manifest": state.get("concept_manifest"),
+            "producer_references": state.get("producer_references", []),
+            "publication": state.get("publication"),
             "residency": state.get("residency"),
             "turns": turns,
         }

@@ -11,6 +11,10 @@ _EXPERIMENT_TOOLS = {
     "experiment_result",
     "experiment_list",
     "experiment_stop",
+    "experiment_attach_reference",
+    "experiment_publish",
+    "experiment_rerun",
+    "experiment_graph",
 }
 
 

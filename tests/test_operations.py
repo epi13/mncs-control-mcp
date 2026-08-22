@@ -160,6 +160,10 @@ def test_tool_surface_manifest_is_stable_and_detects_experiment_api() -> None:
             "experiment_result",
             "experiment_readiness",
             "experiment_list",
+            "experiment_attach_reference",
+            "experiment_publish",
+            "experiment_rerun",
+            "experiment_graph",
             "system_status",
         ]
     )
@@ -172,10 +176,14 @@ def test_tool_surface_manifest_is_stable_and_detects_experiment_api() -> None:
             "experiment_start",
             "experiment_stop",
             "experiment_status",
+            "experiment_graph",
+            "experiment_rerun",
+            "experiment_publish",
+            "experiment_attach_reference",
         ]
     )
     assert expected == reordered
-    assert expected["tool_count"] == 7
+    assert expected["tool_count"] == 11
     assert expected["tool_names_sha256"].startswith("sha256:")
     assert expected["experiment_tools_present"] is True
     assert tool_surface_manifest(["system_status"])["experiment_tools_present"] is False

@@ -13,6 +13,7 @@ import socket
 import sys
 import threading
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -581,7 +582,7 @@ class HarnessAdapter:
 
 
 class CommonsAdapter:
-    """Read-only Control facade over the persistent Commons consumer socket."""
+    """Bounded Control facade over separate Commons consumer/operator sockets."""
 
     MAX_TEXT_ARGUMENT = 4096
     MAX_CURSOR_BYTES = 64 * 1024
@@ -646,6 +647,7 @@ class CommonsAdapter:
                 "get",
                 "conversation",
                 "evidence",
+                "experiment",
                 "sync",
             }:
                 raise ControlError("COMMONS_OPERATION_DENIED", "Commons operation is not allowed")
@@ -750,6 +752,18 @@ class CommonsAdapter:
 
     def evidence(self, digest: str) -> dict[str, object]:
         return self._read("evidence", self._text(digest, "digest") or "")
+
+    def experiment(self, experiment_id: str) -> dict[str, object]:
+        return self._read("experiment", self._text(experiment_id, "experiment_id") or "")
+
+    def publish_record(self, record: Mapping[str, object]) -> dict[str, object]:
+        operator = self._operator()
+        try:
+            return self._bounded(operator.publish(dict(record)))
+        except Exception as exc:
+            raise ControlError("COMMONS_PUBLISH_FAILED", redact_text(str(exc))) from exc
+        finally:
+            operator.close()
 
     def sync(self, cursor: dict[str, object] | None = None, limit: int = 1000) -> dict[str, object]:
         if cursor is not None:
