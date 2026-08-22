@@ -4,9 +4,10 @@ import json
 import tempfile
 import time
 import unittest
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 from mncs_control_mcp.config import ControlConfig
 from mncs_control_mcp.errors import ControlError
@@ -14,6 +15,7 @@ from mncs_control_mcp.experiments import (
     STATE_SCHEMA,
     TURN_SCHEMA,
     ExperimentManager,
+    HarnessFabricRuntime,
     _identity,
     _iso,
     validate_spec,
@@ -23,6 +25,8 @@ from mncs_control_mcp.experiments import (
 class FakeRuntime:
     def __init__(self) -> None:
         self.submissions: list[tuple[dict[str, str], str, str]] = []
+        self.preparations: list[str] = []
+        self.releases: list[str] = []
         self.statuses: dict[str, str] = {"existing-work": "COMPLETED"}
         self.results: dict[str, dict[str, object]] = {
             "existing-work": {
@@ -30,6 +34,44 @@ class FakeRuntime:
                 "inference_stages": ["worker-started", "completed"],
             }
         }
+
+    def prepare(self, experiment_id, actors, prior_leases=()):
+        self.preparations.append(experiment_id)
+        prior = {
+            (item.get("worker_id"), item.get("model")): item for item in prior_leases
+        }
+        return [
+            {
+                "outcome": "PASS",
+                "code": "RESIDENCY_WARMED",
+                "experiment_id": experiment_id,
+                "worker_id": actor["worker"],
+                "model": actor["model"],
+                "provider": "ollama",
+                "loaded": True,
+                "managed": prior.get((actor["worker"], actor["model"]), {}).get(
+                    "managed", True
+                ),
+            }
+            for actor in actors
+        ]
+
+    def release(self, experiment_id, leases):
+        self.releases.append(experiment_id)
+        return [
+            {
+                "outcome": "PASS",
+                "code": "RESIDENCY_RELEASED",
+                "worker_id": lease["worker_id"],
+                "model": lease["model"],
+                "released": True,
+                "remaining_loaded_models": [],
+            }
+            for lease in leases
+        ]
+
+    def close(self):
+        return None
 
     def submit(self, actor, prompt: str, idempotency_key: str, *, messages=None) -> str:
         work_id = f"work-{len(self.submissions) + 1}"
@@ -111,6 +153,8 @@ class ExperimentManagerTests(unittest.TestCase):
         self.assertEqual(status["recorded_state"], "COMPLETED")
         self.assertEqual(status["successful_turns"], 2)
         self.assertEqual(len(runtime.submissions), 2)
+        self.assertEqual(runtime.preparations, [experiment_id])
+        self.assertEqual(runtime.releases, [experiment_id])
         self.assertEqual(runtime.submissions[0][0]["worker"], "worker-a")
         self.assertEqual(runtime.submissions[1][0]["worker"], "worker-b")
         self.assertIn("answer-1", runtime.submissions[1][1])
@@ -123,6 +167,8 @@ class ExperimentManagerTests(unittest.TestCase):
         self.assertEqual(result["turns"][1]["content"], "answer-2")
         self.assertEqual(result["turns"][0]["fabric_evidence"]["worker_identity"], "worker-a")
         self.assertTrue(result["turns"][0]["fabric_evidence"]["receipt_identity"].startswith("sha256:"))
+        self.assertEqual(result["residency"]["status"], "PREPARED")
+        self.assertEqual(result["residency"]["teardown"]["status"], "RELEASED")
 
     def test_resume_existing_detached_work_without_resubmitting(self) -> None:
         runtime = FakeRuntime()
@@ -186,6 +232,121 @@ class ExperimentManagerTests(unittest.TestCase):
     def test_invalid_spec_fails_closed(self) -> None:
         with self.assertRaises(ControlError):
             validate_spec({"goal": "x", "actors": [], "stages": ["x"]})
+
+    def test_residency_prepare_exception_fails_experiment_without_submission(self) -> None:
+        class FailingPrepareRuntime(FakeRuntime):
+            def prepare(self, experiment_id, actors, prior_leases=()):
+                del experiment_id, actors, prior_leases
+                raise RuntimeError("provider observation unavailable")
+
+        runtime = FailingPrepareRuntime()
+        manager = ExperimentManager(
+            self.config, runtime_factory=lambda _config: runtime, resume=False
+        )
+        accepted = manager.start({**self.spec, "max_turns": 1})
+        result = manager.result(str(accepted["experiment_id"]))
+        deadline = time.monotonic() + 4
+        while result["state"] not in {"COMPLETED", "FAILED", "STOPPED"}:
+            if time.monotonic() >= deadline:
+                raise AssertionError("experiment did not fail after residency preparation")
+            time.sleep(0.02)
+            result = manager.result(str(accepted["experiment_id"]))
+        self.assertEqual(result["state"], "FAILED")
+        self.assertEqual(result["residency"]["leases"][0]["code"], "RESIDENCY_PREPARE_FAILED")
+        self.assertEqual(runtime.submissions, [])
+
+    def test_release_failure_is_durable_degraded_evidence(self) -> None:
+        class FailingReleaseRuntime(FakeRuntime):
+            def release(self, experiment_id, leases):
+                del experiment_id, leases
+                raise RuntimeError("provider release timed out")
+
+        runtime = FailingReleaseRuntime()
+        manager = ExperimentManager(
+            self.config, runtime_factory=lambda _config: runtime, resume=False
+        )
+        accepted = manager.start({**self.spec, "max_turns": 1})
+        experiment_id = str(accepted["experiment_id"])
+        self.wait_terminal(manager, experiment_id)
+        deadline = time.monotonic() + 4
+        while time.monotonic() < deadline:
+            result = manager.result(experiment_id)
+            teardown = (result.get("residency") or {}).get("teardown") or {}
+            if teardown.get("status") == "DEGRADED":
+                break
+            time.sleep(0.02)
+        else:
+            raise AssertionError("release failure was not persisted")
+        self.assertEqual(teardown["results"][0]["code"], "RESIDENCY_TEARDOWN_FAILED")
+
+    def test_harness_policy_can_retain_residency_at_teardown(self) -> None:
+        runtime = FakeRuntime()
+        runtime.release_on_experiment_end = False
+        manager = ExperimentManager(
+            self.config, runtime_factory=lambda _config: runtime, resume=False
+        )
+        accepted = manager.start({**self.spec, "max_turns": 1})
+        experiment_id = str(accepted["experiment_id"])
+        self.wait_terminal(manager, experiment_id)
+        deadline = time.monotonic() + 4
+        while time.monotonic() < deadline:
+            teardown = (
+                (manager.result(experiment_id).get("residency") or {}).get("teardown")
+                or {}
+            )
+            if teardown.get("status") == "RETAINED":
+                break
+            time.sleep(0.02)
+        else:
+            raise AssertionError("Harness retain policy was not persisted")
+        self.assertEqual(runtime.releases, [])
+
+    def test_terminal_state_with_incomplete_teardown_is_recovered(self) -> None:
+        runtime = FakeRuntime()
+        manager = ExperimentManager(
+            self.config, runtime_factory=lambda _config: runtime, resume=False
+        )
+        experiment_id = "exp-" + "2" * 32
+        directory = manager.root / experiment_id
+        directory.mkdir(mode=0o700)
+        spec = validate_spec({**self.spec, "max_turns": 1})
+        state = {
+            "schema": STATE_SCHEMA,
+            "experiment_id": experiment_id,
+            "state": "COMPLETED",
+            "accepted_at": _iso(),
+            "deadline_at": _iso(datetime.now(UTC) + timedelta(seconds=30)),
+            "spec": spec,
+            "spec_identity": _identity(spec),
+            "turns": [],
+            "stop_requested": False,
+            "residency": {
+                "status": "PREPARED",
+                "policy_mode": "experiment-pinned",
+                "leases": [{
+                    "outcome": "PASS",
+                    "worker_id": "worker-a",
+                    "model": "model-a",
+                    "managed": True,
+                }],
+            },
+        }
+        manager._atomic_json(directory / "state.json", state)
+        resumed = ExperimentManager(
+            self.config,
+            runtime_factory=lambda _config: runtime,
+            resume=True,
+            resume_delay_seconds=0,
+        )
+        deadline = time.monotonic() + 4
+        while time.monotonic() < deadline:
+            teardown = (resumed.result(experiment_id).get("residency") or {}).get("teardown") or {}
+            if teardown.get("status") == "RELEASED":
+                break
+            time.sleep(0.02)
+        else:
+            raise AssertionError("terminal residency teardown was not recovered")
+        self.assertEqual(runtime.releases, [experiment_id])
 
     def test_actor_role_and_tool_followup_are_retained(self) -> None:
         spec = validate_spec(
@@ -287,6 +448,47 @@ class ExperimentManagerTests(unittest.TestCase):
         self.assertEqual(result["turns"][0]["tools_offered"], ["read_file"])
         self.assertEqual(result["turns"][0]["tool_executions"][0]["name"], "read_file")
         self.assertEqual(result["turns"][0]["tool_executions"][0]["execution_target"], "controller")
+
+    def test_detached_and_tool_followup_resolution_reinforces_experiment_pin(self) -> None:
+        @dataclass(frozen=True)
+        class Model:
+            name: str
+            keep_alive: object
+
+        class RoutingOverride:
+            @staticmethod
+            def from_values(**values):
+                return values
+
+        captured: list[Model] = []
+
+        class Session:
+            def resolve_model(self, role, model, override):
+                del role, override
+                captured.append(model)
+                return model, SimpleNamespace(
+                    available=True,
+                    worker_id="worker-a",
+                    reason="exact",
+                )
+
+        runtime = object.__new__(HarnessFabricRuntime)
+        runtime._config = SimpleNamespace(
+            models={"coder": Model("default", 0)},
+            model_residency=SimpleNamespace(experiment_keep_alive=-1),
+        )
+        runtime._routing_override = RoutingOverride
+        runtime._session = Session()
+        actor = {
+            "name": "builder",
+            "worker": "worker-a",
+            "model": "qwen3:8b",
+            "role": "coder",
+        }
+        runtime._resolved(actor)
+        runtime._resolved(actor)
+        self.assertEqual([model.keep_alive for model in captured], [-1, -1])
+        self.assertEqual([model.name for model in captured], ["qwen3:8b", "qwen3:8b"])
 
     def test_tool_step_bound_without_final_text_is_retained_evidence(self) -> None:
         class OnlyToolsRuntime(FakeRuntime):
