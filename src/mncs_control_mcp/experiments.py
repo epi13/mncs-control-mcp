@@ -145,6 +145,9 @@ def validate_spec(value: object) -> dict[str, Any]:
         raise ControlError("INVALID_INPUT", "max_tool_steps must be between 0 and 32")
     initial_handoff = str(value.get("initial_handoff") or "No prior handoff is available.")
     instructions = str(value.get("instructions") or "").strip()
+    residency = str(value.get("residency") or "pinned")
+    if residency not in {"pinned", "request"}:
+        raise ControlError("INVALID_INPUT", "experiment residency must be pinned or request")
     if len(initial_handoff) > max_handoff_chars:
         raise ControlError("INVALID_INPUT", "initial_handoff exceeds max_handoff_chars")
     if len(instructions) > 20_000 or "\x00" in instructions:
@@ -195,13 +198,17 @@ def validate_spec(value: object) -> dict[str, Any]:
         "max_turn_wait_seconds": max_turn_wait_seconds,
         "max_handoff_chars": max_handoff_chars,
         "max_tool_steps": max_tool_steps,
+        "residency": residency,
+        "release_models_on_end": bool(value.get("release_models_on_end", True)),
         "initial_handoff": initial_handoff,
         "instructions": instructions,
         "stop_on_turn_failure": bool(value.get("stop_on_turn_failure", True)),
         "claim_boundary": (
             "Control coordinates durable handoffs; Harness resolves exact model placement; "
             "Fabric owns detached execution and receipts. Execution success does not establish "
-            "model correctness, scientific validity, independence, or Commons acceptance."
+            "model correctness, scientific validity, independence, or Commons acceptance. "
+            "Harness residency concerns worker-local weights only; Control remains authoritative "
+            "for messages and experiment context."
         ),
     }
 
@@ -278,6 +285,17 @@ def validate_family_reference(value: object) -> dict[str, Any]:
 
 
 class ExperimentRuntime(Protocol):
+    def prepare(
+        self,
+        experiment_id: str,
+        actors: list[Mapping[str, str]],
+        prior_leases: tuple[dict[str, Any], ...] = (),
+    ) -> list[dict[str, Any]]: ...
+    def release(
+        self,
+        experiment_id: str,
+        leases: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]: ...
     def submit(
         self,
         actor: Mapping[str, str],
@@ -316,11 +334,13 @@ class HarnessFabricRuntime:
             self._tool_execution_type = models_mod.ToolExecution
             tools_mod = importlib.import_module("epi13_local_harness.tools")
             fabric_tools_mod = importlib.import_module("epi13_local_harness.fabric_target_tools")
+            residency_mod = importlib.import_module("epi13_local_harness.residency")
             self._tool_registry_type = tools_mod.ToolRegistry
             self._fabric_tool_executor_type = fabric_tools_mod.FabricTargetToolExecutor
             self._actor_provenance_builder = importlib.import_module(
                 "epi13_local_harness.actor_provenance"
             ).build_actor_provenance
+            self._residency_manager_type = residency_mod.ResidencyManager
         except Exception as exc:
             raise ControlError("HARNESS_UNAVAILABLE", redact_text(str(exc))) from exc
         finally:
@@ -339,6 +359,46 @@ class HarnessFabricRuntime:
             self._session.initialize(refresh_inventory=False)
         except Exception as exc:
             raise ControlError("HARNESS_UNAVAILABLE", redact_text(str(exc))) from exc
+
+    def prepare(
+        self,
+        experiment_id: str,
+        actors: list[Mapping[str, str]],
+        prior_leases: tuple[dict[str, Any], ...] = (),
+    ) -> list[dict[str, Any]]:
+        assignments: list[dict[str, str]] = []
+        for actor in actors:
+            role = self._role_name(actor)
+            assignments.append(
+                {
+                    "worker_id": str(actor["worker"]),
+                    "model": str(actor["model"]),
+                    "role": role,
+                }
+            )
+        manager = self._residency_manager_type(self._config, self._session)
+        return list(
+            manager.prepare_experiment(
+                experiment_id,
+                assignments,
+                prior_leases=prior_leases,
+            )
+        )
+
+    def release(
+        self,
+        experiment_id: str,
+        leases: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        manager = self._residency_manager_type(self._config, self._session)
+        return list(manager.release_experiment(experiment_id, leases))
+
+    def close(self) -> None:
+        self._session.close()
+
+    @property
+    def release_on_experiment_end(self) -> bool:
+        return bool(self._config.model_residency.release_on_experiment_end)
 
     def _role_name(self, actor: Mapping[str, str]) -> str:
         requested = str(actor.get("role") or "")
@@ -362,7 +422,11 @@ class HarnessFabricRuntime:
         )
         model, selection = self._session.resolve_model(
             role,
-            replace(base, name=str(actor["model"])),
+            replace(
+                base,
+                name=str(actor["model"]),
+                keep_alive=self._config.model_residency.experiment_keep_alive,
+            ),
             override,
         )
         if selection is None or not selection.available or selection.worker_id != actor["worker"]:
@@ -771,6 +835,240 @@ class ExperimentManager:
             fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
         return state
 
+    def _active_residency_leases(
+        self,
+        *,
+        exclude_experiment_id: str,
+    ) -> list[dict[str, Any]]:
+        leases: list[dict[str, Any]] = []
+        for path in sorted(self.root.glob("exp-*/state.json")):
+            try:
+                value = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if (
+                not isinstance(value, dict)
+                or value.get("experiment_id") == exclude_experiment_id
+                or value.get("state") in _TERMINAL
+            ):
+                continue
+            residency = value.get("residency")
+            if not isinstance(residency, Mapping):
+                continue
+            for item in residency.get("leases") or []:
+                if isinstance(item, Mapping) and item.get("outcome") == "PASS":
+                    leases.append(dict(item))
+        return leases
+
+    def _prepare_residency(
+        self,
+        runtime: ExperimentRuntime,
+        state: dict[str, Any],
+    ) -> bool:
+        spec = state["spec"]
+        if spec.get("residency") != "pinned":
+            state["residency"] = {
+                "status": "REQUEST_LIFETIME",
+                "policy_mode": "request",
+                "leases": [],
+                "detail": "per-request provider keep-alive remains in effect",
+            }
+            self._save(state)
+            return True
+        current = state.get("residency")
+        if isinstance(current, Mapping) and current.get("status") == "PREPARED":
+            prior_leases = tuple(
+                dict(item) for item in current.get("leases") or [] if isinstance(item, Mapping)
+            )
+        else:
+            prior_leases = ()
+        lock_path = self.root / "residency.lock"
+        lock_path.touch(mode=0o600, exist_ok=True)
+        os.chmod(lock_path, 0o600)
+        with lock_path.open("r+b") as stream:
+            fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
+            active = self._active_residency_leases(
+                exclude_experiment_id=str(state["experiment_id"])
+            )
+            prepare = getattr(runtime, "prepare", None)
+            if not callable(prepare):
+                leases = [{
+                    "outcome": "FAIL",
+                    "code": "RESIDENCY_RUNTIME_UNSUPPORTED",
+                    "detail": "runtime does not expose experiment residency preparation",
+                }]
+            else:
+                try:
+                    leases = list(
+                        prepare(
+                            str(state["experiment_id"]),
+                            list(spec["actors"]),
+                            prior_leases,
+                        )
+                    )
+                except Exception as exc:
+                    leases = [{
+                        "outcome": "FAIL",
+                        "code": "RESIDENCY_PREPARE_FAILED",
+                        "detail": redact_text(str(exc))[:4000],
+                    }]
+            active_managed = {
+                (str(item.get("worker_id")), str(item.get("model")))
+                for item in active
+                if item.get("managed")
+            }
+            for lease in leases:
+                key = (str(lease.get("worker_id")), str(lease.get("model")))
+                if lease.get("outcome") == "PASS" and key in active_managed:
+                    lease["managed"] = True
+                    lease["shared_with_active_experiment"] = True
+            fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+        success = bool(leases) and all(item.get("outcome") == "PASS" for item in leases)
+        state["residency"] = {
+            "status": "PREPARED" if success else "FAILED",
+            "policy_mode": "experiment-pinned",
+            "prepared_at": _iso(),
+            "leases": leases,
+            "conversation_state_authority": "mncs-control-mcp",
+            "weights_state_authority": "worker-local-provider-observation",
+        }
+        self._save(state)
+        return success
+
+    @staticmethod
+    def _needs_residency_teardown(state: Mapping[str, Any]) -> bool:
+        residency = state.get("residency")
+        if not isinstance(residency, Mapping):
+            return False
+        if residency.get("policy_mode") != "experiment-pinned":
+            return False
+        teardown = residency.get("teardown")
+        return not (
+            isinstance(teardown, Mapping)
+            and teardown.get("status") in {"RELEASED", "RETAINED"}
+        )
+
+    def _record_teardown_failure(
+        self,
+        state: dict[str, Any],
+        exc: Exception,
+    ) -> None:
+        residency = state.get("residency")
+        if not isinstance(residency, Mapping):
+            return
+        state["residency"] = {
+            **dict(residency),
+            "teardown": {
+                "status": "DEGRADED",
+                "completed_at": _iso(),
+                "results": [{
+                    "outcome": "UNKNOWN",
+                    "code": "RESIDENCY_TEARDOWN_FAILED",
+                    "released": False,
+                    "detail": redact_text(str(exc))[:4000],
+                }],
+            },
+        }
+        self._save(state)
+
+    def _attempt_terminal_teardown(self, experiment_id: str) -> None:
+        state = self._load(experiment_id)
+        if state.get("state") not in _TERMINAL or not self._needs_residency_teardown(state):
+            return
+        runtime = self._runtime_factory(self.config)
+        try:
+            try:
+                self._teardown_residency(runtime, state)
+            except Exception as exc:
+                self._record_teardown_failure(state, exc)
+        finally:
+            close = getattr(runtime, "close", None)
+            if callable(close):
+                close()
+
+    def _teardown_residency(
+        self,
+        runtime: ExperimentRuntime,
+        state: dict[str, Any],
+    ) -> None:
+        residency = state.get("residency")
+        if not isinstance(residency, Mapping) or residency.get("policy_mode") != "experiment-pinned":
+            return
+        teardown = residency.get("teardown")
+        if isinstance(teardown, Mapping) and teardown.get("status") in {"RELEASED", "RETAINED"}:
+            return
+        leases = [
+            dict(item) for item in residency.get("leases") or []
+            if isinstance(item, Mapping) and item.get("outcome") == "PASS"
+        ]
+        runtime_release_policy = getattr(runtime, "release_on_experiment_end", True)
+        if callable(runtime_release_policy):
+            runtime_release_policy = runtime_release_policy()
+        retain_reason = None
+        if not state["spec"].get("release_models_on_end", True):
+            retain_reason = "experiment policy requested retained residency"
+        elif runtime_release_policy is False:
+            retain_reason = "Harness policy disabled automatic experiment teardown release"
+        if retain_reason is not None:
+            state["residency"] = {
+                **dict(residency),
+                "teardown": {
+                    "status": "RETAINED",
+                    "completed_at": _iso(),
+                    "detail": retain_reason,
+                },
+            }
+            self._save(state)
+            return
+        lock_path = self.root / "residency.lock"
+        lock_path.touch(mode=0o600, exist_ok=True)
+        os.chmod(lock_path, 0o600)
+        with lock_path.open("r+b") as stream:
+            fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
+            active = self._active_residency_leases(
+                exclude_experiment_id=str(state["experiment_id"])
+            )
+            active_keys = {
+                (str(item.get("worker_id")), str(item.get("model"))) for item in active
+            }
+            releasable: list[dict[str, Any]] = []
+            results: list[dict[str, Any]] = []
+            for lease in leases:
+                key = (str(lease.get("worker_id")), str(lease.get("model")))
+                if key in active_keys:
+                    results.append({
+                        "outcome": "PASS",
+                        "code": "RESIDENCY_RETAINED_SHARED",
+                        "worker_id": key[0],
+                        "model": key[1],
+                        "released": False,
+                        "detail": "another active experiment still references this residency",
+                    })
+                else:
+                    releasable.append(lease)
+            release = getattr(runtime, "release", None)
+            if releasable and callable(release):
+                results.extend(release(str(state["experiment_id"]), releasable))
+            elif releasable:
+                results.extend({
+                    "outcome": "UNKNOWN",
+                    "code": "RESIDENCY_RELEASE_UNSUPPORTED",
+                    "worker_id": item.get("worker_id"),
+                    "model": item.get("model"),
+                    "released": False,
+                } for item in releasable)
+            fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+        complete = all(item.get("outcome") == "PASS" for item in results)
+        state["residency"] = {
+            **dict(residency),
+            "teardown": {
+                "status": "RELEASED" if complete else "DEGRADED",
+                "completed_at": _iso(),
+                "results": results,
+            },
+        }
+        self._save(state)
+
     def start(self, raw_spec: object, *, rerun_of: str | None = None) -> dict[str, Any]:
         spec = validate_spec(raw_spec)
         if rerun_of is not None:
@@ -799,6 +1097,8 @@ class ExperimentManager:
                 "coordinator": "mncs-control-mcp",
                 "routing": "mncs-harness",
                 "execution": "persistent-fabric-detached",
+                "model_residency": "mncs-harness-over-fabric-provider-observation",
+                "conversation_state": "mncs-control-mcp",
                 "commons": "none",
             },
         }
@@ -1007,10 +1307,16 @@ class ExperimentManager:
                 value = json.loads(path.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError):
                 continue
-            if isinstance(value, dict) and value.get("schema") == STATE_SCHEMA and value.get("state") not in _TERMINAL:
-                experiment_id = value.get("experiment_id")
-                if isinstance(experiment_id, str):
-                    self._spawn(experiment_id)
+            if not isinstance(value, dict) or value.get("schema") != STATE_SCHEMA:
+                continue
+            should_resume = value.get("state") not in _TERMINAL
+            should_teardown = (
+                value.get("state") in _TERMINAL
+                and self._needs_residency_teardown(value)
+            )
+            experiment_id = value.get("experiment_id")
+            if (should_resume or should_teardown) and isinstance(experiment_id, str):
+                self._spawn(experiment_id)
 
     def _thread_main(self, experiment_id: str) -> None:
         directory = self._directory(experiment_id)
@@ -1028,6 +1334,7 @@ class ExperimentManager:
                 try:
                     state = self._load(experiment_id)
                     if state.get("state") in _TERMINAL:
+                        self._attempt_terminal_teardown(experiment_id)
                         return
                     self._run(experiment_id)
                     return
@@ -1295,6 +1602,32 @@ class ExperimentManager:
 
     def _run(self, experiment_id: str) -> None:
         runtime = self._runtime_factory(self.config)
+        try:
+            state = self._load(experiment_id)
+            if not self._prepare_residency(runtime, state):
+                state = self._load(experiment_id)
+                state.update(
+                    state="FAILED",
+                    completed_at=_iso(),
+                    reason="experiment model residency could not be established",
+                )
+                self._save(state)
+                return
+            self._run_active(experiment_id, runtime)
+        finally:
+            try:
+                latest = self._load(experiment_id)
+                if latest.get("state") in _TERMINAL:
+                    try:
+                        self._teardown_residency(runtime, latest)
+                    except Exception as exc:
+                        self._record_teardown_failure(latest, exc)
+            finally:
+                close = getattr(runtime, "close", None)
+                if callable(close):
+                    close()
+
+    def _run_active(self, experiment_id: str, runtime: ExperimentRuntime) -> None:
         state = self._load(experiment_id)
         state["state"] = "RUNNING"
         state.setdefault("started_at", _iso())
@@ -1370,7 +1703,17 @@ class ExperimentManager:
                     else:
                         fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
         effective = str(state.get("state") or "UNKNOWN")
-        if effective not in _TERMINAL and not coordinator_live:
+        residency = state.get("residency")
+        teardown = residency.get("teardown") if isinstance(residency, Mapping) else None
+        teardown_status = teardown.get("status") if isinstance(teardown, Mapping) else None
+        finalization_pending = (
+            effective in _TERMINAL
+            and self._needs_residency_teardown(state)
+            and teardown_status != "DEGRADED"
+        )
+        if finalization_pending:
+            effective = "FINALIZING" if coordinator_live else "RECOVERY_PENDING"
+        elif effective not in _TERMINAL and not coordinator_live:
             effective = "RUNNING_EXTERNAL" if coordinator_external else "RECOVERY_PENDING"
         return {
             "schema": STATE_SCHEMA,
@@ -1395,6 +1738,7 @@ class ExperimentManager:
             "concept_manifest": state.get("concept_manifest"),
             "producer_references": state.get("producer_references", []),
             "publication": state.get("publication"),
+            "residency": state.get("residency"),
         }
 
     def result(self, experiment_id: str) -> dict[str, Any]:
@@ -1424,6 +1768,7 @@ class ExperimentManager:
             "concept_manifest": state.get("concept_manifest"),
             "producer_references": state.get("producer_references", []),
             "publication": state.get("publication"),
+            "residency": state.get("residency"),
             "turns": turns,
         }
 

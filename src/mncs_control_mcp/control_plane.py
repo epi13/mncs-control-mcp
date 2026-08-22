@@ -33,6 +33,7 @@ class ControlPlaneService:
         tests: TestAdapter,
         integrations: IntegrationBundle,
         processes: ProcessManager,
+        journal_context: object | None = None,
     ) -> None:
         self.config = config
         self.policy = policy
@@ -42,6 +43,7 @@ class ControlPlaneService:
         self.tests = tests
         self.integrations = integrations
         self.processes = processes
+        self.journal_context = journal_context
 
     def capabilities(self) -> dict[str, object]:
         fabric = self.integrations.fabric.status()
@@ -206,6 +208,20 @@ class ControlPlaneService:
                 "reads use the consumer socket; only bounded terminal Concept Experiment publication uses the operator socket",
                 authority="controller-local Commons owns records and its separate operator surface",
             ),
+            "journal_context": {
+                "available": self.journal_context is not None,
+                "status": "CONFIGURED" if self.journal_context is not None else "UNAVAILABLE",
+                "supported_operations": ["status", "bounded interval collection", "immutable bundle pagination"],
+                "limitations": [
+                    "projection only; Atlas owns journal semantics",
+                    "local-only and uncommitted work is provisional evidence",
+                    "configured project allow-list and byte/item limits apply",
+                ],
+                "security_boundary": "authorized workspace plus private mode-0600 bundle state",
+                "mutation": False,
+                "network_required": False,
+                "local": True,
+            },
             "models": {
                 "available": True,
                 "version": None,
@@ -359,12 +375,18 @@ class ControlPlaneService:
         }
 
     def developer_readiness(self, repository: str | None = None) -> dict[str, object]:
-        return developer_readiness_payload(
+        result = developer_readiness_payload(
             self.config,
             sandbox=self.sandbox,
             integrations=self.integrations,
             repository=repository,
         )
+        if self.journal_context is not None:
+            try:
+                result["journal_context"] = self.journal_context.status()  # type: ignore[union-attr]
+            except Exception as exc:
+                result["journal_context"] = {"overall": "UNKNOWN", "diagnostic": redact_text(str(exc))[:300]}
+        return result
 
     def experiment_readiness(self, profile: str = "base-inference") -> dict[str, object]:
         return evaluate_experiment_readiness(

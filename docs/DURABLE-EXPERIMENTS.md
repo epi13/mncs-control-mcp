@@ -13,7 +13,7 @@ The authority split is explicit:
 - **MNCS Fabric** owns every detached execution, worker placement evidence, execution record, and receipt.
 - **MNCS Commons** grants no execution authority. Control can publish only terminal Concept Experiment revisions through the separate operator socket; a successful ingestion receipt remains delivery, not acceptance.
 
-The coordinator runs in the Control MCP service process, not inside the bwrap terminal sandbox. State is written beneath the existing private Control state directory at `~/.local/state/mncs-control-mcp/experiments/`. On Control server startup, non-terminal experiments are discovered and resumed.
+The coordinator runs in the Control MCP service process, not inside the bwrap terminal sandbox. State is written beneath the existing private Control state directory at `~/.local/state/mncs-control-mcp/experiments/`. On Control server startup, non-terminal experiments are discovered and resumed. Terminal experiments with incomplete managed-model teardown are also resumed for cleanup.
 
 A resumed turn never blindly submits again. If durable state already contains a Fabric `work_id`, Control reconnects to that work. If the process stopped after creating a `PREPARING` turn but before persisting the returned work identity, the deterministic idempotency key `<experiment-id>:turn:<n>` causes Fabric detached submission to reconcile the duplicate request to the same work identity.
 
@@ -37,11 +37,41 @@ A resumed turn never blindly submits again. If durable state already contains a 
   "max_turns": 48,
   "max_turn_wait_seconds": 900,
   "max_tool_steps": 8,
+  "residency": "pinned",
+  "release_models_on_end": true,
   "stop_on_turn_failure": true
 }
 ```
 
-`experiment_start` first requires the Harness-owned `multi-agent` readiness profile to be `READY`. It then returns immediately after Control has persisted the experiment and started its coordinator. The initiating ChatGPT/MCP client may disconnect.
+`experiment_start` first requires the Harness-owned `sustained-experiment` readiness profile to be `READY`. It then returns immediately after Control has persisted the experiment and started its coordinator. The initiating ChatGPT/MCP client may disconnect.
+
+## Model-weight lifecycle
+
+The default `residency: "pinned"` prepares every distinct exact worker/model pair
+before the first turn. Harness verifies current provider inventory and resource
+facts, warms or reuses the weights, and returns a durable lease. Every detached
+turn and tool-loop follow-up uses the experiment keep-alive, so request defaults
+cannot accidentally unload the model between steps.
+
+When the recorded experiment becomes `COMPLETED`, `FAILED`, or `STOPPED`, Control asks
+Harness to release each managed lease. A model already warm before preparation is
+unmanaged and is not unloaded. A model shared with another active experiment is
+retained until the last reference ends. Cleanup is idempotent and is recovered
+after process restart; provider uncertainty is persisted as `DEGRADED`, never as
+a successful release.
+
+While teardown evidence is still being recorded, `experiment_status` reports the
+effective state as `FINALIZING` (or `RECOVERY_PENDING` when no coordinator owns
+cleanup yet). A terminal effective state therefore includes durable teardown
+evidence instead of racing the provider release operation.
+
+`residency: "request"` opts out and retains ordinary per-request provider behavior.
+`release_models_on_end: false` deliberately retains prepared residency and records
+`RETAINED`. Both choices are visible in experiment status/result evidence.
+
+Residency concerns worker-local model weights only. Control remains authoritative
+for messages, tool outputs, turn ordering, and handoffs. Warm weights do not imply
+conversation memory, semantic correctness, or experiment validity.
 
 `experiment_status` reports the durable state and current detached Fabric turn. `experiment_result` returns retained turn outputs and the Fabric evidence references captured for each completed turn. `experiment_list` is bounded to the most recent 100 experiment records.
 
