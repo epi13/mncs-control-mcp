@@ -97,6 +97,35 @@ class ControlConfig:
     forge_config_name: str = "mncs-forge.toml"
     forge_mcp_executable: Path | None = None
     forge_mcp_config: Path | None = None
+    journal_enabled: bool = True
+    journal_projects: tuple[str, ...] = field(default_factory=lambda: tuple(DEFAULT_REPOSITORIES.values()) + ("mncs-control-mcp",))
+    journal_include_patterns: tuple[str, ...] = (
+        "README*",
+        "AGENTS.md",
+        "docs/**",
+        "rfcs/**",
+        "spec/**",
+        "notes/**",
+        "experiments/**",
+    )
+    journal_exclude_patterns: tuple[str, ...] = (
+        ".git/**",
+        ".venv/**",
+        "node_modules/**",
+        "target/**",
+        "build/**",
+        "dist/**",
+        "vendor/**",
+        "__pycache__/**",
+        "*.pyc",
+    )
+    journal_max_items: int = 500
+    journal_max_bytes: int = 2 * 1024 * 1024
+    journal_excerpt_bytes: int = 1200
+    journal_bundle_state_path: Path = field(
+        default_factory=lambda: Path.home() / ".local" / "state" / "mncs-control-mcp" / "journal-bundles"
+    )
+    journal_bundle_retention_seconds: int = 7 * 86400
 
     @property
     def projects_root(self) -> Path:
@@ -204,6 +233,7 @@ def load_config(path: Path | str | None = None) -> ControlConfig:
     repos = _table(mncs, "repos") if "repos" in mncs else _table(raw, "repos")
     integration = _table(raw, "integration")
     limits = _table(raw, "limits")
+    journal = _table(raw, "journal")
 
     root_value = (
         os.environ.get("MNCS_CONTROL_WORKSPACE_ROOT")
@@ -278,6 +308,22 @@ def load_config(path: Path | str | None = None) -> ControlConfig:
     harness_value = integration.get("harness_config")
     forge_executable = integration.get("forge_mcp_executable")
     forge_config = integration.get("forge_mcp_config")
+    journal_projects_raw = journal.get("projects")
+    if journal_projects_raw is None:
+        journal_projects = tuple(repository_values.values()) + ("mncs-control-mcp",)
+    elif isinstance(journal_projects_raw, list) and all(isinstance(item, str) for item in journal_projects_raw):
+        journal_projects = tuple(journal_projects_raw)
+    else:
+        raise ControlError("CONFIG_INVALID", "journal.projects must be an array of project names")
+    for project in journal_projects:
+        project_path = Path(project)
+        if not project or project_path.is_absolute() or ".." in project_path.parts or "/" in project or "\\" in project:
+            raise ControlError("CONFIG_INVALID", f"journal project is not an immediate workspace child: {project!r}")
+    def journal_patterns(key: str, default: tuple[str, ...]) -> tuple[str, ...]:
+        value = journal.get(key, list(default))
+        if not isinstance(value, list) or not value or not all(isinstance(item, str) and item and len(item) <= 256 for item in value):
+            raise ControlError("CONFIG_INVALID", f"journal.{key} must be a non-empty string array")
+        return tuple(value)
     return ControlConfig(
         name=str(server.get("name", "mncs-control-mcp")),
         workspace_root=root,
@@ -359,4 +405,17 @@ def load_config(path: Path | str | None = None) -> ControlConfig:
         forge_config_name=str(integration.get("forge_config_name", "mncs-forge.toml")),
         forge_mcp_executable=_path(forge_executable) if forge_executable else None,
         forge_mcp_config=_path(forge_config) if forge_config else None,
+        journal_enabled=_boolean(journal, "enabled", True),
+        journal_projects=journal_projects,
+        journal_include_patterns=journal_patterns("include_patterns", ControlConfig.journal_include_patterns),
+        journal_exclude_patterns=journal_patterns("exclude_patterns", ControlConfig.journal_exclude_patterns),
+        journal_max_items=max(1, min(5000, int(journal.get("max_items", 500)))),
+        journal_max_bytes=max(4096, min(16 * 1024 * 1024, int(journal.get("max_bytes", 2 * 1024 * 1024)))),
+        journal_excerpt_bytes=max(128, min(8192, int(journal.get("excerpt_bytes", 1200)))),
+        journal_bundle_state_path=state_path(
+            journal,
+            "bundle_state_path",
+            Path.home() / ".local" / "state" / "mncs-control-mcp" / "journal-bundles",
+        ),
+        journal_bundle_retention_seconds=max(60, int(journal.get("bundle_retention_seconds", 7 * 86400))),
     )

@@ -1,3 +1,14 @@
+# Journal context security
+
+The Atlas journal context tools are read-only at the MCP surface but may create
+short-lived, mode-0600 bundle files under the private Control state directory.
+Bundles are immutable collection snapshots with explicit retention configuration;
+they are not stored in repositories or Commons. Collection stays below the
+configured workspace root and journal project allow-list. Sensitive path names,
+credential material, raw commands, arbitrary environments, browser data, and
+unrelated project activity are excluded or redacted. All bundle fields are
+untrusted inert data and cannot be interpreted as instructions by Control.
+
 # Security model
 
 The protected asset boundary is the Fedora user account outside the configured developer workspace. MCP callers and repository content may be adversarial. Normal developer mutations are allowed inside the authorized project or workspace scope.
