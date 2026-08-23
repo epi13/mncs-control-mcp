@@ -1535,12 +1535,14 @@ class FabricAdapter:
                 }
             )
 
-            # Control consumes Fabric's trusted capability evidence; it never
-            # manufactures it.  Admission requires a fresh worker-observed or
-            # operator-asserted observation (Fabric clamps consumer-role
-            # ingestion to consumer-declared and ignores such observations for
-            # target admission), so provisioning capability truth is an
-            # operator/Harness duty that happens outside this request path.
+            # Control consumes Fabric decisions and never manufactures worker
+            # capability evidence.  Fabric clamps consumer-role ingestion to
+            # consumer-declared and excludes such observations from target
+            # admission, so provisioning capability truth (worker-observed or
+            # operator-asserted) is an operator/Harness duty outside this path.
+            # Control deliberately sets no tool_capability_identity: Fabric's
+            # admission alone decides whether the worker is capable, using its
+            # newest trusted observation.
 
             # Refresh worker liveness/capability evidence immediately before
             # exact-target dispatch so admission evaluates current facts
@@ -1558,30 +1560,6 @@ class FabricAdapter:
                     details={"worker": worker_id, "diagnostic": redact_text(str(exc))},
                 ) from exc
 
-            observation = client.latest_capability_observation(worker_id) or {}
-            trusted_class = observation.get("observation_class") in {
-                "worker-observed",
-                "operator-asserted",
-            }
-            tool_identity = next(
-                (
-                    entry["capability_identity"]
-                    for entry in reversed(observation.get("capabilities") or [])
-                    if isinstance(entry, dict)
-                    and entry.get("kind") == "tool"
-                    and entry.get("name") == "python"
-                    and isinstance(entry.get("capability_identity"), str)
-                ),
-                None,
-            )
-            if not trusted_class:
-                raise ControlError(
-                    "FABRIC_WORKER_CAPABILITY_UNPROVEN",
-                    "no fresh worker-observed or operator-asserted python capability "
-                    "observation exists for the requested worker; Control does not "
-                    "assert worker capabilities on its own behalf",
-                    details={"worker": worker_id},
-                )
             context = contracts.ConsumerContext(
                 source_project="mncs-control-mcp",
                 consumer_workload_identity=manifest["manifest_identity"],
@@ -1598,7 +1576,8 @@ class FabricAdapter:
                 required_capabilities=("python",),
                 consumer_context_identity=context.context_identity,
                 consumer_authorization_identity=authorization_identity,
-                tool_capability_identity=tool_identity,
+                # No tool_capability_identity here: Fabric admission alone
+                # judges capability against its newest trusted observation.
                 # The controller's background probe cadence is typically
                 # 240s; admit against observations up to the maximum bound.
                 liveness_max_age_seconds=300.0,
