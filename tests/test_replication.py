@@ -56,11 +56,11 @@ def _write_fixtures(tmp_path: Path) -> dict[str, Path]:
         "status": "PASS",
     }
     result_path = baseline_dir / "result.json"
+    artifact = {"identity": ARTIFACT_ID, "artifact_kind": "wasm_module", "bytes_hex": "0061736d"}
+    result["artifact"] = artifact
     result_path.write_text(json.dumps(result), encoding="utf-8")
     artifact_path = baseline_dir / "backend-artifact.json"
-    artifact_path.write_text(
-        json.dumps({"identity": ARTIFACT_ID, "artifact_kind": "wasm_module"}), encoding="utf-8"
-    )
+    artifact_path.write_text(json.dumps(artifact), encoding="utf-8")
     corpus_path = baseline_dir / "corpus.json"
     corpus_path.write_text(json.dumps({"cases": [], "properties": []}), encoding="utf-8")
     return {"result": result_path, "artifact": artifact_path, "corpus": corpus_path}

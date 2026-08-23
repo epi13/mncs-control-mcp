@@ -28,6 +28,7 @@ import os
 import shutil
 import subprocess
 import threading
+import time
 import uuid
 from collections.abc import Callable
 from datetime import UTC
@@ -47,6 +48,7 @@ _TERMINAL_STATES = frozenset({"COMPLETED", "FAILED"})
 _RUNNER_SCRIPT = '''"""Fabric bundle entry point for one frozen MNCS Concept Experiment replication."""
 
 import json
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -472,6 +474,7 @@ class ReplicationManager:
         try:
             report = self._inspector(self.config.resolved_language_binary, baseline_path)
             artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+            baseline_record = json.loads(baseline_path.read_text(encoding="utf-8"))
         except ControlError as exc:
             self._fail(
                 replication_id, exc.code if hasattr(exc, "code") else "VERIFY_FAILED", str(exc)
@@ -479,6 +482,23 @@ class ReplicationManager:
             return
         except ValueError as exc:
             self._fail(replication_id, "ARTIFACT_MALFORMED", f"backend artifact is not JSON: {exc}")
+            return
+        # Exact structural equality against the frozen realization embedded in
+        # the baseline result.  Any mutation after freezing is rejected here,
+        # before any dispatch; the language CLI re-verifies content identities
+        # again at execution time on the worker.
+        recorded_artifact = baseline_record.get("artifact")
+        if not isinstance(recorded_artifact, dict) or artifact != recorded_artifact:
+            self._fail(
+                replication_id,
+                "ARTIFACT_IDENTITY_MISMATCH",
+                "supplied backend artifact does not match the frozen realization recorded "
+                "by the baseline result; refusing to replicate a substituted or mutated artifact",
+                details={
+                    "artifact_identity": artifact.get("identity"),
+                    "baseline_recorded": report.get("backend_artifact_identity"),
+                },
+            )
             return
         artifact_identity = artifact.get("identity")
         inspected_artifact = report.get("backend_artifact_identity")
@@ -551,6 +571,7 @@ class ReplicationManager:
             self._fail(replication_id, "FABRIC_UNAVAILABLE", "Fabric adapter is unavailable")
             return
         suffix = hashlib.sha256(f"{replication_id}".encode()).hexdigest()[:20]
+        attempts = int((state.get("fabric") or {}).get("dispatch_attempts") or 0)
         try:
             result = self.fabric.execute_exact_target(
                 worker_id=spec["worker_id"],
@@ -565,6 +586,22 @@ class ReplicationManager:
                 result_paths=["replicated-result.json", "replicated-family-reference.json"],
             )
         except ControlError as exc:
+            # One bounded re-dispatch for transient controller timeouts; safe
+            # because Fabric derives a deterministic execution_request_identity,
+            # so a repeated genuine execution returns DUPLICATE_IDEMPOTENT.
+            if (
+                exc.code == "FABRIC_TARGET_FAILED"
+                and "timed out" in str(exc).lower()
+                and attempts < 1
+            ):
+                self._advance(
+                    replication_id,
+                    "PREPARING",
+                    fabric={"dispatch_attempts": attempts + 1},
+                )
+                time.sleep(5.0)
+                self._stage_executing(replication_id)
+                return
             self._fail(
                 replication_id,
                 "FABRIC_TARGET_FAILED",
@@ -722,9 +759,6 @@ class ReplicationManager:
                     "earliest_observed_difference": (evidence.get("comparison") or {}).get(
                         "earliest_observed_difference"
                     ),
-                    "bounded_behavior_agrees": (evidence.get("comparison") or {}).get(
-                        "bounded_behavior_agrees"
-                    ),
                     "same_backend": (evidence.get("comparison") or {}).get("same_backend"),
                     "interpretation": (evidence.get("comparison") or {}).get("interpretation"),
                 },
@@ -768,6 +802,14 @@ class ReplicationManager:
                 ),
             )
             receipt = self.commons.publish_record(record)
+        except ControlError as exc:
+            self._fail(
+                replication_id,
+                "COMMONS_PUBLISH_FAILED",
+                str(exc),
+                details=getattr(exc, "details", None),
+            )
+            return
         except Exception as exc:  # noqa: BLE001 - publication failures stay visible
             self._fail(replication_id, "COMMONS_PUBLISH_FAILED", redact(str(exc)))
             return

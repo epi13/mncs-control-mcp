@@ -761,7 +761,16 @@ class CommonsAdapter:
         try:
             return self._bounded(operator.publish(dict(record)))
         except Exception as exc:
-            raise ControlError("COMMONS_PUBLISH_FAILED", redact_text(str(exc))) from exc
+            diagnostics = [
+                {"code": item.code, "path": item.path, "message": item.message}
+                for item in (getattr(exc, "diagnostics", None) or [])
+                if hasattr(item, "code")
+            ]
+            raise ControlError(
+                "COMMONS_PUBLISH_FAILED",
+                redact_text(str(exc)),
+                details={"diagnostics": diagnostics} if diagnostics else None,
+            ) from exc
         finally:
             operator.close()
 
@@ -1449,7 +1458,11 @@ class FabricAdapter:
         """
         fabric = self._module()
         support = self._public_support(fabric)
-        client = self._service_client(fabric)
+        client = fabric.FabricClient.connect(
+            self.config.fabric_socket,
+            client_identity=self.config.fabric_consumer_identity,
+            timeout=max(self.config.fabric_service_timeout_seconds, 60.0),
+        )
         try:
             service_controller = client.controller_status()
             support = FabricContractSupport.from_service_status(service_controller, support)
@@ -1544,6 +1557,22 @@ class FabricAdapter:
                 observation_source="mncs-control-mcp:frozen-experiment-replication",
             )
 
+            # Refresh worker liveness/capability evidence immediately before
+            # exact-target dispatch so admission evaluates current facts
+            # rather than a stale background-probe snapshot.
+            try:
+                client.refresh_fleet(
+                    worker_ids=[worker_id],
+                    operation_deadline=45.0,
+                    per_worker_deadline=40.0,
+                )
+            except Exception as exc:  # noqa: BLE001 - refresh failure surfaces as stale facts
+                raise ControlError(
+                    "FABRIC_WORKER_UNAVAILABLE",
+                    "fleet refresh failed before exact-target execution",
+                    details={"worker": worker_id, "diagnostic": redact_text(str(exc))},
+                ) from exc
+
             context = contracts.ConsumerContext(
                 source_project="mncs-control-mcp",
                 consumer_workload_identity=manifest["manifest_identity"],
@@ -1572,7 +1601,9 @@ class FabricAdapter:
                 consumer_context_identity=context.context_identity,
                 consumer_authorization_identity=authorization_identity,
                 tool_capability_identity=tool_identity,
-                liveness_max_age_seconds=120.0,
+                # The controller's background probe cadence is typically
+                # 240s; admit against observations up to the maximum bound.
+                liveness_max_age_seconds=300.0,
                 capability_max_age_seconds=900.0,
             )
             archive_root = self.config.job_state_path.parent / "fabric-bundles"
@@ -1580,21 +1611,35 @@ class FabricAdapter:
             archive = archive_root / f"{job_id.replace(':', '-')}.zip"
             bundles.build_bundle_archive(bundle_dir, archive)
 
-            try:
-                result = client.execute_target(
-                    target,
-                    plan,
-                    manifest,
-                    consumer_context=context,
-                    consumer_authorization_identity=authorization_identity,
-                    execution_bundle_archive=archive,
-                )
-            except Exception as exc:
+            # One bounded retry: admission re-evaluates current controller
+            # facts each attempt, and Fabric derives a deterministic
+            # execution_request_identity, so a repeat after a genuine
+            # execution returns DUPLICATE_IDEMPOTENT rather than re-running.
+            result = None
+            last_error: Exception | None = None
+            for attempt in range(2):
+                try:
+                    result = client.execute_target(
+                        target,
+                        plan,
+                        manifest,
+                        consumer_context=context,
+                        consumer_authorization_identity=authorization_identity,
+                        execution_bundle_archive=archive,
+                    )
+                    break
+                except ControlError:
+                    raise
+                except Exception as exc:
+                    last_error = exc
+                    if attempt == 0:
+                        time.sleep(6.0)
+            if result is None:
                 raise ControlError(
                     "FABRIC_TARGET_REJECTED",
-                    redact_text(str(exc)),
+                    redact_text(str(last_error)),
                     details={"worker": worker_id},
-                ) from exc
+                ) from last_error
 
             disposition = result.get("disposition")
             record = result.get("record")
@@ -2020,10 +2065,12 @@ class ForgeAdapter:
         study = replicated_result.get("compiler_study")
         backend_material = replicated_result.get("backend")
         replica_status = str(replicated_result.get("status", "UNKNOWN"))
-        agrees = bool(comparison.get("bounded_behavior_agrees"))
-        if replica_status == "FAIL" or not agrees and replica_status == "FAIL":
+        # Forge compares persisted stage fingerprints; an absent divergence
+        # marker means every compared stage agreed exactly.
+        stages_agree = comparison.get("earliest_observed_difference") is None
+        if replica_status == "FAIL":
             evaluation_status = "FAIL"
-        elif replica_status == "PASS" and agrees:
+        elif replica_status == "PASS" and stages_agree:
             evaluation_status = "PASS"
         else:
             evaluation_status = "UNKNOWN"
