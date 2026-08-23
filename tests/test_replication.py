@@ -280,7 +280,8 @@ def test_happy_path_produces_complete_durable_lineage(manager) -> None:
         "mncs-fabric://execution/"
     )
     assert state["forge"]["concept_evaluation_id"].startswith("concept-evaluation:")
-    assert state["forge"]["comparison_reference"]["bounded_behavior_agrees"] is True
+    assert state["forge"]["comparison_reference"]["earliest_observed_difference"] is None
+    assert state["status_summary"]["bounded_behavior_agrees"] is True
     assert state["commons"]["publication"]["deliveryStatus"] == "INGESTED"
     assert state["commons"]["publication"]["acceptanceStatus"] == "UNCHANGED"
 
@@ -359,7 +360,8 @@ def test_behavior_divergence_is_recorded_as_fail_not_laundered_to_pass(manager) 
 
     assert state["state"] == "COMPLETED"
     assert state["outcome"] == "FAIL"
-    assert state["forge"]["comparison_reference"]["bounded_behavior_agrees"] is False
+    assert state["forge"]["comparison_reference"]["earliest_observed_difference"] == "backend_artifact"
+    assert state["status_summary"]["bounded_behavior_agrees"] is False
     published = commons.published[0]
     assert published["details"]["outcome"] == "FAIL"
 
