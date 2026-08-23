@@ -253,6 +253,13 @@ resumed when the Control server process starts again. See
 [docs/DURABLE-EXPERIMENTS.md](docs/DURABLE-EXPERIMENTS.md) for the lifecycle, restart,
 idempotency, and claim-boundary contract.
 
+Frozen Concept Experiment replication uses `experiment_replicate`, `replication_status`,
+and `replication_list`: Control verifies a frozen language realization through the language
+CLI, executes the exact bundle on one explicitly requested Fabric worker via the no-fallback
+exact-target boundary, records comparison evidence in Forge, and publishes a Commons Family
+Record replication. Every identity mismatch fails closed; see
+[docs/EXPERIMENT-REPLICATION.md](docs/EXPERIMENT-REPLICATION.md).
+
 Only explicit embedded/transitional compatibility uses the private Control
 Fabric state tree for registry migration, network ledger, and bundle staging.
 Service mode reads the Fabric-owned consumer socket and leaves those files under
