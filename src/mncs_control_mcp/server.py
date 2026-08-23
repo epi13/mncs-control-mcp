@@ -26,6 +26,7 @@ from .git_adapter import GitService
 from .journal_context import JournalContextService
 from .manifest import tool_surface_manifest
 from .processes import ProcessManager
+from .replication import ReplicationManager
 from .sandbox import Sandbox
 from .security import redact_text
 from .tooling import ProjectService, ToolInventory
@@ -78,6 +79,12 @@ def build_server(config: ControlConfig | None = None) -> Any:
     git = GitService(selected, policy, sandbox)
     processes = ProcessManager(selected, policy, sandbox)
     experiments = ExperimentManager(selected)
+    replications = ReplicationManager(
+        selected,
+        fabric=integrations.fabric,
+        forge=integrations.forge,
+        commons=integrations.commons,
+    )
     journal_context = JournalContextService(selected, policy, git, experiments, integrations, audit, processes)
     projects = ProjectService(selected, policy, sandbox, git)
     inventory = ToolInventory(selected)
@@ -459,6 +466,23 @@ def build_server(config: ControlConfig | None = None) -> Any:
     @server.tool(name="experiment_graph", description="Inspect the Commons Family Record graph for one durable Concept Experiment.", annotations=ro, structured_output=True)
     def experiment_graph(experiment_id: str) -> dict[str, object]:
         return invoke("experiment_graph", integrations.commons.experiment, experiment_id)  # type: ignore[return-value]
+
+    @server.tool(name="experiment_replicate", description="Replicate one already-frozen Concept Experiment realization on one exactly requested Fabric worker without recompiling. Control verifies the frozen identities through the MNCS language CLI, executes the exact bundle via Fabric's no-fallback exact-target boundary, records baseline/replication comparison evidence in Forge, and publishes a Replication Family Record to Commons. Identity mismatches fail closed.", annotations=network_mutate, structured_output=True)
+    def experiment_replicate(spec: dict[str, object]) -> dict[str, object]:
+        return invoke(
+            "experiment_replicate",
+            replications.start,
+            spec,
+            audit_metadata={"profile": "frozen-experiment-replication"},
+        )  # type: ignore[return-value]
+
+    @server.tool(name="replication_status", description="Inspect one durable replication: its verified language identities, Fabric execution attempt evidence, Forge comparison reference, and Commons Family Record publication. Safe to call after reconnecting; the coordinator persists state on disk.", annotations=ro, structured_output=True)
+    def replication_status(replication_id: str) -> dict[str, object]:
+        return invoke("replication_status", replications.status, replication_id)  # type: ignore[return-value]
+
+    @server.tool(name="replication_list", description="List durable replication attempts with their coordination outcomes.", annotations=ro, structured_output=True)
+    def replication_list() -> dict[str, object]:
+        return invoke("replication_list", replications.list)  # type: ignore[return-value]
 
     @server.tool(name="forge_candidate_status", description="Inspect whether the current Forge candidate still matches the working tree.", annotations=ro, structured_output=True)
     def forge_candidate_status(repository: str) -> dict[str, object]:

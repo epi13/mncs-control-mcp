@@ -15,6 +15,9 @@ _EXPERIMENT_TOOLS = {
     "experiment_publish",
     "experiment_rerun",
     "experiment_graph",
+    "experiment_replicate",
+    "replication_status",
+    "replication_list",
 }
 
 

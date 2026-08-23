@@ -1397,6 +1397,248 @@ class FabricAdapter:
         )
         return {key: worker[key] for key in allowed if key in worker}
 
+    @staticmethod
+    def _record_stdout(record: object) -> str | None:
+        """Extract bounded captured stdout text from a Fabric execution record."""
+        if not isinstance(record, dict):
+            return None
+        stream = record.get("stdout")
+        if isinstance(stream, dict):
+            captured = stream.get("captured_utf8")
+            if isinstance(captured, str):
+                return captured
+        return None
+
+    def worker_state(self, worker_id: str) -> dict[str, object]:
+        """Return controller-owned state for one exact worker (no substitution)."""
+        if not isinstance(worker_id, str) or not worker_id.strip():
+            raise ControlError("INVALID_INPUT", "worker_id is required")
+        fabric = self._module()
+        client = self._service_client(fabric)
+        try:
+            state = client.fleet_status(worker_id)
+        except Exception as exc:
+            raise ControlError(
+                "FABRIC_REQUEST_FAILED", redact_text(str(exc))
+            ) from exc
+        finally:
+            client.close()
+        if not isinstance(state, dict) or not state:
+            raise ControlError(
+                "FABRIC_WORKER_UNKNOWN",
+                "requested Fabric worker has no controller-owned state",
+                details={"worker": worker_id},
+            )
+        return state
+
+    def execute_exact_target(
+        self,
+        *,
+        worker_id: str,
+        bundle_dir: Path,
+        argv: list[str],
+        job_id: str,
+        timeout_seconds: float,
+        result_paths: list[str],
+    ) -> dict[str, object]:
+        """Execute a prepared bundle on exactly the requested worker.
+
+        Uses Fabric's exact-target boundary: admission-gated, single replica,
+        no fallback.  Admission failures and mid-flight loss surface as
+        structured errors; this method never selects another worker.
+        """
+        fabric = self._module()
+        support = self._public_support(fabric)
+        client = self._service_client(fabric)
+        try:
+            service_controller = client.controller_status()
+            support = FabricContractSupport.from_service_status(service_controller, support)
+            if not support.persistent_service_execution:
+                raise ControlError(
+                    "FABRIC_SERVICE_EXECUTION_UNSUPPORTED",
+                    "persistent Fabric service does not advertise execution dispatch",
+                    details={"persistent_service_support": support.as_dict()},
+                )
+            compatibility = self._version_compatibility(fabric, service_controller or {})
+            if compatibility["state"] != "compatible":
+                raise ControlError(
+                    "FABRIC_SERVICE_RESTART_REQUIRED"
+                    if compatibility["state"] == "restart_required"
+                    else "FABRIC_VERSION_MISMATCH",
+                    str(compatibility.get("reason") or "Fabric versions are incompatible"),
+                    details={"compatibility": compatibility},
+                )
+            features = dict(service_controller.get("service_features") or {})
+            if not features.get("target_aware_execution"):
+                raise ControlError(
+                    "FABRIC_TARGET_EXECUTION_UNSUPPORTED",
+                    "persistent Fabric controller does not advertise target-aware execution",
+                )
+
+            state = client.fleet_status(worker_id)
+            if not isinstance(state, dict) or not state:
+                raise ControlError(
+                    "FABRIC_WORKER_UNKNOWN",
+                    "requested Fabric worker has no controller-owned state; refusing to substitute another worker",
+                    details={"worker": worker_id},
+                )
+            availability = state.get("availability")
+            if availability != "AVAILABLE":
+                raise ControlError(
+                    "FABRIC_WORKER_UNAVAILABLE",
+                    f"requested Fabric worker is not available ({availability}); "
+                    "exact-target replication never falls back to another worker",
+                    details={"worker": worker_id, "availability": availability},
+                )
+            observed_capabilities = set(state.get("capabilities") or [])
+            missing = sorted(set(("python",)) - observed_capabilities)
+            if missing:
+                raise ControlError(
+                    "FABRIC_WORKER_INCOMPATIBLE",
+                    "requested worker does not report required capabilities",
+                    details={"worker": worker_id, "missing": missing},
+                )
+
+            artifacts = importlib.import_module("mncs_fabric.artifacts")
+            bundles = importlib.import_module("mncs_fabric.bundles")
+            models = importlib.import_module("mncs_fabric.models")
+            targets = importlib.import_module("mncs_fabric.targets")
+            canonical = importlib.import_module("mncs_fabric.canonical")
+            contracts = importlib.import_module("mncs_fabric.contracts")
+            receipts = importlib.import_module("mncs_fabric.receipts")
+
+            manifest = artifacts.build_manifest(bundle_dir)
+            plan = models.validate_job_plan(
+                {
+                    "schema_version": "mncs-fabric.job-plan.v0.1",
+                    "job_id": job_id,
+                    "candidate_identity": manifest["manifest_identity"],
+                    "evaluator_identity": None,
+                    "artifact_manifest_identity": manifest["manifest_identity"],
+                    "argv": argv,
+                    "working_directory": ".",
+                    "timeout_seconds": min(max(timeout_seconds, 0.05), 86400),
+                    "output_limit_bytes": self.config.max_output_bytes,
+                    "environment": {},
+                    "required_capabilities": ["python"],
+                    "result_paths": result_paths,
+                    "network_policy": "DECLARED_OFFLINE",
+                }
+            )
+
+            # Publish a fresh consumer-bounded python tool observation so
+            # capability freshness reflects this replication attempt.
+            observation = client.ingest_capability_observation(
+                worker_id,
+                capabilities=[
+                    {
+                        "kind": "tool",
+                        "namespace": "system",
+                        "name": "python",
+                        "version": None,
+                        "subject_identity": None,
+                        "attributes": {"source": "consumer-bounded-worker-probe"},
+                    }
+                ],
+                availability="AVAILABLE",
+                observation_source="mncs-control-mcp:frozen-experiment-replication",
+            )
+
+            context = contracts.ConsumerContext(
+                source_project="mncs-control-mcp",
+                consumer_workload_identity=manifest["manifest_identity"],
+            )
+            authorization_identity = canonical.sha256_identity(
+                {
+                    "consumer": self.config.fabric_consumer_identity,
+                    "purpose": "frozen-experiment-replication",
+                    "worker": worker_id,
+                }
+            )
+            tool_identity = next(
+                (
+                    entry["capability_identity"]
+                    for entry in reversed(observation.get("capabilities") or [])
+                    if isinstance(entry, dict)
+                    and entry.get("kind") == "tool"
+                    and entry.get("name") == "python"
+                    and isinstance(entry.get("capability_identity"), str)
+                ),
+                None,
+            )
+            target = targets.ExecutionTargetReference(
+                worker_identity=worker_id,
+                required_capabilities=("python",),
+                consumer_context_identity=context.context_identity,
+                consumer_authorization_identity=authorization_identity,
+                tool_capability_identity=tool_identity,
+                liveness_max_age_seconds=120.0,
+                capability_max_age_seconds=900.0,
+            )
+            archive_root = self.config.job_state_path.parent / "fabric-bundles"
+            archive_root.mkdir(parents=True, exist_ok=True)
+            archive = archive_root / f"{job_id.replace(':', '-')}.zip"
+            bundles.build_bundle_archive(bundle_dir, archive)
+
+            try:
+                result = client.execute_target(
+                    target,
+                    plan,
+                    manifest,
+                    consumer_context=context,
+                    consumer_authorization_identity=authorization_identity,
+                    execution_bundle_archive=archive,
+                )
+            except Exception as exc:
+                raise ControlError(
+                    "FABRIC_TARGET_REJECTED",
+                    redact_text(str(exc)),
+                    details={"worker": worker_id},
+                ) from exc
+
+            disposition = result.get("disposition")
+            record = result.get("record")
+            family_reference = None
+            if isinstance(record, dict) and record.get("record_id"):
+                attempt = 1
+                family_reference = receipts.build_family_execution_reference(
+                    record,
+                    receipt=result.get("receipt"),
+                    attempt=attempt,
+                    backend_identity=None,
+                )
+            return {
+                "status": "executed" if disposition in {"EXECUTED", "DUPLICATE_IDEMPOTENT"} else disposition,
+                "disposition": disposition,
+                "requested_worker": worker_id,
+                "admitted_worker": result.get("worker_identity"),
+                "work_evidence": {
+                    key: result[key]
+                    for key in (
+                        "record_identity",
+                        "receipt_identity",
+                        "bundle_identity",
+                        "target_admission_identity",
+                        "target_execution_evidence_identity",
+                        "execution_target_reference_identity",
+                    )
+                    if key in result
+                },
+                "record": record if isinstance(record, dict) else None,
+                "stdout": self._record_stdout(record),
+                "family_execution_reference": family_reference,
+                "claim_boundary": (
+                    "Fabric owns placement, execution, and runtime facts only; "
+                    "disposition EXECUTED does not mean the replicated experiment is correct"
+                ),
+            }
+        except ControlError:
+            raise
+        except Exception as exc:
+            raise ControlError("FABRIC_DISPATCH_FAILED", redact_text(str(exc))) from exc
+        finally:
+            client.close()
+
 
 class ModelAdapter:
     def __init__(self, config: ControlConfig, ollama: OllamaAdapter, fabric: FabricAdapter) -> None:
@@ -1721,6 +1963,134 @@ class ForgeAdapter:
             "repository": repository,
             "result": result,
             "note": result.get("note"),
+        }
+
+    def _load_language_forge(self) -> dict[str, object]:
+        loaded = self._load_project_forge("language")
+        if loaded.get("status") != "ready":
+            return loaded
+        return loaded
+
+    def record_concept_evidence(
+        self,
+        *,
+        baseline_result: dict[str, object],
+        replicated_result: dict[str, object],
+        execution_stable_ids: list[str],
+        concept_experiment_id: str | None = None,
+    ) -> dict[str, object]:
+        """Record baseline/replication results in Forge and compare them.
+
+        Forge owns persistence of language-owned experiment records as
+        observation-only evidence plus the bounded comparison; it never
+        reinterprets language statuses or certifies correctness.
+        """
+        loaded = self._load_language_forge()
+        if loaded.get("status") != "ready":
+            return {"status": "forge_unavailable", "detail": loaded}
+        forge = loaded["forge"]
+        operations = loaded["operations"]
+        try:
+            baseline_record = operations.DEFAULT_OPERATION_REGISTRY.invoke(
+                forge,
+                "compiler.experiments.record",
+                {"language_record": baseline_result},
+                interface=operations.OperationInterface.INTERNAL,
+            )
+            replica_record = operations.DEFAULT_OPERATION_REGISTRY.invoke(
+                forge,
+                "compiler.experiments.record",
+                {"language_record": replicated_result},
+                interface=operations.OperationInterface.INTERNAL,
+            )
+            comparison = operations.DEFAULT_OPERATION_REGISTRY.invoke(
+                forge,
+                "compiler.experiments.compare",
+                {
+                    "left_experiment_id": baseline_record["experiment_id"],
+                    "right_experiment_id": replica_record["experiment_id"],
+                },
+                interface=operations.OperationInterface.INTERNAL,
+            )
+        except Exception as exc:
+            return {"status": "forge_failed", "diagnostic": redact_text(str(exc))}
+
+        concept_module = importlib.import_module("mncs_forge.concept_experiments")
+        definition = replicated_result.get("definition")
+        study = replicated_result.get("compiler_study")
+        backend_material = replicated_result.get("backend")
+        replica_status = str(replicated_result.get("status", "UNKNOWN"))
+        agrees = bool(comparison.get("bounded_behavior_agrees"))
+        if replica_status == "FAIL" or not agrees and replica_status == "FAIL":
+            evaluation_status = "FAIL"
+        elif replica_status == "PASS" and agrees:
+            evaluation_status = "PASS"
+        else:
+            evaluation_status = "UNKNOWN"
+        evaluation = concept_module.build_concept_evaluation(
+            concept_experiment_id=str(
+                concept_experiment_id
+                or (definition or {}).get("identity", "mncs:language:experiment:definition:unknown")
+            ),
+            candidate_identity=str(replicated_result.get("identity", "candidate-unknown")),
+            language_profile=str((definition or {}).get("source_profile", "unknown-profile")),
+            compiler_identity=str(
+                (study or {}).get("compiler_identity", {}).get("identity", "mncs:compiler:unknown")
+                if isinstance((study or {}).get("compiler_identity"), dict)
+                else "mncs:compiler:unknown"
+            ),
+            backend_identity=str(
+                backend_material.get("identity", "mncs:compiler:backend:unknown")
+                if isinstance(backend_material, dict)
+                else "mncs:compiler:backend:unknown"
+            ),
+            execution_identities=list(execution_stable_ids)
+            or ["mncs-fabric://execution/unknown"],
+            verifier_identity="mncs-forge",
+            verifier_version="0.1",
+            obligation=(
+                "bounded replication agreement for one frozen realization on one "
+                "explicitly requested Fabric worker"
+            ),
+            evidence_identities=[
+                str(baseline_record["language_record_identity"]),
+                str(replica_record["language_record_identity"]),
+            ],
+            status=evaluation_status,
+            unresolved_obligations=[
+                "independent-backend-reproduction",
+                "no-protected-custody-or-attestation-of-execution-worker",
+            ],
+            generator_identity="mncs-language",
+            evaluator_policy_identity="mncs-forge:policy:replication-agreement-v0.1",
+        )
+        try:
+            persisted_evaluation = operations.DEFAULT_OPERATION_REGISTRY.invoke(
+                forge,
+                "concept.evaluations.record",
+                {"evaluation": evaluation},
+                interface=operations.OperationInterface.INTERNAL,
+            )
+        except Exception as exc:
+            return {
+                "status": "forge_partial",
+                "baseline_experiment_id": baseline_record["experiment_id"],
+                "replica_experiment_id": replica_record["experiment_id"],
+                "comparison": comparison,
+                "concept_evaluation_error": redact_text(str(exc)),
+            }
+
+        return {
+            "status": "completed",
+            "baseline_experiment_id": baseline_record["experiment_id"],
+            "replica_experiment_id": replica_record["experiment_id"],
+            "comparison": comparison,
+            "concept_evaluation_id": persisted_evaluation["evaluation_id"],
+            "concept_evaluation_status": persisted_evaluation["status"],
+            "authority_note": (
+                "Forge records remain observation-only development evidence; "
+                "they are not MNCS conformance decisions"
+            ),
         }
 
     def evaluate(

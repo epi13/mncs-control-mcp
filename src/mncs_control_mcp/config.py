@@ -97,6 +97,7 @@ class ControlConfig:
     forge_config_name: str = "mncs-forge.toml"
     forge_mcp_executable: Path | None = None
     forge_mcp_config: Path | None = None
+    language_binary: Path | None = None
     journal_enabled: bool = True
     journal_projects: tuple[str, ...] = field(default_factory=lambda: tuple(DEFAULT_REPOSITORIES.values()) + ("mncs-control-mcp",))
     journal_include_patterns: tuple[str, ...] = (
@@ -182,6 +183,25 @@ class ControlConfig:
             self.workspace_root / self.forge_config_name,
         )
         return next((candidate for candidate in candidates if candidate.is_file()), None)
+
+    @property
+    def language_path(self) -> Path:
+        return self.workspace_root / self.repositories.get("language", "mncs-language")
+
+    @property
+    def resolved_language_binary(self) -> Path:
+        """Resolve the MNCS language CLI binary used to verify frozen experiments.
+
+        Prefers the explicit ``[integration] language_binary`` setting, then the
+        size-optimized ``fabric`` build profile, then the default release build.
+        """
+        if self.language_binary is not None:
+            return self.language_binary
+        candidates = (
+            self.language_path / "target" / "fabric" / "mncs",
+            self.language_path / "target" / "release" / "mncs",
+        )
+        return next((candidate for candidate in candidates if candidate.is_file()), candidates[-1])
 
 
 def _path(value: object, *, base: Path | None = None) -> Path:
@@ -308,6 +328,7 @@ def load_config(path: Path | str | None = None) -> ControlConfig:
     harness_value = integration.get("harness_config")
     forge_executable = integration.get("forge_mcp_executable")
     forge_config = integration.get("forge_mcp_config")
+    language_binary_value = integration.get("language_binary")
     journal_projects_raw = journal.get("projects")
     if journal_projects_raw is None:
         journal_projects = tuple(repository_values.values()) + ("mncs-control-mcp",)
@@ -405,6 +426,7 @@ def load_config(path: Path | str | None = None) -> ControlConfig:
         forge_config_name=str(integration.get("forge_config_name", "mncs-forge.toml")),
         forge_mcp_executable=_path(forge_executable) if forge_executable else None,
         forge_mcp_config=_path(forge_config) if forge_config else None,
+        language_binary=_path(language_binary_value) if language_binary_value else None,
         journal_enabled=_boolean(journal, "enabled", True),
         journal_projects=journal_projects,
         journal_include_patterns=journal_patterns("include_patterns", ControlConfig.journal_include_patterns),
