@@ -919,9 +919,7 @@ class FabricAdapter:
             if worker.get("presence") == "STALE" or worker.get("availability") == "UNKNOWN"
         )
         stale_capability_inventory = sum(
-            1
-            for worker in workers
-            if worker.get("capability_inventory_status") == "STALE"
+            1 for worker in workers if worker.get("capability_inventory_status") == "STALE"
         )
         return {
             "fleet_count": len(workers),
@@ -1427,9 +1425,7 @@ class FabricAdapter:
         try:
             state = client.fleet_status(worker_id)
         except Exception as exc:
-            raise ControlError(
-                "FABRIC_REQUEST_FAILED", redact_text(str(exc))
-            ) from exc
+            raise ControlError("FABRIC_REQUEST_FAILED", redact_text(str(exc))) from exc
         finally:
             client.close()
         if not isinstance(state, dict) or not state:
@@ -1539,23 +1535,12 @@ class FabricAdapter:
                 }
             )
 
-            # Publish a fresh consumer-bounded python tool observation so
-            # capability freshness reflects this replication attempt.
-            observation = client.ingest_capability_observation(
-                worker_id,
-                capabilities=[
-                    {
-                        "kind": "tool",
-                        "namespace": "system",
-                        "name": "python",
-                        "version": None,
-                        "subject_identity": None,
-                        "attributes": {"source": "consumer-bounded-worker-probe"},
-                    }
-                ],
-                availability="AVAILABLE",
-                observation_source="mncs-control-mcp:frozen-experiment-replication",
-            )
+            # Control consumes Fabric's trusted capability evidence; it never
+            # manufactures it.  Admission requires a fresh worker-observed or
+            # operator-asserted observation (Fabric clamps consumer-role
+            # ingestion to consumer-declared and ignores such observations for
+            # target admission), so provisioning capability truth is an
+            # operator/Harness duty that happens outside this request path.
 
             # Refresh worker liveness/capability evidence immediately before
             # exact-target dispatch so admission evaluates current facts
@@ -1573,17 +1558,11 @@ class FabricAdapter:
                     details={"worker": worker_id, "diagnostic": redact_text(str(exc))},
                 ) from exc
 
-            context = contracts.ConsumerContext(
-                source_project="mncs-control-mcp",
-                consumer_workload_identity=manifest["manifest_identity"],
-            )
-            authorization_identity = canonical.sha256_identity(
-                {
-                    "consumer": self.config.fabric_consumer_identity,
-                    "purpose": "frozen-experiment-replication",
-                    "worker": worker_id,
-                }
-            )
+            observation = client.latest_capability_observation(worker_id) or {}
+            trusted_class = observation.get("observation_class") in {
+                "worker-observed",
+                "operator-asserted",
+            }
             tool_identity = next(
                 (
                     entry["capability_identity"]
@@ -1594,6 +1573,25 @@ class FabricAdapter:
                     and isinstance(entry.get("capability_identity"), str)
                 ),
                 None,
+            )
+            if not trusted_class:
+                raise ControlError(
+                    "FABRIC_WORKER_CAPABILITY_UNPROVEN",
+                    "no fresh worker-observed or operator-asserted python capability "
+                    "observation exists for the requested worker; Control does not "
+                    "assert worker capabilities on its own behalf",
+                    details={"worker": worker_id},
+                )
+            context = contracts.ConsumerContext(
+                source_project="mncs-control-mcp",
+                consumer_workload_identity=manifest["manifest_identity"],
+            )
+            authorization_identity = canonical.sha256_identity(
+                {
+                    "consumer": self.config.fabric_consumer_identity,
+                    "purpose": "frozen-experiment-replication",
+                    "worker": worker_id,
+                }
             )
             target = targets.ExecutionTargetReference(
                 worker_identity=worker_id,
@@ -1653,7 +1651,9 @@ class FabricAdapter:
                     backend_identity=None,
                 )
             return {
-                "status": "executed" if disposition in {"EXECUTED", "DUPLICATE_IDEMPOTENT"} else disposition,
+                "status": "executed"
+                if disposition in {"EXECUTED", "DUPLICATE_IDEMPOTENT"}
+                else disposition,
                 "disposition": disposition,
                 "requested_worker": worker_id,
                 "admitted_worker": result.get("worker_identity"),
@@ -2091,8 +2091,7 @@ class ForgeAdapter:
                 if isinstance(backend_material, dict)
                 else "mncs:compiler:backend:unknown"
             ),
-            execution_identities=list(execution_stable_ids)
-            or ["mncs-fabric://execution/unknown"],
+            execution_identities=list(execution_stable_ids) or ["mncs-fabric://execution/unknown"],
             verifier_identity="mncs-forge",
             verifier_version="0.1",
             obligation=(
