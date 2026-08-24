@@ -105,11 +105,43 @@ def test_update_watcher_units_reload_tunnel_on_main_ref_change(tmp_path: Path) -
     repository = tmp_path / "mncs-control-mcp"
     path_unit = render_update_path(repository=repository)
     service_unit = render_update_service()
+    assert f"PathChanged={repository}/.git/HEAD" in path_unit
     assert f"PathChanged={repository}/.git/refs/heads/main" in path_unit
     assert f"PathChanged={repository}/.git/packed-refs" in path_unit
     assert "Unit=mncs-control-update.service" in path_unit
     assert "try-restart mncs-control-tunnel.service" in service_unit
     assert "NoNewPrivileges=true" in service_unit
+
+
+def test_update_service_can_reach_user_bus_for_restart() -> None:
+    """The restart oneshot must keep access to /run/user/<uid>.
+
+    ``ProtectHome=true`` masks ``/run/user`` inside the unit namespace, which
+    makes ``systemctl --user`` fail with EPERM against the user bus. That used
+    to leave a stale tunnel process serving an outdated tool surface even
+    though the watcher fired on every source update.
+    """
+
+    rendered = render_update_service()
+    assert "ProtectHome=true" not in rendered
+    assert "ProtectHome=read-only" in rendered
+    deployed = (
+        Path(__file__).resolve().parents[1]
+        / "deploy"
+        / "systemd"
+        / "mncs-control-update.service"
+    )
+    deployed_text = deployed.read_text(encoding="utf-8")
+    assert "ProtectHome=true" not in deployed_text
+    assert "ProtectHome=read-only" in deployed_text
+    deployed_path = (
+        Path(__file__).resolve().parents[1]
+        / "deploy"
+        / "systemd"
+        / "mncs-control-update.path"
+    )
+    deployed_path_text = deployed_path.read_text(encoding="utf-8")
+    assert ".git/HEAD" in deployed_path_text
 
 
 def test_repository_revision_reads_loose_and_packed_refs(tmp_path: Path) -> None:
@@ -192,7 +224,17 @@ def test_tool_surface_manifest_is_stable_and_detects_experiment_api() -> None:
     assert expected["tool_count"] == 14
     assert expected["tool_names_sha256"].startswith("sha256:")
     assert expected["experiment_tools_present"] is True
+    assert expected["journal_context_tools_present"] is False
     assert tool_surface_manifest(["system_status"])["experiment_tools_present"] is False
+    assert tool_surface_manifest(["system_status"])["journal_context_tools_present"] is False
+    with_journal = tool_surface_manifest(
+        [
+            "journal_context_status",
+            "journal_context_collect",
+            "journal_context_get",
+        ]
+    )
+    assert with_journal["journal_context_tools_present"] is True
 
 
 def test_doctor_reports_missing_required_tunnel_dependencies(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

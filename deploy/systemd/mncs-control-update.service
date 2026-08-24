@@ -8,4 +8,5 @@ ExecStart=/usr/bin/systemctl --user try-restart mncs-control-tunnel.service
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
-ProtectHome=true
+# read-only (not true): the restart must reach /run/user/<uid> for the user bus
+ProtectHome=read-only

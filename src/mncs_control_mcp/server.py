@@ -509,6 +509,11 @@ def build_server(config: ControlConfig | None = None) -> Any:
             registered = getattr(manager, "_tools", {})
             tool_names = registered.keys() if isinstance(registered, dict) else ()
             tool_surface = tool_surface_manifest(tool_names)
+            restart_required = (
+                runtime_revision is not None
+                and source_revision is not None
+                and runtime_revision != source_revision
+            )
             return {
                 **integrations.system.status(),
                 "sandbox": {"backend": sandbox.backend, "available": sandbox.available, "required": selected.require_real_sandbox},
@@ -527,10 +532,16 @@ def build_server(config: ControlConfig | None = None) -> Any:
                     "fabric_consumer_identity": selected.fabric_consumer_identity,
                     "runtime_revision": runtime_revision,
                     "source_revision": source_revision,
-                    "restart_required": (
-                        runtime_revision is not None
-                        and source_revision is not None
-                        and runtime_revision != source_revision
+                    "restart_required": restart_required,
+                    "restart_guidance": (
+                        (
+                            "The running process was imported from an older commit than the "
+                            "checked-out source, so newly installed tools are absent from this "
+                            "tool surface. Reload via the control_reload tool (systemd-supervised "
+                            "tunnel only), or run: systemctl --user restart mncs-control-tunnel.service"
+                        )
+                        if restart_required
+                        else ""
                     ),
                     "tunnel_profile": os.environ.get("MNCS_CONTROL_TUNNEL_PROFILE"),
                     "organization_context_configured": bool(

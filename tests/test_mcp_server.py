@@ -38,7 +38,7 @@ class StdioClient:
         )
         self.process.stdin.flush()
 
-    def request(self, method: str, params: dict[str, object]) -> dict[str, object]:
+    def request(self, method: str, params: dict[str, object], timeout: float = 20) -> dict[str, object]:
         request_id = self.next_id
         self.next_id += 1
         assert self.process.stdin is not None and self.process.stdout is not None
@@ -47,10 +47,16 @@ class StdioClient:
             + "\n"
         )
         self.process.stdin.flush()
-        ready, _, _ = select.select([self.process.stdout], [], [], 20)
-        if not ready:
-            self.close()
-            raise AssertionError("timed out waiting for MCP response")
+        # system_status probes Fabric/Commons/Forge integrations and can take
+        # longer than lightweight calls when the suite runs on a loaded host.
+        deadline = time.monotonic() + timeout + (30 if method == "tools/call" else 0)
+        while True:
+            ready, _, _ = select.select([self.process.stdout], [], [], max(1.0, deadline - time.monotonic()))
+            if ready:
+                break
+            if time.monotonic() >= deadline:
+                self.close()
+                raise AssertionError("timed out waiting for MCP response")
         line = self.process.stdout.readline()
         if not line:
             assert self.process.stderr is not None
@@ -141,6 +147,9 @@ audit_path = {str(tmp_path / "state" / "audit.jsonl")!r}
             "replication_status",
             "replication_list",
             "control_reload",
+            "journal_context_status",
+            "journal_context_collect",
+            "journal_context_get",
             "project_review",
             "control_job_status",
             "control_job_result",
@@ -161,6 +170,7 @@ audit_path = {str(tmp_path / "state" / "audit.jsonl")!r}
         assert system["server"]["tool_surface"]["tool_count"] == len(names)
         assert system["server"]["tool_surface"]["tool_names_sha256"].startswith("sha256:")
         assert system["server"]["tool_surface"]["experiment_tools_present"] is True
+        assert system["server"]["tool_surface"]["journal_context_tools_present"] is True
         assert system["server"]["organization_context_configured"] is False
 
         info = client.call("workspace_info", {})

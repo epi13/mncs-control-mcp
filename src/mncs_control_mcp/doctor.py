@@ -44,6 +44,9 @@ _REQUIRED_TOOLS = {
     "experiment_publish",
     "experiment_rerun",
     "experiment_graph",
+    "journal_context_status",
+    "journal_context_collect",
+    "journal_context_get",
 }
 
 
@@ -638,6 +641,9 @@ def run_doctor(
                     "tool_count": local_mcp_probe.get("tool_count"),
                     "tool_names_sha256": local_mcp_probe.get("tool_names_sha256"),
                     "experiment_tools_present": local_mcp_probe.get("experiment_tools_present"),
+                    "journal_context_tools_present": local_mcp_probe.get(
+                        "journal_context_tools_present"
+                    ),
                 }
                 if local_mcp_probe is not None
                 else None
