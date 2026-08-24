@@ -107,12 +107,17 @@ WantedBy=default.target
 
 
 def render_update_path(*, repository: Path) -> str:
-    """Watch the checked-out main ref so a fast-forward pull reloads Control.
+    """Watch the checked-out refs so a source update reloads Control.
 
     The tunnel process is intentionally long-lived. An editable Python install
     therefore makes new source available after ``git pull`` but does not make
     the already-imported MCP process execute it. The path unit closes that gap
     without granting the MCP sandbox access to the user systemd bus.
+
+    ``.git/HEAD`` is watched in addition to ``refs/heads/main`` and
+    ``packed-refs`` so branch switches and detached checkouts also trigger a
+    reload; without it, a process started on an older commit keeps serving a
+    stale tool surface even though ``system_status`` reports revision drift.
     """
 
     repo = repository.expanduser().resolve()
@@ -121,6 +126,7 @@ def render_update_path(*, repository: Path) -> str:
 Description=Watch MNCS Control source revision
 
 [Path]
+PathChanged={escaped_repo}/.git/HEAD
 PathChanged={escaped_repo}/.git/refs/heads/main
 PathChanged={escaped_repo}/.git/packed-refs
 Unit=mncs-control-update.service
@@ -131,7 +137,16 @@ WantedBy=default.target
 
 
 def render_update_service() -> str:
-    """Render the narrow systemd action used by the source revision watcher."""
+    """Render the narrow systemd action used by the source revision watcher.
+
+    ``systemctl --user`` must reach the user manager bus under
+    ``$XDG_RUNTIME_DIR`` (``/run/user/<uid>``). ``ProtectHome=true`` masks
+    ``/run/user`` inside the unit namespace, which makes every restart attempt
+    fail with "Failed to connect to user scope bus ... Operation not permitted"
+    and silently leaves a stale process serving an outdated tool surface. Use
+    ``read-only`` instead so the bus stays reachable while $HOME stays
+    non-writable.
+    """
 
     return """[Unit]
 Description=Reload MNCS Control after source update
@@ -143,7 +158,8 @@ ExecStart=/usr/bin/systemctl --user try-restart mncs-control-tunnel.service
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
-ProtectHome=true
+# read-only (not true): the restart must reach /run/user/<uid> for the user bus
+ProtectHome=read-only
 """
 
 

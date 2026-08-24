@@ -13,7 +13,7 @@ import hashlib
 import json
 import os
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from typing import Any
 
@@ -422,7 +422,31 @@ class JournalContextService:
             commits = snapshot.get("commits") if isinstance(snapshot.get("commits"), list) else []
             local_branches = snapshot.get("local_only_branches") if isinstance(snapshot.get("local_only_branches"), list) else []
             changes = status.get("changes") if isinstance(status, dict) else []
-            if commits or local_branches or (include_uncommitted and changes and datetime.now(UTC) <= end_dt):
+            # Attribute uncommitted work by file mtime inside the interval.
+            # Comparing wall-clock "now" against the interval end was wrong for
+            # the primary journal case (collecting an interval that ends at
+            # approximately now): it silently discarded working-tree evidence.
+            attributed: list[dict[str, object]] = []
+            if include_uncommitted and changes:
+                for change in changes:
+                    if not isinstance(change, dict):
+                        continue
+                    status_code = str(change.get("status") or "")[:2]
+                    relative = str(change.get("path") or "")
+                    if not relative or is_sensitive_name(relative):
+                        continue
+                    candidate = root / relative
+                    try:
+                        mtime = datetime.fromtimestamp(candidate.stat().st_mtime, tz=UTC)
+                    except OSError:
+                        # Deletions carry no worktree timestamp; skipping keeps
+                        # attribution honest and intervals bounded.
+                        continue
+                    # Second-level comparison so a file touched in the same
+                    # second the interval closes is still included.
+                    if start_dt <= mtime.replace(microsecond=0) <= end_dt:
+                        attributed.append({"status": status_code, "path": relative})
+            if commits or local_branches or attributed:
                 git_items.append(self._item(source_class="local_repositories", source_system="git", project=project, locator=f"{project}:HEAD", occurred_at=end, summary=summary, confidence="HIGH" if snapshot.get("head") else "UNKNOWN"))
             for commit in snapshot.get("commits", []):
                 if isinstance(commit, dict):
@@ -433,14 +457,8 @@ class JournalContextService:
                     if not commits and datetime.now(UTC) > end_dt:
                         continue
                     git_items.append(self._item(source_class="local_repositories", source_system="git", project=project, locator=f"{project}:branch:{branch.get('name')}", occurred_at=end, summary=f"local branch has {branch.get('local_only_commit_count')} commit(s) beyond {branch.get('upstream')}", local_only=True, development_state="local-only-branch", confidence="HIGH"))
-            if include_uncommitted:
-                if changes and datetime.now(UTC) <= end_dt:
-                    paths = [
-                        {"status": str(change.get("status") or "")[:2], "path": str(change.get("path"))}
-                        for change in changes
-                        if isinstance(change, dict) and not is_sensitive_name(str(change.get("path") or ""))
-                    ]
-                    tree_items.append(self._item(source_class="working_trees", source_system="git", project=project, locator=f"{project}:working-tree", occurred_at=end, summary=f"uncommitted paths with porcelain status={paths[:100]}", local_only=True, development_state="local-uncommitted", authority="provisional-developmental-evidence", confidence="HIGH"))
+            if attributed:
+                tree_items.append(self._item(source_class="working_trees", source_system="git", project=project, locator=f"{project}:working-tree", occurred_at=end, summary=f"uncommitted paths with porcelain status={attributed[:100]}", local_only=True, development_state="local-uncommitted", authority="provisional-developmental-evidence", confidence="HIGH"))
         items.extend(git_items)
         items.extend(tree_items)
         sources.append(self._source("local_repositories", "AVAILABLE" if git_items else "EMPTY", git_items, None if git_items else "no bounded Git records in interval"))
@@ -490,7 +508,27 @@ class JournalContextService:
                 selected.append(record)
                 experiment_id = str(record.get("experiment_id") or "unknown")
                 state = str(record.get("state") or record.get("recorded_state") or "UNKNOWN")
-                items.append(self._item(source_class="experiments", source_system="control-experiment-coordinator", project=None, locator=f"experiment:{experiment_id}", occurred_at=_stamp(record), summary=f"state={state} turns={record.get('turn_count')} successful_turns={record.get('successful_turns')} failed_turns={record.get('failed_turns')} spec={record.get('spec_identity')} fabric_work={((record.get('current_turn') or {}).get('work_id') if isinstance(record.get('current_turn'), dict) else None)}", development_state="durable-experiment", authority="experiment-coordinator-record", confidence="HIGH" if state not in {"UNKNOWN", "RECOVERY_PENDING"} else "UNKNOWN", unresolved=state in {"UNKNOWN", "RECOVERY_PENDING", "FINALIZING"}, negative=state in {"FAILED", "STOPPED", "TIMED_OUT"} or int(record.get("failed_turns") or 0) > 0))
+                manifest = record.get("concept_manifest") if isinstance(record.get("concept_manifest"), Mapping) else {}
+                concept_goal = str(manifest.get("goal") or "unspecified")
+                language_profile = str(manifest.get("language_profile") or "unspecified")
+                family_record_id = str(record.get("family_record_id") or "none")
+                producer_references = [
+                    str(ref.get("kind") or ref.get("role") or ref.get("system") or "reference")
+                    for ref in (record.get("producer_references") or [])
+                    if isinstance(ref, dict)
+                ]
+                claim_boundary = redact_text(str(record.get("claim_boundary") or "unspecified"))[:200]
+                summary = (
+                    f"state={state} turns={record.get('turn_count')}"
+                    f" successful_turns={record.get('successful_turns')} failed_turns={record.get('failed_turns')}"
+                    f" spec={record.get('spec_identity')}"
+                    f" concept={concept_goal[:160]} language_profile={language_profile[:120]}"
+                    f" family_record={family_record_id}"
+                    f" producer_refs={','.join(sorted(set(producer_references))[:8]) or 'none'}"
+                    f" claim_boundary={claim_boundary}"
+                    f" fabric_work={((record.get('current_turn') or {}).get('work_id') if isinstance(record.get('current_turn'), dict) else None)}"
+                )
+                items.append(self._item(source_class="experiments", source_system="control-experiment-coordinator", project=None, locator=f"experiment:{experiment_id}", occurred_at=_stamp(record), summary=summary, development_state="durable-experiment", authority="experiment-coordinator-record", confidence="HIGH" if state not in {"UNKNOWN", "RECOVERY_PENDING"} else "UNKNOWN", unresolved=state in {"UNKNOWN", "RECOVERY_PENDING", "FINALIZING"}, negative=state in {"FAILED", "STOPPED", "TIMED_OUT"} or int(record.get("failed_turns") or 0) > 0))
         sources.append(self._source("experiments", "AVAILABLE" if selected else "EMPTY", selected, None if selected else "no durable experiments in interval"))
 
     def _records(self, payload: object) -> list[dict[str, object]]:
