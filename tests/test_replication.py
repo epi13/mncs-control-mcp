@@ -229,6 +229,18 @@ def manager(replication_config: ControlConfig):
             resume=False,
         )
         instance._spawn = lambda replication_id: None  # tests drive stages synchronously
+
+        def resume_manager(**overrides):
+            merged = {
+                "fabric": fabric,
+                "forge": forge,
+                "commons": commons,
+                "inspector": inspector or _fake_inspector(),
+            }
+            merged.update(overrides)
+            return ReplicationManager(replication_config, resume=False, **merged)
+
+        instance.resume_manager = resume_manager
         return instance, fixtures, fabric, forge, commons
 
     return build
@@ -410,3 +422,41 @@ def test_state_schema_and_spec_identity_are_verified_on_load(manager) -> None:
 
     with pytest.raises(_ControlError, match="does not verify"):
         instance._load(started["replication_id"])
+
+
+def test_resume_unfinished_replication_continues_without_resubmitting(manager) -> None:
+    """A replication interrupted before dispatch resumes after restart.
+
+    The crash simulation dies between PREPARING and EXECUTING: verification
+    evidence is already durable but no dispatch has occurred.  A fresh
+    manager must adopt the durable state via ``resume_unfinished``, dispatch
+    exactly once, reach COMPLETED, and never create a second replication for
+    the same spec.
+    """
+    instance, fixtures, fabric, forge, commons = manager()
+    started = instance.start(_spec(fixtures))
+    replication_id = started["replication_id"]
+
+    first_manager_calls = len(fabric.calls)
+    instance._stage_executing = lambda _replication_id: None  # process dies
+    instance._run(replication_id)
+    interrupted = instance._load(replication_id)
+    # The crash happens while PREPARING is still the durable frontier, so
+    # verification evidence is already durable but no dispatch has occurred.
+    assert interrupted["state"] == "PREPARING"
+    assert interrupted["identities"]["definition_identity"] == DEFINITION_ID
+    assert len(fabric.calls) == first_manager_calls
+
+    # "Restart": a fresh manager over the same durable root adopts the
+    # interrupted replication instead of resubmitting the spec.
+    resumed = instance.resume_manager()
+    resumed._spawn = lambda _replication_id: None
+    resumed.resume_unfinished()
+    final = _drive(resumed, replication_id)
+
+    assert final["state"] == "COMPLETED", final.get("error")
+    assert final["outcome"] == "PASS"
+    assert final["replication_id"] == replication_id
+    assert len(fabric.calls) == first_manager_calls + 1
+    repeat = resumed.start(_spec(fixtures))
+    assert repeat["deduplicated"] is True
