@@ -20,6 +20,12 @@ _EXPERIMENT_TOOLS = {
     "replication_list",
 }
 
+_JOURNAL_CONTEXT_TOOLS = {
+    "journal_context_status",
+    "journal_context_collect",
+    "journal_context_get",
+}
+
 
 def tool_surface_manifest(names: Iterable[str]) -> dict[str, Any]:
     """Return a stable non-secret identity for the advertised MCP tool-name surface."""
@@ -31,4 +37,5 @@ def tool_surface_manifest(names: Iterable[str]) -> dict[str, Any]:
         "tool_count": len(ordered),
         "tool_names_sha256": f"sha256:{digest}",
         "experiment_tools_present": _EXPERIMENT_TOOLS <= set(ordered),
+        "journal_context_tools_present": _JOURNAL_CONTEXT_TOOLS <= set(ordered),
     }

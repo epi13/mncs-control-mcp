@@ -285,3 +285,15 @@ The status payload also publishes the local MCP tool-surface identity and whethe
 the organization context reached the server, so connector registration skew and
 control-plane authentication skew are distinguishable. It does not commit or
 overwrite secrets.
+
+Operational notes (hardened after a live incident where a stale process kept
+serving an outdated tool surface):
+
+- The watcher also watches `.git/HEAD`, so branch switches and detached
+  checkouts trigger a reload, not just fast-forwards of `main`.
+- `mncs-control-update.service` uses `ProtectHome=read-only` (never `true`);
+  `ProtectHome=true` masks `/run/user/<uid>`, which makes `systemctl --user`
+  fail with EPERM against the user bus and silently skips every restart.
+- When `restart_required` is set, `system_status.server.restart_guidance`
+  carries the exact repair action; doctor treats the journal-context tools as
+  required and fails if a fresh probe cannot see them.

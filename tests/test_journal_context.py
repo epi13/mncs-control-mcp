@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import UTC, datetime
 from pathlib import Path
 
 from mncs_control_mcp.audit import AuditLog
@@ -25,14 +26,32 @@ class FakeGit:
         }
 
     def status(self, project: str):
-        return {"changes": [{"status": " M", "path": "notes/provisional.md"}, {"status": "??", "path": "untracked.md"}, {"status": "??", "path": ".env"}]}
+        return {
+            "changes": [
+                {"status": " M", "path": "docs/changed.md"},
+                {"status": "??", "path": "untracked.md"},
+                {"status": "??", "path": ".env"},
+                {"status": " D", "path": "notes/removed.md"},
+            ]
+        }
 
 
 class FakeExperiments:
     def list(self):
         return {
             "experiments": [
-                {"experiment_id": "exp-1234567890abcdef1234567890abcdef", "state": "FAILED", "started_at": "2026-08-20T13:00:00Z", "turn_count": 1, "failed_turns": 1},
+                {
+                    "experiment_id": "exp-1234567890abcdef1234567890abcdef",
+                    "state": "FAILED",
+                    "started_at": "2026-08-20T13:00:00Z",
+                    "turn_count": 1,
+                    "failed_turns": 1,
+                    "spec_identity": "spec-deadbeef",
+                    "concept_manifest": {"goal": "pressure-test backend plurality", "language_profile": "source-profile-0.4"},
+                    "family_record_id": "fr-1234",
+                    "producer_references": [{"kind": "forge-evaluation"}, {"kind": "fabric-execution"}],
+                    "claim_boundary": "execution evidence only; not conformance",
+                },
                 {"experiment_id": "exp-outside", "state": "COMPLETED", "started_at": "2026-08-01T13:00:00Z"},
             ]
         }
@@ -77,6 +96,7 @@ def make_service(tmp_path: Path) -> JournalContextService:
     (project / "docs").mkdir(parents=True)
     (project / "docs" / "changed.md").write_text("A bounded note\n", encoding="utf-8")
     os.utime(project / "docs" / "changed.md", (1787227200, 1787227200))
+    (project / "untracked.md").write_text("Untracked but not sensitive\n", encoding="utf-8")
     (project / ".env").write_text("TOKEN=must-not-appear\n", encoding="utf-8")
     (project / "outside").mkdir()
     config = ControlConfig(
@@ -96,7 +116,8 @@ def make_service(tmp_path: Path) -> JournalContextService:
 
 def test_collect_preserves_local_only_and_failure_evidence_without_sensitive_paths(tmp_path: Path):
     service = make_service(tmp_path)
-    result = service.collect(start="2026-08-19T00:00:00Z", end="2026-08-23T23:59:59Z", page_size=500, editor_hints=["remember worker residency"])
+    end = datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    result = service.collect(start="2026-08-19T00:00:00Z", end=end, page_size=500, editor_hints=["remember worker residency"])
     rendered = json.dumps(result)
     assert "local-only-commit" in rendered
     assert "local-uncommitted" in rendered
@@ -104,9 +125,12 @@ def test_collect_preserves_local_only_and_failure_evidence_without_sensitive_pat
     assert ".env" not in rendered
     assert "must-not-appear" not in rendered
     assert "failed" in rendered.lower()
+    assert "family_record=fr-1234" in rendered
+    assert "producer_refs=fabric-execution,forge-evaluation" in rendered
+    assert "language_profile=source-profile-0.4" in rendered
     assert result["editor_hints"][0]["authority"] == "LOW"
     bundle_id = result["bundle_id"]
-    repeat = service.collect(start="2026-08-19T00:00:00Z", end="2026-08-23T23:59:59Z", page_size=500)
+    repeat = service.collect(start="2026-08-19T00:00:00Z", end=end, page_size=500)
     assert repeat["bundle_id"] == bundle_id
     stored = (tmp_path / "private-bundles" / f"{bundle_id}.json").read_text(encoding="utf-8")
     assert "worker residency" not in stored
@@ -115,7 +139,8 @@ def test_collect_preserves_local_only_and_failure_evidence_without_sensitive_pat
 
 def test_collect_is_interval_bounded_and_paginated(tmp_path: Path):
     service = make_service(tmp_path)
-    first = service.collect(start="2026-08-19T00:00:00Z", end="2026-08-23T23:59:59Z", page_size=1)
+    end = datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    first = service.collect(start="2026-08-19T00:00:00Z", end=end, page_size=1)
     assert first["next_cursor"] == 1
     second = service.get(str(first["bundle_id"]), cursor=1, page_size=500)
     assert second["items"]

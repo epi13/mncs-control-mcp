@@ -2,6 +2,7 @@
 Description=Watch MNCS Control source revision
 
 [Path]
+PathChanged=%h/Documents/Projects/mncs-control-mcp/.git/HEAD
 PathChanged=%h/Documents/Projects/mncs-control-mcp/.git/refs/heads/main
 PathChanged=%h/Documents/Projects/mncs-control-mcp/.git/packed-refs
 Unit=mncs-control-update.service
