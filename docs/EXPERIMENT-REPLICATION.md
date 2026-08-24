@@ -133,7 +133,30 @@ Demonstrated (2026-08, live environment):
   replicated verbatim onto the explicitly requested remote Linux worker with
   full evidence chains and identical content-addressed result identities;
 - deliberate artifact mutation rejected before dispatch;
-- nonexistent-worker request rejected without fallback.
+- nonexistent-worker request rejected without fallback;
+- exact-target admission failing closed when the only fresh capability
+  observation was `consumer-declared` or when an `operator-asserted`
+  observation exceeded `capability_max_age_seconds` (observed live: the
+  re-dispatch after staleness was denied `UNKNOWN` by Fabric, never admitted).
+
+Revalidated 2026-08-23/24 against Fabric 0.2.0a31 with a remote Linux worker:
+both backends re-replicated PASS end to end (admission → execution → local
+re-verification → Forge comparison + concept evaluation → Commons Replication
+Family Record with `attempts` + `replicates`), plus all three negative gates.
+
+### Operational notes from live runs
+
+- The first dispatch of a cold bundle must transfer the language binary,
+  verify archive digests, execute, and return within
+  `fabric_service_timeout_seconds` (capped at 30 s). On slow links this can
+  time out client-side even though Fabric durably records `EXECUTED`; a retry
+  then resolves as `DUPLICATE_IDEMPOTENT` with replayed evidence, and Control
+  completes normally. This is recovery by idempotency, not silent fallback.
+- Exact-target admission trusts only fresh worker-observed or
+  operator-asserted capability observations. Operator assertions expire
+  (`capability_max_age_seconds`, default 900 s), so re-assert capabilities via
+  the admin surface before replication batches; consumer-declared probe churn
+  never admits a request.
 
 Not demonstrated:
 
