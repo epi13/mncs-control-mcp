@@ -45,6 +45,7 @@ _REFERENCE_RELATIONS = {
     "failure",
     "artifact",
     "backend",
+    "rights_evidence",
 }
 
 
