@@ -713,3 +713,30 @@ class ExperimentManagerTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RightsEvidenceReferenceTest(ExperimentManagerTests):
+    def test_rights_evidence_relation_attaches_and_persists(self) -> None:
+        manager = ExperimentManager(self.config, runtime_factory=lambda _config: BlockingRuntime(), resume=False)
+        accepted = manager.start({**self.spec, "max_turns": 1})
+        experiment_id = str(accepted["experiment_id"])
+        reference = {
+            "producer": "mncs-rights-provenance",
+            "recordKind": "RightsManifest",
+            "schemaVersion": "0.2.0",
+            "stableId": "mncs-rights-provenance://manifest/demo",
+            "contentDigest": "sha256:" + "e" * 64,
+        }
+        manager.attach_reference(experiment_id, "rights_evidence", reference)
+        with self.assertRaises(ControlError):
+            manager.attach_reference(experiment_id, "not_a_relation", reference)
+        current = manager.status(experiment_id)
+        attached = [
+            item
+            for item in current["producer_references"]
+            if item["relation"] == "rights_evidence"
+        ]
+        self.assertEqual(len(attached), 1)
+        self.assertEqual(attached[0]["reference"]["recordKind"], "RightsManifest")
+        manager.stop(experiment_id)
+        self.wait_terminal(manager, experiment_id)
