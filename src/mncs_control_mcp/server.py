@@ -410,6 +410,26 @@ def build_server(config: ControlConfig | None = None) -> Any:
     def experiment_readiness(profile: str = "base-inference") -> dict[str, object]:
         return invoke("experiment_readiness", control_plane.experiment_readiness, profile, audit_metadata={"profile": profile})  # type: ignore[return-value]
 
+    @server.tool(name="specialist_route_shadow", description="Evaluate an external MNEL routing proposal in shadow mode. The existing policy decision remains authoritative; no tool is authorized or executed by this operation.", annotations=annotation(read_only=False, destructive=True), structured_output=True)
+    def specialist_route_shadow(
+        artifact: dict[str, object],
+        request_features: list[int],
+        catalog: list[dict[str, object]],
+        existing_decision: dict[str, object] | None = None,
+        provider_command: list[str] | None = None,
+        timeout_seconds: float = 5.0,
+    ) -> dict[str, object]:
+        return invoke(
+            "specialist_route_shadow",
+            control_plane.specialist_route_shadow,
+            artifact,
+            request_features,
+            catalog,
+            existing_decision=existing_decision,
+            provider_command=provider_command,
+            timeout_seconds=timeout_seconds,
+        )  # type: ignore[return-value]
+
     @server.tool(name="experiment_start", description="Start a durable multi-turn experiment. Control persists coordinator state; Harness resolves exact model pins; Fabric owns detached execution. The MCP client may disconnect after acceptance.", annotations=network_mutate, structured_output=True)
     def experiment_start(spec: dict[str, object]) -> dict[str, object]:
         def start() -> dict[str, object]:

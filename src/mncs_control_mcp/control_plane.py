@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
 import shutil
 import time
+from collections.abc import Sequence
 from pathlib import Path
 
 from .adapters import IntegrationBundle, TestAdapter
@@ -16,6 +18,11 @@ from .github_auth import github_auth_status
 from .processes import ProcessManager
 from .sandbox import Sandbox, utc_now
 from .security import redact_text
+from .specialist_router import (
+    ProviderRun,
+    invoke_control_specialist_shadow,
+    prepare_request,
+)
 from .tooling import ProjectService
 from .workspace import WorkspacePolicy
 
@@ -211,7 +218,11 @@ class ControlPlaneService:
             "journal_context": {
                 "available": self.journal_context is not None,
                 "status": "CONFIGURED" if self.journal_context is not None else "UNAVAILABLE",
-                "supported_operations": ["status", "bounded interval collection", "immutable bundle pagination"],
+                "supported_operations": [
+                    "status",
+                    "bounded interval collection",
+                    "immutable bundle pagination",
+                ],
                 "limitations": [
                     "projection only; Atlas owns journal semantics",
                     "local-only and uncommitted work is provisional evidence",
@@ -231,6 +242,19 @@ class ControlPlaneService:
                 "mutation": False,
                 "network_required": False,
                 "local": False,
+            },
+            "specialist_routing": {
+                "available": True,
+                "version": "mncs-control-specialist-routing-shadow/0.1",
+                "supported_operations": ["bounded external proposal", "shadow comparison"],
+                "limitations": [
+                    "existing policy decision remains authoritative",
+                    "provider output cannot authorize or execute a tool",
+                ],
+                "security_boundary": "workspace sandbox with bounded stdin/stdout and timeout",
+                "mutation": False,
+                "network_required": False,
+                "local": True,
             },
             "gpu": {
                 "available": shutil.which("nvidia-smi") is not None,
@@ -385,7 +409,10 @@ class ControlPlaneService:
             try:
                 result["journal_context"] = self.journal_context.status()  # type: ignore[union-attr]
             except Exception as exc:
-                result["journal_context"] = {"overall": "UNKNOWN", "diagnostic": redact_text(str(exc))[:300]}
+                result["journal_context"] = {
+                    "overall": "UNKNOWN",
+                    "diagnostic": redact_text(str(exc))[:300],
+                }
         return result
 
     def experiment_readiness(self, profile: str = "base-inference") -> dict[str, object]:
@@ -394,6 +421,86 @@ class ControlPlaneService:
             integrations=self.integrations,
             sandbox=self.sandbox,
             profile=profile,
+        )
+
+    def specialist_route_shadow(
+        self,
+        artifact: dict[str, object],
+        request_features: list[int],
+        catalog: list[dict[str, object]],
+        *,
+        existing_decision: dict[str, object] | None = None,
+        provider_command: list[str] | None = None,
+        timeout_seconds: float = 5.0,
+    ) -> dict[str, object]:
+        """Measure an MNEL routing proposal without changing policy or execution."""
+
+        if not provider_command:
+            _request, _encoded, request_identity, checked_catalog, checked_decision = (
+                prepare_request(
+                    artifact,
+                    request_features,
+                    catalog,
+                    existing_decision=existing_decision,
+                )
+            )
+            catalog_bytes = sum(int(item.get("source_bytes", 0)) for item in checked_catalog)
+            return {
+                "schema": "mncs-control-specialist-routing-shadow/0.1",
+                "status": "UNKNOWN",
+                "request_identity": request_identity,
+                "model_identity": artifact.get("model_identity"),
+                "generation_identity": artifact.get("generation_identity"),
+                "calibration_identity": artifact.get("calibration_identity"),
+                "existing_decision": checked_decision,
+                "abstained": True,
+                "escalation_reason": "specialist-provider-not-configured",
+                "fallback_family": checked_decision.get("selected_family"),
+                "candidate_tool_ids": [],
+                "schema_valid": False,
+                "execution_authorized": False,
+                "policy_authoritative": True,
+                "measurements": {
+                    "catalog_bytes_available": catalog_bytes,
+                    "catalog_bytes_selected": 0,
+                    "catalog_bytes_avoided": 0,
+                    "provider_elapsed_ns": 0,
+                    "p50_provider_latency_ns": 0,
+                    "p95_provider_latency_ns": 0,
+                    "larger_model_calls_avoided": 0,
+                    "abstention_rate": 1.0,
+                    "schema_validity": 0.0,
+                },
+                "authority": "policy-authoritative-existing-decision",
+            }
+
+        def run_provider(command: Sequence[str], payload: bytes, timeout: float) -> ProviderRun:
+            argv = list(command)
+            result = self.sandbox.run(
+                shlex.join(argv),
+                scope="workspace",
+                project=None,
+                cwd=".",
+                timeout_seconds=timeout,
+                network=False,
+                input_bytes=payload,
+            )
+            return ProviderRun(
+                result.exit_code,
+                result.stdout.encode("utf-8"),
+                result.timed_out,
+                result.output_truncated,
+                int(result.duration_seconds * 1_000_000_000),
+            )
+
+        return invoke_control_specialist_shadow(
+            provider_command,
+            artifact,
+            request_features,
+            catalog,
+            existing_decision=existing_decision,
+            timeout_seconds=timeout_seconds,
+            runner=run_provider,
         )
 
     def review(self, project: str, depth: str = "standard") -> dict[str, object]:
