@@ -573,6 +573,7 @@ class Sandbox:
         environment: dict[str, str] | None = None,
         use_ssh_agent: bool = False,
         runtime_mounts: tuple[tuple[Path, str], ...] = (),
+        input_bytes: bytes | None = None,
     ) -> SandboxResult:
         if not self.config.allow_terminal:
             raise ControlError("TERMINAL_DISABLED", "terminal execution is disabled")
@@ -598,7 +599,7 @@ class Sandbox:
             process = subprocess.Popen(
                 argv,
                 cwd=None,
-                stdin=subprocess.DEVNULL,
+                stdin=subprocess.PIPE if input_bytes is not None else subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 env={},
@@ -607,7 +608,7 @@ class Sandbox:
         except OSError as exc:
             raise ControlError("COMMAND_START_FAILED", str(exc)) from exc
         stdout, stderr, truncated = _communicate_bounded(
-            process, self.config.max_output_bytes, timeout
+            process, self.config.max_output_bytes, timeout, input_bytes=input_bytes
         )
         timed_out = process.poll() is None
         if timed_out:
@@ -651,7 +652,11 @@ def _is_relative_to(path: Path, root: Path) -> bool:
 
 
 def _communicate_bounded(
-    process: subprocess.Popen[bytes], maximum: int, timeout: float
+    process: subprocess.Popen[bytes],
+    maximum: int,
+    timeout: float,
+    *,
+    input_bytes: bytes | None = None,
 ) -> tuple[str, str, bool]:
     buffers = [bytearray(), bytearray()]
     truncated = [False]
@@ -670,6 +675,21 @@ def _communicate_bounded(
         threading.Thread(target=drain, args=(process.stdout, buffers[0]), daemon=True),
         threading.Thread(target=drain, args=(process.stderr, buffers[1]), daemon=True),
     ]
+    input_thread: threading.Thread | None = None
+    if input_bytes is not None and process.stdin is not None:
+
+        def feed() -> None:
+            try:
+                process.stdin.write(input_bytes)
+                process.stdin.close()
+            except (BrokenPipeError, OSError):
+                try:
+                    process.stdin.close()
+                except OSError:
+                    pass
+
+        input_thread = threading.Thread(target=feed, daemon=True)
+        input_thread.start()
     for thread in threads:
         thread.start()
     try:
@@ -678,6 +698,8 @@ def _communicate_bounded(
         pass
     for thread in threads:
         thread.join(timeout=2)
+    if input_thread is not None:
+        input_thread.join(timeout=2)
     stdout, stdout_cut = bounded_text(buffers[0].decode("utf-8", errors="replace"), maximum)
     stderr, stderr_cut = bounded_text(buffers[1].decode("utf-8", errors="replace"), maximum)
     return stdout, stderr, truncated[0] or stdout_cut or stderr_cut

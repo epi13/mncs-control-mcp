@@ -193,3 +193,15 @@ An incremental implementation can proceed without replacing the existing MCP pat
 7. keep existing large-model routing as the explicit fallback.
 
 This architecture is intentionally additive. Existing MCP behavior remains the safety fallback while bounded learned control earns narrower authority through evidence.
+
+## Executable first slice
+
+Control exposes `specialist_route_shadow` as a bounded, destructive-capable sandbox
+operation because its declared provider command is external code. The provider receives
+one compact feature vector and a versioned catalog, while the returned observation
+records exact-family agreement, candidate-set recall, false accepts, abstention and
+escalation correctness, schema validity, catalog bytes/tokens avoided, larger-model
+calls avoided, and p50/p95 latency fields. The existing policy decision is retained as
+the fallback and remains authoritative; the specialist cannot authorize or execute a
+tool. Missing configuration, stale/malformed responses, schema drift, timeout, or
+budget violations fail closed to `UNKNOWN`.
