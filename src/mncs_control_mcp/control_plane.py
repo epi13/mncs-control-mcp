@@ -161,15 +161,6 @@ class ControlPlaneService:
                 "local": True,
             },
             "github": self._github_capability(github),
-            "joern": self._named_capability(
-                "joern.analysis",
-                available=any(
-                    (Path.home() / ".local" / "bin" / name).exists()
-                    for name in ("joern", "joern-parse")
-                ),
-                operations=["parse", "query"],
-                limitation="Joern is exposed through a read-only install mount, not the real home",
-            ),
             "testing": {
                 "available": True,
                 "version": None,
@@ -300,7 +291,6 @@ class ControlPlaneService:
                     "github.read",
                     "github.push",
                     "github.pull_request.write",
-                    "joern.analysis",
                     "forge.evaluate",
                     "fabric.execute",
                     "commons.read",
@@ -377,25 +367,6 @@ class ControlPlaneService:
             "ssh_github": getattr(status, "ssh_github", "unavailable"),
             "source": getattr(status, "source", None),
             **({"detail": public.get("detail")} if isinstance(public, dict) else {}),
-        }
-
-    @staticmethod
-    def _named_capability(
-        name: str,
-        *,
-        available: bool,
-        operations: list[str],
-        limitation: str,
-    ) -> dict[str, object]:
-        return {
-            "available": available,
-            "version": None,
-            "supported_operations": operations,
-            "limitations": [limitation],
-            "security_boundary": name,
-            "mutation": False,
-            "network_required": False,
-            "local": True,
         }
 
     def developer_readiness(self, repository: str | None = None) -> dict[str, object]:

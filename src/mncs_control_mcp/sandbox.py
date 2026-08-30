@@ -19,14 +19,6 @@ from .github_auth import materialize_sandbox_gh_config, sandbox_github_environme
 from .security import bounded_text, validate_environment
 from .workspace import ScopeResolution, WorkspacePolicy
 
-_JOERN_NAMES = (
-    "joern",
-    "joern-parse",
-    "joern-export",
-    "joern-flow",
-    "joern-scan",
-    "joern-slice",
-)
 _ASKPASS_GUARD = (
     "unset SSH_ASKPASS GIT_ASKPASS DISPLAY; "
     "export SSH_ASKPASS_REQUIRE=never GIT_TERMINAL_PROMPT=0 GH_PROMPT_DISABLED=1; "
@@ -115,73 +107,6 @@ class Sandbox:
             home / ".rustup",
         )
         return tuple(path for path in defaults if path.exists())
-
-    def _joern_install_roots(self) -> tuple[Path, ...]:
-        """Locate the canonical Joern distribution without mounting the real home."""
-
-        roots: list[Path] = []
-        seen: set[Path] = set()
-
-        def add(path: Path) -> None:
-            try:
-                resolved = path.expanduser().resolve(strict=True)
-            except OSError:
-                return
-            if resolved in seen or not resolved.is_dir():
-                return
-            seen.add(resolved)
-            roots.append(resolved)
-
-        for directory in self._tool_paths():
-            if not directory.is_dir():
-                continue
-            for name in _JOERN_NAMES:
-                candidate = directory / name
-                try:
-                    target = candidate.resolve(strict=True)
-                except OSError:
-                    continue
-                if target.parent.name == "joern-cli":
-                    add(target.parent.parent)
-                elif "joern" in target.parts:
-                    add(target.parent)
-
-        share = Path.home() / ".local" / "share" / "joern"
-        if share.is_dir():
-            versions = sorted(
-                item for item in share.iterdir() if item.is_dir() and not item.is_symlink()
-            )
-            if versions:
-                add(versions[-1])
-        return tuple(roots)
-
-    def _bind_host_tree(self, argv: list[str], source: Path) -> None:
-        """Expose one existing host directory at its original path, read-only."""
-
-        reserved = {
-            "/",
-            "/bin",
-            "/dev",
-            "/etc",
-            "/home",
-            "/home/developer",
-            "/lib",
-            "/lib64",
-            "/opt",
-            "/proc",
-            "/run",
-            "/tmp",
-            "/usr",
-            "/var",
-            "/workspace",
-        }
-        current = Path("/")
-        for part in source.parts[1:-1]:
-            current /= part
-            if current.as_posix() not in reserved:
-                argv.extend(("--dir", current.as_posix()))
-                reserved.add(current.as_posix())
-        argv.extend(("--ro-bind", str(source), str(source)))
 
     def _project_harness_runtime(self, argv: list[str], safe_overrides: dict[str, str]) -> None:
         """Project deliberate Harness config and consumer sockets read-only."""
@@ -496,11 +421,6 @@ class Sandbox:
                 path_entries.append(destination)
             if source.name == ".rustup":
                 safe_overrides.setdefault("RUSTUP_HOME", destination)
-
-        for joern_root in self._joern_install_roots():
-            self._bind_host_tree(argv, joern_root)
-            safe_overrides.setdefault("JOERN_HOME", str(joern_root / "joern-cli"))
-            safe_overrides.setdefault("JOERN_INSTALL_ROOT", str(joern_root))
 
         forward_ssh = (
             network_enabled and self.config.git_use_ssh_agent and (use_ssh_agent or network_enabled)

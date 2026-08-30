@@ -169,25 +169,15 @@ def test_sandbox_disables_askpass_and_does_not_put_tokens_in_argv_names_only(con
     assert "oauth_token" not in joined
 
 
-@pytest.mark.requires_bwrap_namespace
-def test_sandbox_askpass_is_inactive_and_joern_or_guard_is_visible(config) -> None:
+def test_sandbox_runtime_does_not_include_legacy_analysis_mount(config) -> None:
     (config.workspace_root / "alpha").mkdir()
     _, sandbox = _sandbox(config)
-    result = sandbox.run(
-        'printf \'%s\\n\' "${SSH_ASKPASS-unset}" "${GIT_TERMINAL_PROMPT-unset}" "${SSH_ASKPASS_REQUIRE-unset}"; '
-        "command -v joern-parse >/dev/null && echo JOERN_VISIBLE || echo JOERN_ABSENT",
-        scope="project",
-        project="alpha",
-        cwd=".",
-        timeout_seconds=30,
+    argv, _ = sandbox.command_argv(
+        "true",
+        sandbox.policy.resolve_scope(scope="project", project="alpha", cwd="."),
         network=False,
     )
-    assert result.exit_code == 0, result.stderr
-    assert "unset" in result.stdout or result.stdout.splitlines()[0] == ""
-    assert "never" in result.stdout
-    assert "JOERN_VISIBLE" in result.stdout or "JOERN_ABSENT" in result.stdout
-    if (Path.home() / ".local" / "bin" / "joern").exists():
-        assert "JOERN_VISIBLE" in result.stdout
+    assert "joern" not in " ".join(argv).lower()
 
 
 def test_network_policy_can_disable_opt_in(config) -> None:

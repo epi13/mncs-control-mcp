@@ -374,7 +374,7 @@ def build_server(config: ControlConfig | None = None) -> Any:
     def control_capabilities() -> dict[str, object]:
         return invoke("control_capabilities", control_plane.capabilities)  # type: ignore[return-value]
 
-    @server.tool(name="developer_readiness", description="Observe whether the protected environment can carry a development task through analysis, GitHub, Joern, and Forge without granting those capabilities.", annotations=ro, structured_output=True)
+    @server.tool(name="developer_readiness", description="Observe whether the protected environment can carry a development task through analysis, GitHub, and Forge without granting those capabilities.", annotations=ro, structured_output=True)
     def developer_readiness(repository: str | None = None) -> dict[str, object]:
         return invoke("developer_readiness", control_plane.developer_readiness, repository, audit_metadata={"repository": repository})  # type: ignore[return-value]
 

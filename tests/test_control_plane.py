@@ -58,9 +58,10 @@ def test_capabilities_and_project_review_are_bounded(config) -> None:
         "gpu",
         "network",
         "github",
-        "joern",
         "developer",
     } <= capabilities.keys()
+    assert "joern" not in capabilities
+    assert "joern.analysis" not in capabilities["developer"]["supported_operations"]
     assert "github.push" in capabilities["developer"]["supported_operations"]
     readiness = plane.developer_readiness()
     assert "capabilities" in readiness

@@ -17,7 +17,6 @@ DEVELOPER_CAPABILITIES = (
     "github.read",
     "github.push",
     "github.pull_request.write",
-    "joern.analysis",
     "forge.evaluate",
     "fabric.execute",
     "commons.read",
@@ -214,24 +213,6 @@ def collect_developer_checks(
             output.splitlines()[0] if output else "gh is not authenticated inside the sandbox",
             capability="github.pull_request.write",
             required=True,
-            observed_from="sandbox",
-        )
-    )
-
-    code, output = _sandbox_probe(
-        sandbox,
-        'command -v joern && command -v joern-parse && test -x "$(command -v joern)" && test -x "$(command -v joern-parse)" && echo JOERN_OK',
-        timeout=10,
-    )
-    checks.append(
-        DeveloperCheck(
-            "joern.installation",
-            "available" if code == 0 and "JOERN_OK" in output else "unavailable",
-            "joern and joern-parse are executable inside the sandbox"
-            if code == 0 and "JOERN_OK" in output
-            else (output.splitlines()[-1] if output else "Joern is not visible inside the sandbox"),
-            capability="joern.analysis",
-            required=False,
             observed_from="sandbox",
         )
     )

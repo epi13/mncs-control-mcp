@@ -155,16 +155,7 @@ def evaluate_experiment_readiness(
     forge_status = integrations.forge.status()
     nodes = list(fabric.get("known_nodes") or fabric.get("workers") or [])
     capabilities = developer.get("capabilities") if isinstance(developer, dict) else {}
-    joern_cap = (capabilities or {}).get("joern.analysis") or {}
     forge_cap = (capabilities or {}).get("forge.evaluate") or {}
-    joern = {
-        "sandbox_callable": joern_cap.get("state") == "available" and joern_cap.get("authorized") is True,
-        "host_visible": any(
-            (Path.home() / ".local" / "bin" / name).exists() for name in ("joern", "joern-parse")
-        ),
-        "detail": joern_cap.get("detail"),
-        "status": READY if joern_cap.get("state") == "available" else DEGRADED,
-    }
     forge = {
         **dict(forge_status or {}),
         "sandbox_callable": forge_cap.get("state") == "available" and forge_cap.get("authorized") is True,
@@ -202,12 +193,6 @@ def evaluate_experiment_readiness(
                 "status": control["status"],
                 "detail": control,
                 "evidence": control.get("evidence"),
-            }
-            layers["joern"] = {
-                "name": "joern",
-                "status": joern.get("status") or UNKNOWN,
-                "detail": joern,
-                "evidence": None,
             }
             layers["forge"] = {
                 "name": "forge",
@@ -327,7 +312,6 @@ def evaluate_experiment_readiness(
         },
         commons=commons,
         forge=forge,
-        joern=joern,
         reference_studies=studies,
         routing={
             "available": any(str(node.get("availability") or "").upper() == "AVAILABLE" for node in nodes),

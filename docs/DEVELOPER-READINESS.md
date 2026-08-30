@@ -35,14 +35,13 @@ Forge candidate-freshness check for that project.
 | GitHub authentication | available, authenticated_insufficient, misconfigured, unavailable |
 | GitHub push and PR write | available, authenticated_insufficient, degraded, unavailable |
 | SSH agent | available, degraded, optional |
-| Joern inside the sandbox | available, unavailable, optional |
 | Forge evaluate / candidate freshness | available, degraded, optional |
 | Fabric execute | available, degraded, unavailable |
 | Commons read / publish | available, optional |
 | ELH / Ollama | optional |
 
 JSON includes a `capabilities` object with names such as `git.read`,
-`github.push`, `github.pull_request.write`, `joern.analysis`, `forge.evaluate`,
+`github.push`, `github.pull_request.write`, `forge.evaluate`,
 `fabric.execute`, `commons.read`, and `commons.publish`. `authorized` means the
 capability was observed, not that the doctor created it.
 
@@ -57,13 +56,6 @@ arguments.
 
 Rotate by replacing the env file, running `gh auth login` again, or revoking the
 GitHub token, then restarting `mncs-control-tunnel.service`.
-
-## Joern
-
-The canonical install is `~/.local/share/joern/<version>/joern-cli`. Control
-bind-mounts that tree read-only at the original host path so
-`~/.local/bin/joern*` wrappers resolve. Write CPG output under `/workspace` or
-`/tmp`.
 
 ## Forge candidates
 
@@ -80,7 +72,5 @@ Historical evidence stays attached to the previous identity.
   GitHub. HTTPS + `gh` is the supported path; SSH is optional.
 - `You are not logged into any GitHub hosts` inside the sandbox: host `gh auth
   status` must succeed, or `github.env` must exist with mode `0600`.
-- `joern: not found` inside the sandbox: confirm `~/.local/bin/joern` points at
-  `~/.local/share/joern/<version>/joern-cli/joern`.
 - `candidate no longer matches current content`: call `forge_candidate_refresh`
   or let `run_mncs_evaluation` rebind, then evaluate again.
