@@ -35,7 +35,6 @@ _REQUIRED_TOOLS = {
     "control_capabilities",
     "project_review",
     "project_check",
-    "laboratory_status",
     "developer_readiness",
     "experiment_readiness",
     "experiment_start",

@@ -8,7 +8,6 @@ import pytest
 
 from mncs_control_mcp.adapters import IntegrationBundle
 from mncs_control_mcp.control_plane import ControlPlaneService
-from mncs_control_mcp.errors import ControlError
 from mncs_control_mcp.git_adapter import GitService
 from mncs_control_mcp.processes import ProcessManager
 from mncs_control_mcp.sandbox import Sandbox
@@ -81,28 +80,11 @@ def test_capabilities_and_project_review_are_bounded(config) -> None:
     assert review["todo_markers"]["TODO"] == 1
 
 
-def test_typed_workflow_rejects_unknown_workflow(config) -> None:
+def test_generic_workflow_runner_is_not_exposed(config) -> None:
+    # The private run_workflow orchestration plane was removed: multi-step
+    # workflows compose the individual typed tools instead.
     plane = _plane(config)
-    with pytest.raises(ControlError):
-        plane.run_workflow("unknown", "missing")
-
-
-def test_named_workflow_has_bounded_auditable_steps(config) -> None:
-    root = config.workspace_root / "workflow-project"
-    root.mkdir()
-    (root / "pyproject.toml").write_text(
-        "[project]\nname='workflow-project'\nversion='0.1.0'\n", encoding="utf-8"
-    )
-    plane = _plane(config)
-    result = plane.run_workflow("review_and_check_project", "workflow-project", profile="quick")
-    assert result["workflow"] == "review_and_check_project"
-    assert result["workflow_execution_id"].startswith("ctrl-run-")
-    assert [step["operation"] for step in result["steps"]] == [
-        "project_review",
-        "test_discover",
-        "project_check",
-    ]
-    assert result["control_job_id"].startswith("ctrl-")
+    assert not hasattr(plane, "run_workflow")
 
 
 def test_external_control_job_has_stable_lifecycle(config) -> None:

@@ -214,7 +214,7 @@ service health as OK:
 10. Finally create a disposable project and perform a harmless write/read test.
 
 For a useful orchestration smoke test, ask the app to `review mncs-language`,
-`show laboratory_status`, or run a bounded `dispatch_fabric_job` with
+`show fabric_status`, or run a bounded `dispatch_fabric_job` with
 `wait=false`; retrieve its `ctrl-...` result using `control_job_status` and
 `control_job_result`.
 

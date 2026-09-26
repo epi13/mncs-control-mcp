@@ -6,8 +6,6 @@ Worker, model, routing, Commons, and Fabric classification are owned by Harness.
 
 from __future__ import annotations
 
-import importlib
-import json
 from pathlib import Path
 from typing import Any
 
@@ -24,22 +22,7 @@ READINESS_SCHEMA = "mncs.experiment-readiness.v1"
 MappingLike = dict[str, Any]
 
 
-def _load_harness_contract(config: ControlConfig) -> Any | None:
-    from .adapters import _load_sibling_package
-
-    try:
-        _load_sibling_package("epi13_local_harness", config.harness_path)
-        return importlib.import_module("epi13_local_harness.experiment_readiness")
-    except Exception:
-        try:
-            return importlib.import_module("epi13_local_harness.experiment_readiness")
-        except Exception:
-            return None
-
-
-def _probe_artifact_write(path: Path, harness: Any | None) -> dict[str, Any]:
-    if harness is not None and hasattr(harness, "probe_artifact_write"):
-        return harness.probe_artifact_write(path)
+def _probe_artifact_write(path: Path) -> dict[str, Any]:
     try:
         path.mkdir(parents=True, exist_ok=True)
         marker = path / ".mncs-control-experiment-readiness.tmp"
@@ -92,45 +75,6 @@ def evaluate_control_self(
     }
 
 
-def _reference_studies(config: ControlConfig) -> dict[str, Any]:
-    root = config.workspace_root / "mncs-reference-studies"
-    if not root.is_dir():
-        return {"available": False, "path": str(root)}
-    commit = None
-    try:
-        import subprocess
-
-        result = subprocess.run(
-            ["git", "-C", str(root), "rev-parse", "HEAD"],
-            capture_output=True,
-            text=True,
-            timeout=3,
-            check=False,
-        )
-        commit = (result.stdout or "").strip() or None
-    except Exception:
-        commit = None
-    schema = (root / "schemas" / "study.schema.json").is_file()
-    limitation_path = root / "case-studies" / "ravel" / "ravel-0.5-historical-limitation.json"
-    limitation = None
-    if limitation_path.is_file():
-        try:
-            limitation = json.loads(limitation_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            limitation = {"disposition": "KNOWN_HISTORICAL_LIMITATION"}
-    output_path = root / "evidence" / "actual"
-    return {
-        "available": True,
-        "path": str(root),
-        "commit": commit,
-        "schema_available": schema,
-        "output_path": str(output_path),
-        "ravel_0_5_limitation": limitation,
-        "current_ravel_lane_valid": False if limitation else None,
-        "status": READY if commit and schema else DEGRADED,
-    }
-
-
 def evaluate_experiment_readiness(
     config: ControlConfig,
     *,
@@ -138,7 +82,16 @@ def evaluate_experiment_readiness(
     sandbox: Any | None = None,
     profile: str = "base-inference",
 ) -> dict[str, Any]:
-    harness = _load_harness_contract(config)
+    """Project integration-adapter status into a readiness verdict Control owns.
+
+    Every layer below is a fact Control can verify itself: its own
+    self-check, adapter availability projections, Forge capability gating,
+    and a write probe against Control's own experiment store. The overall
+    verdict rule is stated, not delegated: BLOCKED when a required layer is
+    BLOCKED, DEGRADED when a required layer is not READY, else READY.
+    Worker, model, routing, Commons, and Fabric classification stay with
+    their owning subsystems; readiness here never re-judges them.
+    """
     developer = developer_readiness_payload(
         config,
         sandbox=sandbox,
@@ -150,181 +103,93 @@ def evaluate_experiment_readiness(
         integrations=integrations,
         developer=developer,
     )
-    fabric = integrations.fabric.status()
-    commons = integrations.commons.status()
-    forge_status = integrations.forge.status()
+    harness_status = integrations.harness.status() or {}
+    fabric = integrations.fabric.status() or {}
+    commons = integrations.commons.status() or {}
+    forge_status = integrations.forge.status() or {}
     nodes = list(fabric.get("known_nodes") or fabric.get("workers") or [])
+    available_nodes = sum(
+        1 for node in nodes if str(node.get("availability") or "").upper() == "AVAILABLE"
+    )
     capabilities = developer.get("capabilities") if isinstance(developer, dict) else {}
     forge_cap = (capabilities or {}).get("forge.evaluate") or {}
+    forge_callable = (
+        forge_cap.get("state") == "available" and forge_cap.get("authorized") is True
+    )
     forge = {
-        **dict(forge_status or {}),
-        "sandbox_callable": forge_cap.get("state") == "available" and forge_cap.get("authorized") is True,
-        "callable": forge_status.get("available") is True and forge_cap.get("state") == "available",
+        "available": forge_status.get("available"),
+        "sandbox_callable": forge_callable,
+        "callable": forge_status.get("available") is True and forge_callable,
         "status": READY
-        if forge_cap.get("state") == "available" and forge_status.get("available")
+        if forge_callable and forge_status.get("available")
         else DEGRADED if forge_status else UNKNOWN,
     }
-    studies = _reference_studies(config)
-    destinations = [
-        config.workspace_root / "mncs-harness",
-        config.workspace_root / "mncs-reference-studies" / "evidence" / "actual",
-    ]
-    artifact_paths = []
-    writable = True
-    for destination in destinations:
-        if destination.exists() or destination == destinations[-1]:
-            probe = _probe_artifact_write(destination if destination.exists() else config.workspace_root, harness)
-            artifact_paths.append(probe)
-            writable = writable and bool(probe.get("writable"))
-    artifact_write = {
-        "writable": writable,
-        "path": str(config.workspace_root / "mncs-reference-studies" / "evidence" / "actual"),
-        "tested": artifact_paths,
-    }
-
-    if harness is not None and hasattr(harness, "inspect_live_config"):
-        try:
-            from epi13_local_harness.config import load_config
-
-            live = harness.inspect_live_config(load_config(config.harness_config_path), profile=profile)
-            layers = dict(live.get("layers") or {})
-            layers["control"] = {
-                "name": "control",
-                "status": control["status"],
-                "detail": control,
-                "evidence": control.get("evidence"),
-            }
-            layers["forge"] = {
-                "name": "forge",
-                "status": forge.get("status") or UNKNOWN,
-                "detail": forge,
-                "evidence": None,
-            }
-            layers["artifact_write"] = {
-                "name": "artifact_write",
-                "status": READY if artifact_write.get("writable") else BLOCKED,
-                "detail": artifact_write,
-                "evidence": None,
-            }
-            required = tuple(live.get("required_layers") or [])
-            if hasattr(harness, "_overall"):
-                status, warnings = harness._overall(list(layers.values()), required)
-            else:
-                status, warnings = live.get("status") or UNKNOWN, live.get("optional_warnings") or []
-            live["layers"] = layers
-            live["status"] = status
-            live["profile_status"] = status
-            live["optional_warnings"] = warnings
-            live["inspected_at"] = utc_now()
-            live["local_fallback"] = False
-            live["ssh_used"] = False
-            live["control_projection"] = True
-            return live
-        except Exception:
-            pass
-
-    if harness is None or not hasattr(harness, "evaluate_layers"):
-        return {
-            "schema": READINESS_SCHEMA,
-            "status": UNKNOWN,
-            "profile": profile,
-            "profile_status": UNKNOWN,
-            "claim_boundary": "infrastructure validation",
-            "inspected_at": utc_now(),
-            "layers": {
-                "control": {"status": control["status"], "detail": control, "evidence": control.get("evidence")},
-                "harness": {
-                    "status": BLOCKED,
-                    "detail": {"harness_contract": "unavailable"},
-                    "evidence": None,
-                },
-            },
-            "required_layers": ["control", "harness"],
-            "optional_warnings": [],
-            "local_fallback": False,
-            "ssh_used": False,
-            "note": "Control could not import the Harness readiness contract",
-        }
-
-    runtime_identities = {
+    # Control probes only its own experiment store: the directory the
+    # coordinator persists terminal experiment state under. Sibling
+    # checkouts are never written to by a readiness probe.
+    store = config.job_state_path.expanduser().resolve().parent / "experiments"
+    probe = _probe_artifact_write(store)
+    layers = {
         "control": {
-            "package": "mncs-control-mcp",
-            "version": __version__,
-            "source_commit": None,
-            "module": "mncs_control_mcp",
+            "status": control["status"],
+            "detail": control,
+            "evidence": control.get("evidence"),
         },
         "harness": {
-            "package": "mncs-harness",
-            "version": (integrations.harness.status() or {}).get("package_version"),
-            "source_commit": None,
+            "status": READY if harness_status.get("available") is True else DEGRADED,
+            "detail": harness_status,
         },
-        "fabric_controller": {
-            "package": "mncs-fabric",
-            "version": fabric.get("controller_version") or fabric.get("version"),
-            "source_commit": (fabric.get("runtime_identity") or {}).get("source_commit")
-            if isinstance(fabric.get("runtime_identity"), dict)
-            else None,
-            "artifact_digest": fabric.get("controller_contract_identity"),
+        "fabric": {
+            "status": READY
+            if fabric.get("available") is True
+            or fabric.get("controller_connected") is True
+            else DEGRADED,
+            "detail": {
+                "available": fabric.get("available"),
+                "controller_connected": fabric.get("controller_connected"),
+                "known_nodes": len(nodes),
+                "available_nodes": available_nodes,
+            },
         },
         "commons": {
-            "package": "mncs-commons",
-            "version": commons.get("packageVersion"),
-            "source_commit": None,
+            "status": READY
+            if commons.get("available") is True or commons.get("consumerReadCapable")
+            else DEGRADED,
+            "detail": {
+                "available": commons.get("available"),
+                "consumer_read_capable": bool(commons.get("consumerReadCapable")),
+            },
         },
-        "reference_studies": {
-            "package": "mncs-reference-studies",
-            "version": None,
-            "source_commit": studies.get("commit"),
+        "forge": {"status": forge["status"], "detail": forge},
+        "artifact_write": {
+            "status": READY if probe.get("writable") else BLOCKED,
+            "detail": probe,
         },
     }
-    try:
-        from epi13_local_harness.runtime_identity import runtime_build_identity
+    required = ("control", "harness")
+    if any(layers[name]["status"] == BLOCKED for name in required):
+        status = BLOCKED
+    elif any(layers[name]["status"] != READY for name in required):
+        status = DEGRADED
+    else:
+        status = READY
+    blockers = [
+        name
+        for name in required
+        if layers[name]["status"] != READY
+    ]
+    return {
+        "schema": READINESS_SCHEMA,
+        "status": status,
+        "profile": profile,
+        "profile_status": status,
+        "claim_boundary": "infrastructure validation",
+        "inspected_at": utc_now(),
+        "layers": layers,
+        "required_layers": list(required),
+        "blockers": blockers,
+        "local_fallback": False,
+        "ssh_used": False,
+    }
 
-        runtime_identities["control"] = runtime_build_identity("mncs_control_mcp", version=__version__)
-        runtime_identities["harness"] = runtime_build_identity(
-            "epi13_local_harness",
-            version=str((integrations.harness.status() or {}).get("package_version") or ""),
-        )
-        runtime_identities["commons"] = runtime_build_identity(
-            "mncs_commons",
-            version=str(commons.get("packageVersion") or ""),
-        )
-    except Exception:
-        pass
 
-    result = harness.evaluate_layers(
-        control=control,
-        harness=integrations.harness.status(),
-        fabric={
-            "available": fabric.get("available") is True,
-            "version": fabric.get("controller_version") or fabric.get("version"),
-            "controller_connected": fabric.get("controller_connected"),
-            "persistent_service_support": (fabric.get("persistent_service_support") or {}),
-            "workers": nodes,
-            "commit": runtime_identities["fabric_controller"].get("source_commit"),
-            "source_commit": runtime_identities["fabric_controller"].get("source_commit"),
-            "artifact_digest": None,
-            "contract_identity": fabric.get("controller_contract_identity"),
-            "stale_capability_inventory": fabric.get("stale_capability_inventory"),
-            "available_workers": [
-                node for node in nodes if str(node.get("availability") or "").upper() == "AVAILABLE"
-            ],
-        },
-        commons=commons,
-        forge=forge,
-        reference_studies=studies,
-        routing={
-            "available": any(str(node.get("availability") or "").upper() == "AVAILABLE" for node in nodes),
-            "local_fallback": False,
-            "fallback_explicit": True,
-        },
-        scheduler={"available": True, "detail": "inspection only; no overnight schedule started"},
-        artifact_write=artifact_write,
-        runtime_identities=runtime_identities,
-        profile=profile,
-    )
-    result["inspected_at"] = utc_now()
-    result["local_fallback"] = False
-    result["ssh_used"] = False
-    result["control_projection"] = True
-    return result

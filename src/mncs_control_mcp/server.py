@@ -4,9 +4,7 @@ import argparse
 import json
 import logging
 import os
-import signal
 import sys
-import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -294,10 +292,6 @@ def build_server(config: ControlConfig | None = None) -> Any:
     def terminal_stop(job_id: str, force: bool = False) -> dict[str, object]:
         return invoke("terminal_stop", processes.stop, job_id, force=force, audit_metadata={"job_id": job_id, "force": force})  # type: ignore[return-value]
 
-    @server.tool(name="terminal_jobs", description="List bounded metadata for terminal jobs owned by this server.", annotations=ro, structured_output=True)
-    def terminal_jobs() -> dict[str, object]:
-        return invoke("terminal_jobs", processes.list)  # type: ignore[return-value]
-
     @server.tool(name="control_jobs", description="List terminal jobs and completed upstream Fabric, Forge, or Harness execution records.", annotations=ro, structured_output=True)
     def control_jobs() -> dict[str, object]:
         return invoke("control_jobs", processes.list)  # type: ignore[return-value]
@@ -512,14 +506,6 @@ def build_server(config: ControlConfig | None = None) -> Any:
     def forge_candidate_refresh(repository: str, hypothesis: str = "working-tree content changed after the previous candidate binding", changed_files: list[str] | None = None) -> dict[str, object]:
         return invoke("forge_candidate_refresh", integrations.forge.refresh_candidate, repository, hypothesis=hypothesis, changed_files=changed_files, audit_metadata={"repository": repository})  # type: ignore[return-value]
 
-    @server.tool(name="laboratory_status", description="Aggregate controller resources, models, Fabric workers, MNCS integrations, and running jobs.", annotations=ro, structured_output=True)
-    def laboratory_status() -> dict[str, object]:
-        return invoke("laboratory_status", control_plane.laboratory_status)  # type: ignore[return-value]
-
-    @server.tool(name="control_run", description="Run one named bounded workflow: inspect_project, check_project, test_project, evaluate_project, fabric_test_project, review_and_check_project, review_check_and_fabric_test, or the honest Harness limitation.", annotations=mutate, structured_output=True)
-    def control_run(workflow: str, project: str, profile: str = "standard", task_type: str | None = None, model: str | None = None, node: str | None = None, parameters: dict[str, object] | None = None) -> dict[str, object]:
-        return invoke("control_run", control_plane.run_workflow, workflow, project, profile, task_type, model, node, parameters, audit_metadata={"project": project, "workflow": workflow})  # type: ignore[return-value]
-
     @server.tool(name="system_status", description="Inspect Fedora host resources, sandbox, MCP jobs, and MNCS subsystem availability.", annotations=ro, structured_output=True)
     def system_status() -> dict[str, object]:
         def view() -> dict[str, object]:
@@ -557,8 +543,8 @@ def build_server(config: ControlConfig | None = None) -> Any:
                         (
                             "The running process was imported from an older commit than the "
                             "checked-out source, so newly installed tools are absent from this "
-                            "tool surface. Reload via the control_reload tool (systemd-supervised "
-                            "tunnel only), or run: systemctl --user restart mncs-control-tunnel.service"
+                            "tool surface. Restart is an operator action, not an MCP operation: "
+                            "run: systemctl --user restart mncs-control-tunnel.service"
                         )
                         if restart_required
                         else ""
@@ -575,56 +561,6 @@ def build_server(config: ControlConfig | None = None) -> Any:
             "system_status",
             view,
         )  # type: ignore[return-value]
-
-    @server.tool(name="control_reload", description="Recycle a systemd/tunnel-supervised MNCS Control process so newly pulled source is imported. The request is refused unless both supervision layers can be verified.", annotations=destructive, structured_output=True)
-    def control_reload() -> dict[str, object]:
-        def reload_supervised_process() -> dict[str, object]:
-            if not os.environ.get("INVOCATION_ID") or not os.environ.get(
-                "MNCS_CONTROL_TUNNEL_PROFILE"
-            ):
-                raise ControlError(
-                    "CONTROL_RELOAD_UNAVAILABLE",
-                    "MNCS Control is not running inside the installed systemd tunnel service",
-                )
-            parent_pid = os.getppid()
-            try:
-                parent_command = (
-                    Path(f"/proc/{parent_pid}/cmdline")
-                    .read_bytes()
-                    .replace(b"\x00", b" ")
-                    .decode("utf-8", "replace")
-                )
-            except OSError as exc:
-                raise ControlError(
-                    "CONTROL_RELOAD_UNAVAILABLE",
-                    "cannot verify the supervising tunnel-client process",
-                ) from exc
-            if "tunnel-client" not in parent_command:
-                raise ControlError(
-                    "CONTROL_RELOAD_UNAVAILABLE",
-                    "MNCS Control is not running under the tunnel-client supervisor",
-                )
-
-            def terminate_supervisor() -> None:
-                try:
-                    os.kill(parent_pid, signal.SIGTERM)
-                except ProcessLookupError:
-                    return
-
-            timer = threading.Timer(1.5, terminate_supervisor)
-            timer.daemon = True
-            timer.start()
-            return {
-                "status": "accepted",
-                "supervisor": "systemd -> tunnel-client -> mncs-control-mcp",
-                "runtime_revision": runtime_revision,
-                "source_revision": repository_revision(source_repository),
-                "expected_recovery": (
-                    "systemd Restart=always relaunches tunnel-client and the MCP child"
-                ),
-            }
-
-        return invoke("control_reload", reload_supervised_process)  # type: ignore[return-value]
 
     @server.tool(name="audit_summary", description="Show bounded aggregate control activity from the private audit log without exposing raw commands or secrets.", annotations=ro, structured_output=True)
     def audit_summary(limit: int = 50) -> dict[str, object]:
@@ -698,10 +634,6 @@ def build_server(config: ControlConfig | None = None) -> Any:
     @server.tool(name="project_check", description="Run a bounded quick, standard, or full project verification profile using detected tooling.", annotations=mutate, structured_output=True)
     def project_check(project: str, profile: str = "standard", timeout: float | None = None) -> dict[str, object]:
         return invoke("project_check", integrations.tests.check, project, profile, timeout, audit_metadata={"project": project, "profile": profile})  # type: ignore[return-value]
-
-    @server.tool(name="run_tests", description="Backward-compatible test workflow for any workspace project inside the sandbox.", annotations=mutate, structured_output=True)
-    def run_tests(repository: str, test_suite: str = "repository", component: str | None = None, timeout: float | None = None) -> dict[str, object]:
-        return invoke("run_tests", integrations.tests.run, repository, test_suite, component, timeout, audit_metadata={"project": repository})  # type: ignore[return-value]
 
     @server.tool(name="run_mncs_evaluation", description="Invoke a configured Forge development workflow through Forge's public operation registry.", annotations=mutate, structured_output=True)
     def run_mncs_evaluation(repository: str, case_study: str, model: str | None = None, evaluation_profile: str | None = None) -> dict[str, object]:
@@ -854,14 +786,6 @@ def build_server(config: ControlConfig | None = None) -> Any:
     @server.tool(name="control_job_stop", description="Stop a local process or request cancellation of an upstream control job; Fabric-owned work cannot be force-killed by this MCP.", annotations=destructive, structured_output=True)
     def control_job_stop(job_id: str) -> dict[str, object]:
         return invoke("control_job_stop", processes.stop_control, job_id)  # type: ignore[return-value]
-
-    @server.tool(name="job_status", description="Backward-compatible alias for terminal_status.", annotations=ro, structured_output=True)
-    def job_status(job_id: str) -> dict[str, object]:
-        return invoke("job_status", processes.status, job_id)  # type: ignore[return-value]
-
-    @server.tool(name="job_result", description="Backward-compatible bounded terminal job status and output retrieval.", annotations=ro, structured_output=True)
-    def job_result(job_id: str) -> dict[str, object]:
-        return invoke("job_result", processes.output, job_id)  # type: ignore[return-value]
 
     server._control_processes = processes
     return server

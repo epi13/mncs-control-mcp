@@ -33,6 +33,9 @@ TURN_SCHEMA = "mncs-control.experiment-turn.v0.1"
 CONCEPT_MANIFEST_SCHEMA = "mncs-control.concept-experiment-manifest.v0.1"
 FAMILY_REFERENCE_SCHEMA = "commons.mncs.dev/producer-reference/v0alpha1"
 _TERMINAL = {"COMPLETED", "FAILED", "STOPPED"}
+
+#: Sentinel for "derive the record-chain tip from stored state".
+_UNSET: Any = object()
 _ACTIVE_FABRIC = {"ACCEPTED", "QUEUED", "RUNNING", "DISPATCHED", "SUBMITTED"}
 _REFERENCE_RELATIONS = {
     "governed_by",
@@ -811,9 +814,12 @@ class ExperimentManager:
                             key = (str(item.get("relation")), str(item["reference"].get("stableId")))
                             retained[key] = item
                     state["producer_references"] = [retained[key] for key in sorted(retained)]
-                    if existing.get("publication") is not None:
-                        state["publication"] = existing["publication"]
-                    for field in ("family_record_id", "concept_manifest"):
+                    for field in (
+                        "family_record_id",
+                        "concept_manifest",
+                        "publication_receipt",
+                        "publication",
+                    ):
                         if existing.get(field) is not None:
                             state[field] = existing[field]
             state["updated_at"] = _iso()
@@ -1091,7 +1097,7 @@ class ExperimentManager:
                 experiment_id, spec, frozen_at=_iso(accepted), rerun_of=rerun_of
             ),
             "producer_references": [],
-            "publication": {"state": "NOT_PUBLISHED", "attempts": 0},
+            "publication_receipt": None,
             "turns": [],
             "stop_requested": False,
             "authority": {
@@ -1132,11 +1138,6 @@ class ExperimentManager:
                 key=lambda item: (str(item["relation"]), str(item["reference"]["stableId"]))
             )
             state["producer_references"] = entries
-            publication = state.get("publication", {})
-            if publication.get("state") == "PUBLISHED":
-                publication["state"] = "SYNC_REQUIRED"
-            elif publication.get("state") == "PUBLISHING":
-                publication["sync_requested"] = True
 
         self._mutate(experiment_id, update)
         return self.status(experiment_id)
@@ -1162,7 +1163,12 @@ class ExperimentManager:
             },
         }
 
-    def _family_record(self, state: Mapping[str, Any]) -> dict[str, Any]:
+    def _family_record(
+        self,
+        state: Mapping[str, Any],
+        revision: int | None = None,
+        previous_digest: str | None | object = _UNSET,
+    ) -> dict[str, Any]:
         from .adapters import CommonsAdapter
 
         manifest = state["concept_manifest"]
@@ -1209,8 +1215,14 @@ class ExperimentManager:
                     or self._control_actor_reference(str(state["experiment_id"]), actor),
                 }
             )
-        publication = state.get("publication") or {}
-        revision = int(publication.get("revision") or 0) + 1
+        prior = state.get("publication_receipt")
+        if not isinstance(prior, Mapping):
+            # Pre-thinning on-disk state keeps the revision under "publication".
+            prior = state.get("publication") or {}
+        if revision is None:
+            revision = int(prior.get("revision") or 0) + 1
+        if previous_digest is _UNSET:
+            previous_digest = prior.get("content_digest")
         status = {"COMPLETED": "TERMINAL", "FAILED": "FAILED", "STOPPED": "STOPPED"}.get(
             str(state.get("state")), "UNKNOWN"
         )
@@ -1234,7 +1246,7 @@ class ExperimentManager:
             rerun_of=manifest.get("rerun_of"),
             predecessor=manifest.get("rerun_of"),
             revision=revision,
-            previous_digest=publication.get("content_digest"),
+            previous_digest=previous_digest,
         )
 
     def publish(self, experiment_id: str) -> dict[str, Any]:
@@ -1243,50 +1255,55 @@ class ExperimentManager:
         state = self._load(experiment_id)
         if state.get("state") not in _TERMINAL:
             raise ControlError("EXPERIMENT_NOT_TERMINAL", "only terminal experiments can be published")
-        publication = dict(state.get("publication") or {})
-        if publication.get("state") == "PUBLISHED":
-            return {"experiment": self.status(experiment_id), "publication": publication}
-        record = self._family_record(state)
-        record_identity = _identity(record)
-        publication.update(
-            state="PUBLISHING",
-            attempts=int(publication.get("attempts") or 0) + 1,
-            last_attempt_at=_iso(),
-            record_identity=record_identity,
+        prior = state.get("publication_receipt")
+        prior_revision = (
+            int(prior.get("revision") or 0) if isinstance(prior, Mapping) else 0
         )
-        self._mutate(experiment_id, lambda latest: latest.update(publication=publication))
-        try:
-            receipt = CommonsAdapter(self.config).publish_record(record)
-        except ControlError as exc:
-            error_code = exc.code
-            error_detail = exc.message
-
-            def retain_error(latest: dict[str, Any]) -> None:
-                latest["publication"].update(
-                    state="RETRY_PENDING",
-                    last_error={
-                        "code": error_code,
-                        "detail": error_detail,
-                        "observed_at": _iso(),
-                    },
+        if (
+            isinstance(prior, Mapping)
+            and prior_revision
+            and _identity(
+                self._family_record(
+                    state,
+                    revision=prior_revision,
+                    previous_digest=prior.get("previous_digest"),
                 )
-
-            self._mutate(experiment_id, retain_error)
-            raise
-        def retain_receipt(latest: dict[str, Any]) -> None:
-            needs_sync = bool(latest["publication"].pop("sync_requested", False))
-            latest["publication"].update(
-                state="SYNC_REQUIRED" if needs_sync else "PUBLISHED",
-                revision=int(record["metadata"]["revision"]),
-                content_digest=receipt.get("contentDigest"),
-                delivery_status=receipt.get("deliveryStatus"),
-                published_at=_iso(),
-                receipt=receipt,
             )
-            latest["publication"].pop("last_error", None)
+            == prior.get("record_identity")
+        ):
+            # Canonical record content is unchanged since the last publish.
+            return {
+                "experiment": self.status(experiment_id),
+                "publication_receipt": dict(prior),
+            }
+        revision = prior_revision + 1
+        previous_digest = prior.get("content_digest") if isinstance(prior, Mapping) else None
+        record = self._family_record(
+            state, revision=revision, previous_digest=previous_digest
+        )
+        record_identity = _identity(record)
+        # Single-shot publish: the Commons operator performs the delivery and owns
+        # any retry internally. A failure raises and leaves no coordinator-side
+        # retry state; the caller retries the tool, which re-derives the same
+        # record from canonical experiment state.
+        receipt = CommonsAdapter(self.config).publish_record(record)
+
+        def retain_receipt(latest: dict[str, Any]) -> None:
+            latest["publication_receipt"] = {
+                "record_identity": record_identity,
+                "revision": revision,
+                "previous_digest": previous_digest,
+                "content_digest": receipt.get("contentDigest"),
+                "delivery_status": receipt.get("deliveryStatus"),
+                "published_at": _iso(),
+                "receipt": receipt,
+            }
 
         latest = self._mutate(experiment_id, retain_receipt)
-        return {"experiment": self.status(experiment_id), "publication": latest["publication"]}
+        return {
+            "experiment": self.status(experiment_id),
+            "publication_receipt": latest["publication_receipt"],
+        }
 
     def _spawn(self, experiment_id: str) -> None:
         with self._lock:
@@ -1738,7 +1755,7 @@ class ExperimentManager:
             "family_record_id": state.get("family_record_id"),
             "concept_manifest": state.get("concept_manifest"),
             "producer_references": state.get("producer_references", []),
-            "publication": state.get("publication"),
+            "publication_receipt": state.get("publication_receipt"),
             "residency": state.get("residency"),
         }
 
@@ -1768,7 +1785,7 @@ class ExperimentManager:
             "family_record_id": state.get("family_record_id"),
             "concept_manifest": state.get("concept_manifest"),
             "producer_references": state.get("producer_references", []),
-            "publication": state.get("publication"),
+            "publication_receipt": state.get("publication_receipt"),
             "residency": state.get("residency"),
             "turns": turns,
         }

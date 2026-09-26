@@ -146,7 +146,6 @@ audit_path = {str(tmp_path / "state" / "audit.jsonl")!r}
             "experiment_replicate",
             "replication_status",
             "replication_list",
-            "control_reload",
             "journal_context_status",
             "journal_context_collect",
             "journal_context_get",
@@ -271,7 +270,6 @@ fabric_execution_mode = "unavailable-until-service-support"
         assert {
             "control_capabilities",
             "fabric_status",
-            "laboratory_status",
             "workspace_info",
             "list_projects",
             "dispatch_fabric_job",
@@ -308,19 +306,12 @@ fabric_execution_mode = "unavailable-until-service-support"
         assert status["controller_connected"] is True
         assert status["fleet_authority"] == "persistent-controller"
         assert status["execution_transport"] == "unsupported"
-        laboratory = client.call("laboratory_status", {})
-        assert laboratory["fabric_controller"]["connected"] is True
         dispatch = client.call("dispatch_fabric_job", {"task_type": "pytest", "project": "missing"})
         assert dispatch["error"] == "FABRIC_SERVICE_EXECUTION_UNSUPPORTED"
-        smuggled = client.call(
-            "control_run",
-            {
-                "workflow": "fabric_admin",
-                "project": "missing",
-                "parameters": {"operation": "enrollment.create"},
-            },
-        )
-        assert smuggled["error"] == "INVALID_WORKFLOW"
+        # The generic workflow runner is gone, so there is no control_run-shaped
+        # vector left: the admin-surface absence above plus the terminal_exec
+        # description check below carry the assertion.
+        assert "control_run" not in by_name
         assert "fabric_admin" not in json.dumps(by_name["terminal_exec"], sort_keys=True)
     finally:
         client.close()
