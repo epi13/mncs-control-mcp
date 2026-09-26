@@ -292,7 +292,7 @@ class ExperimentManagerTests(unittest.TestCase):
         )
         self.wait_terminal(restarted, str(rerun["experiment_id"]))
 
-    def test_terminal_publication_is_retryable_and_idempotent(self) -> None:
+    def test_terminal_publication_is_single_shot_and_idempotent(self) -> None:
         runtime = FakeRuntime()
         manager = ExperimentManager(self.config, runtime_factory=lambda _config: runtime, resume=False)
         accepted = manager.start({**self.spec, "max_turns": 1})
@@ -324,15 +324,20 @@ class ExperimentManagerTests(unittest.TestCase):
         with patch("mncs_control_mcp.adapters.CommonsAdapter._module", return_value=module), patch(
             "mncs_control_mcp.adapters.CommonsAdapter.publish_record", new=publish_record
         ):
+            # A failed delivery leaves no coordinator-side retry state; the
+            # caller retries the tool, which re-derives the same record.
             with self.assertRaises(ControlError):
                 manager.publish(experiment_id)
-            self.assertEqual(
-                manager.status(experiment_id)["publication"]["state"], "RETRY_PENDING"
-            )
+            self.assertIsNone(manager.status(experiment_id)["publication_receipt"])
             published = manager.publish(experiment_id)
-            self.assertEqual(published["publication"]["state"], "PUBLISHED")
+            self.assertEqual(published["publication_receipt"]["revision"], 1)
+            self.assertEqual(
+                published["publication_receipt"]["delivery_status"], "INGESTED"
+            )
+            # Unchanged canonical state republishes nothing: no operator call.
             repeated = manager.publish(experiment_id)
-            self.assertEqual(repeated["publication"]["attempts"], 2)
+            self.assertEqual(repeated["publication_receipt"]["revision"], 1)
+            self.assertEqual(repeated["publication_receipt"], published["publication_receipt"])
             self.assertEqual(receipts, [])
 
     def test_coordinator_save_cannot_erase_concurrently_attached_reference(self) -> None:
@@ -405,7 +410,8 @@ class ExperimentManagerTests(unittest.TestCase):
         ):
             published = restarted.publish(experiment_id)
         self.assertEqual(observed["status"], "FAILED")
-        self.assertEqual(published["publication"]["state"], "PUBLISHED")
+        self.assertEqual(published["publication_receipt"]["revision"], 1)
+        self.assertEqual(published["publication_receipt"]["delivery_status"], "INGESTED")
 
     def test_residency_prepare_exception_fails_experiment_without_submission(self) -> None:
         class FailingPrepareRuntime(FakeRuntime):

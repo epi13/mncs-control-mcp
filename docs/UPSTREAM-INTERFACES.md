@@ -68,8 +68,9 @@ returned as untrusted inert data and never become commands.
 
 ## Control-plane ownership
 
-`control_capabilities`, `project_review`, `laboratory_status`, and `control_run`
-are planning/orchestration views. They aggregate adapter results but do not
-replace upstream routing, model selection, evaluation, evidence, or Commons
-protocol semantics. `control_jobs` records upstream execution summaries without
-claiming local process ownership.
+`control_capabilities` and `project_review` are planning views. They aggregate
+adapter results but do not replace upstream routing, model selection,
+evaluation, evidence, or Commons protocol semantics. There is no generic
+workflow runner: multi-step work composes the individual typed tools, and
+`control_jobs` records upstream execution summaries without claiming local
+process ownership.

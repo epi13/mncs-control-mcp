@@ -90,11 +90,15 @@ Fabric execution identities are captured automatically when those native observa
 Language compiler and Forge evaluation references use the same bounded attachment operation.
 Conflicting content digests for one producer stable ID fail closed.
 
-Only `COMPLETED`, `FAILED`, or `STOPPED` experiments can be synchronized. Control records every
-publication attempt and retry diagnostic. A retry republishes the same immutable revision and is
-safe if Commons already ingested it. New attached evidence after publication marks the experiment
-`SYNC_REQUIRED` and produces a revision linked by `previousDigest`. `experiment_rerun` creates a
-new frozen identity with explicit `rerun_of`/predecessor lineage; it never mutates the failed run.
+Only `COMPLETED`, `FAILED`, or `STOPPED` experiments can be published. Publication is
+single-shot: the Commons operator performs the delivery and owns any retry internally, and
+Control keeps only the resulting `publication_receipt`. A failed delivery leaves no
+coordinator-side retry state; the caller retries `experiment_publish`, which re-derives the same
+record from canonical experiment state. A repeat publish with unchanged canonical state returns
+the stored receipt without contacting the operator. New attached evidence after publication
+produces the next revision linked by `previousDigest` on the following publish. `experiment_rerun`
+creates a new frozen identity with explicit `rerun_of`/predecessor lineage; it never mutates the
+failed run.
 
 ## Failure and recovery semantics
 
