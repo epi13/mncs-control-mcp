@@ -128,7 +128,9 @@ class ProcessManager:
         self._external_results: dict[str, object] = {}
         self._external_processes: dict[str, multiprocessing.Process] = {}
         self._external_cancel: dict[str, threading.Event] = {}
-        self._external_executor = ThreadPoolExecutor(max_workers=config.max_concurrent_jobs, thread_name_prefix="mncs-control")
+        self._external_executor = ThreadPoolExecutor(
+            max_workers=config.max_concurrent_jobs, thread_name_prefix="mncs-control"
+        )
         self._lock = threading.RLock()
         self._persist_lock = threading.Lock()
         self._load_metadata()
@@ -150,7 +152,9 @@ class ProcessManager:
             reconciled_status = (
                 "upstream_detached"
                 if persisted_status in {"running", "queued"} and kind != "terminal"
-                else "orphaned" if persisted_status == "running" else persisted_status
+                else "orphaned"
+                if persisted_status == "running"
+                else persisted_status
             )
             if reconciled_status != persisted_status:
                 changed = True
@@ -166,17 +170,26 @@ class ProcessManager:
                 status=reconciled_status,
                 created_at=str(item.get("created_at", utc_now())),
                 started_at=str(item.get("started_at", utc_now())),
-                completed_at=item.get("completed_at") if isinstance(item.get("completed_at"), str) else None,
+                completed_at=item.get("completed_at")
+                if isinstance(item.get("completed_at"), str)
+                else None,
                 exit_code=item.get("exit_code") if isinstance(item.get("exit_code"), int) else None,
                 timed_out=bool(item.get("timed_out", False)),
                 stopped=bool(item.get("stopped", False)),
                 kind=kind,
-                upstream_id=item.get("upstream_id") if isinstance(item.get("upstream_id"), str) else None,
-                result_summary=item.get("result_summary") if isinstance(item.get("result_summary"), dict) else None,
+                upstream_id=item.get("upstream_id")
+                if isinstance(item.get("upstream_id"), str)
+                else None,
+                result_summary=item.get("result_summary")
+                if isinstance(item.get("result_summary"), dict)
+                else None,
                 artifacts=item.get("artifacts") if isinstance(item.get("artifacts"), list) else [],
             )
             if job.status == "upstream_detached" and job.result_summary is None:
-                job.result_summary = {"ownership": "upstream", "reconciliation": "local process manager restarted before completion"}
+                job.result_summary = {
+                    "ownership": "upstream",
+                    "reconciliation": "local process manager restarted before completion",
+                }
                 changed = True
             self._jobs[job.job_id] = job
         if changed:
@@ -189,9 +202,14 @@ class ProcessManager:
                 os.chmod(self.config.job_state_path.parent, 0o700)
             except OSError:
                 pass
-            rows = [{**job.public(), "timeout_seconds": job.timeout_seconds} for job in self._jobs.values()]
+            rows = [
+                {**job.public(), "timeout_seconds": job.timeout_seconds}
+                for job in self._jobs.values()
+            ]
             descriptor, temporary_name = tempfile.mkstemp(
-                prefix=f".{self.config.job_state_path.name}.", suffix=".tmp", dir=self.config.job_state_path.parent
+                prefix=f".{self.config.job_state_path.name}.",
+                suffix=".tmp",
+                dir=self.config.job_state_path.parent,
             )
             try:
                 with os.fdopen(descriptor, "w", encoding="utf-8") as temporary:
@@ -219,7 +237,11 @@ class ProcessManager:
     ) -> dict[str, object]:
         if not self.config.allow_terminal:
             raise ControlError("TERMINAL_DISABLED", "terminal execution is disabled")
-        timeout = self.config.default_timeout_seconds if timeout_seconds is None else float(timeout_seconds)
+        timeout = (
+            self.config.default_timeout_seconds
+            if timeout_seconds is None
+            else float(timeout_seconds)
+        )
         if timeout <= 0 or timeout > self.config.max_timeout_seconds:
             raise ControlError("INVALID_TIMEOUT", "timeout exceeds the configured terminal limit")
         resolution = self.policy.resolve_scope(scope=scope, project=project, cwd=cwd)
@@ -285,7 +307,15 @@ class ProcessManager:
         with self._lock:
             job.exit_code = job.process.returncode
             job.completed_at = utc_now()
-            job.status = "stopped" if job.stopped else "timed_out" if job.timed_out else "completed" if job.exit_code == 0 else "failed"
+            job.status = (
+                "stopped"
+                if job.stopped
+                else "timed_out"
+                if job.timed_out
+                else "completed"
+                if job.exit_code == 0
+                else "failed"
+            )
             self._persist()
 
     def _get(self, job_id: str) -> TerminalJob:
@@ -295,15 +325,28 @@ class ProcessManager:
             raise ControlError("UNKNOWN_JOB", "job ID is not owned by this MCP service")
         return job
 
+    def job_scope(self, job_id: str) -> dict[str, object] | None:
+        """Owning project/scope of a tracked job (None when unknown)."""
+        job = self._jobs.get(job_id)
+        if job is None:
+            return None
+        return {"project": job.project, "scope": job.scope}
+
     def status(self, job_id: str) -> dict[str, object]:
         return self._get(job_id).public()
 
-    def output(self, job_id: str, *, stdout_offset: int = 0, stderr_offset: int = 0) -> dict[str, object]:
+    def output(
+        self, job_id: str, *, stdout_offset: int = 0, stderr_offset: int = 0
+    ) -> dict[str, object]:
         job = self._get(job_id)
         if stdout_offset < 0 or stderr_offset < 0:
             raise ControlError("INVALID_INPUT", "output offsets must be non-negative")
-        stdout, stdout_next, stdout_lost = job.stdout.read(stdout_offset) if job.stdout else ("", 0, False)
-        stderr, stderr_next, stderr_lost = job.stderr.read(stderr_offset) if job.stderr else ("", 0, False)
+        stdout, stdout_next, stdout_lost = (
+            job.stdout.read(stdout_offset) if job.stdout else ("", 0, False)
+        )
+        stderr, stderr_next, stderr_lost = (
+            job.stderr.read(stderr_offset) if job.stderr else ("", 0, False)
+        )
         return {
             **job.public(),
             "stdout": stdout,
@@ -348,7 +391,12 @@ class ProcessManager:
 
     def list(self) -> dict[str, object]:
         with self._lock:
-            jobs = [job.public() for job in sorted(self._jobs.values(), key=lambda item: item.created_at, reverse=True)]
+            jobs = [
+                job.public()
+                for job in sorted(
+                    self._jobs.values(), key=lambda item: item.created_at, reverse=True
+                )
+            ]
         return {"jobs": jobs[:100], "running": sum(item["status"] == "running" for item in jobs)}
 
     def record_external(
@@ -364,7 +412,14 @@ class ProcessManager:
         artifacts: list[dict[str, object]] | None = None,
     ) -> dict[str, object]:
         """Record an upstream Fabric/Forge/Harness execution without faking a PID."""
-        if not kind or len(kind) > 80 or any(char not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-" for char in kind):
+        if (
+            not kind
+            or len(kind) > 80
+            or any(
+                char not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"
+                for char in kind
+            )
+        ):
             raise ControlError("INVALID_INPUT", "external job kind is invalid")
         now = utc_now()
         job = TerminalJob(
@@ -410,9 +465,18 @@ class ProcessManager:
         """
         if not callable(operation):
             raise ControlError("INVALID_JOB", "external operation is not callable")
-        if not kind or len(kind) > 80 or any(char not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-" for char in kind):
+        if (
+            not kind
+            or len(kind) > 80
+            or any(
+                char not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"
+                for char in kind
+            )
+        ):
             raise ControlError("INVALID_INPUT", "external job kind is invalid")
-        timeout = self.config.max_timeout_seconds if timeout_seconds is None else float(timeout_seconds)
+        timeout = (
+            self.config.max_timeout_seconds if timeout_seconds is None else float(timeout_seconds)
+        )
         if timeout <= 0 or timeout > self.config.max_timeout_seconds:
             raise ControlError("INVALID_TIMEOUT", "upstream timeout exceeds the configured limit")
         with self._lock:
@@ -440,7 +504,9 @@ class ProcessManager:
             self._jobs[job.job_id] = job
             cancellation = threading.Event()
             self._external_cancel[job.job_id] = cancellation
-            future = self._external_executor.submit(self._run_external_supervised, job.job_id, operation, timeout, cancellation)
+            future = self._external_executor.submit(
+                self._run_external_supervised, job.job_id, operation, timeout, cancellation
+            )
             self._external_futures[job.job_id] = future
             self._persist()
         future.add_done_callback(lambda completed: self._finish_external(job.job_id, completed))
@@ -462,10 +528,14 @@ class ProcessManager:
                 job.started_at = utc_now()
                 self._persist()
         if "fork" not in multiprocessing.get_all_start_methods():
-            return _ExternalOutcome("failed", None, {"error": "no supervised process start method is available"})
+            return _ExternalOutcome(
+                "failed", None, {"error": "no supervised process start method is available"}
+            )
         context = multiprocessing.get_context("fork")
         parent, child = context.Pipe(duplex=False)
-        process = context.Process(target=_external_operation_entry, args=(operation, child), name=f"mncs-control-{job_id}")
+        process = context.Process(
+            target=_external_operation_entry, args=(operation, child), name=f"mncs-control-{job_id}"
+        )
         process.start()
         child.close()
         with self._lock:
@@ -480,7 +550,11 @@ class ProcessManager:
                 return _ExternalOutcome(
                     "upstream_detached",
                     {"cancel_requested": True},
-                    {"cancel_requested": True, "ownership": "upstream", "cancellation": "local adapter stopped; Fabric abort is not exposed"},
+                    {
+                        "cancel_requested": True,
+                        "ownership": "upstream",
+                        "cancellation": "local adapter stopped; Fabric abort is not exposed",
+                    },
                 )
             if parent.poll(0.05):
                 try:
@@ -497,12 +571,18 @@ class ProcessManager:
             return _ExternalOutcome(
                 "timed_out",
                 {"timed_out": True},
-                {"timed_out": True, "ownership": "upstream", "reconciliation": "local adapter stopped; remote ownership is not cancellable through Fabric"},
+                {
+                    "timed_out": True,
+                    "ownership": "upstream",
+                    "reconciliation": "local adapter stopped; remote ownership is not cancellable through Fabric",
+                },
             )
         process.join(timeout=1)
         parent.close()
         if payload is None:
-            return _ExternalOutcome("failed", None, {"error": "supervised adapter exited without a result"})
+            return _ExternalOutcome(
+                "failed", None, {"error": "supervised adapter exited without a result"}
+            )
         if not payload.get("ok"):
             error = redact_text(str(payload.get("error", "upstream operation failed")))
             return _ExternalOutcome("failed", {"error": error}, {"error": error})
@@ -526,7 +606,9 @@ class ProcessManager:
         try:
             outcome = future.result()
             if not isinstance(outcome, _ExternalOutcome):
-                outcome = _ExternalOutcome("failed", outcome, {"error": "invalid supervised operation result"})
+                outcome = _ExternalOutcome(
+                    "failed", outcome, {"error": "invalid supervised operation result"}
+                )
             result = outcome.result
             status = outcome.status
             summary = outcome.summary
@@ -567,7 +649,11 @@ class ProcessManager:
             return self.output(job_id)
         if job.status in {"running", "queued"}:
             return {"job": job.public(), "ready": False}
-        return {"job": job.public(), "ready": True, "result": self._external_results.get(job_id, job.result_summary)}
+        return {
+            "job": job.public(),
+            "ready": True,
+            "result": self._external_results.get(job_id, job.result_summary),
+        }
 
     def stop_control(self, job_id: str) -> dict[str, object]:
         job = self._get(job_id)
@@ -591,7 +677,11 @@ class ProcessManager:
         job.stopped = True
         job.status = "upstream_detached"
         job.completed_at = utc_now()
-        job.result_summary = {"cancel_requested": True, "ownership": "upstream", "cancellation": "local adapter stopped; Fabric abort is not exposed"}
+        job.result_summary = {
+            "cancel_requested": True,
+            "ownership": "upstream",
+            "cancellation": "local adapter stopped; Fabric abort is not exposed",
+        }
         self._persist()
         return job.public()
 

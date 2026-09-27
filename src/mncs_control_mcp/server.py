@@ -86,12 +86,24 @@ def build_server(config: ControlConfig | None = None) -> Any:
         forge=integrations.forge,
         commons=integrations.commons,
     )
-    journal_context = JournalContextService(selected, policy, git, experiments, integrations, audit, processes)
+    journal_context = JournalContextService(
+        selected, policy, git, experiments, integrations, audit, processes
+    )
     projects = ProjectService(selected, policy, sandbox, git)
     inventory = ToolInventory(selected)
     environment_sessions = EnvironmentService(selected)
+    environment_sessions.plan_resolver = storage.plan_repositories
+    environment_sessions.job_resolver = processes.job_scope
     control_plane = ControlPlaneService(
-        selected, policy, sandbox, projects, git, integrations.tests, integrations, processes, journal_context
+        selected,
+        policy,
+        sandbox,
+        projects,
+        git,
+        integrations.tests,
+        integrations,
+        processes,
+        journal_context,
     )
     source_repository = Path(__file__).resolve().parents[2]
     runtime_revision = repository_revision(source_repository)
@@ -107,7 +119,11 @@ def build_server(config: ControlConfig | None = None) -> Any:
     )
 
     def annotation(
-        *, read_only: bool, destructive: bool = False, idempotent: bool = False, open_world: bool = False
+        *,
+        read_only: bool,
+        destructive: bool = False,
+        idempotent: bool = False,
+        open_world: bool = False,
     ) -> Any:
         return ToolAnnotations(
             readOnlyHint=read_only,
@@ -130,11 +146,25 @@ def build_server(config: ControlConfig | None = None) -> Any:
             bounded = _bounded_response(result, selected.max_response_bytes)
             details = dict(audit_metadata or {})
             if isinstance(result, dict):
-                for key in ("exit_code", "job_id", "scope", "project", "cwd", "network", "timed_out"):
+                for key in (
+                    "exit_code",
+                    "job_id",
+                    "scope",
+                    "project",
+                    "cwd",
+                    "network",
+                    "timed_out",
+                ):
                     if key in result:
                         details[key] = result[key]
-            audit.record(name, success=True, duration_seconds=round(time.monotonic() - started, 3), **details)
-            LOGGER.info("MCP call completed tool=%s success=true duration=%.3f", name, time.monotonic() - started)
+            audit.record(
+                name, success=True, duration_seconds=round(time.monotonic() - started, 3), **details
+            )
+            LOGGER.info(
+                "MCP call completed tool=%s success=true duration=%.3f",
+                name,
+                time.monotonic() - started,
+            )
             return bounded
         except ControlError as exc:
             audit.record(
@@ -156,6 +186,59 @@ def build_server(config: ControlConfig | None = None) -> Any:
             )
             LOGGER.exception("MCP call failed tool=%s", name)
             return {"error": "INTEGRATION_FAILURE", "message": redact_text(str(exc))}
+
+    def _patch_paths(patch: str) -> list[str]:
+        """Workspace-relative target paths named by a unified diff (bounded)."""
+        found: list[str] = []
+        for line in patch.splitlines()[:2000]:
+            if line.startswith("+++ b/"):
+                target = line[6:].strip()
+                if target and target != "/dev/null" and target not in found:
+                    found.append(target)
+            if len(found) >= 25:
+                break
+        return found
+
+    def invoke_mut(
+        name: str,
+        function: Callable[..., object],
+        scope: dict[str, object],
+        env_session: str | None,
+        *args: object,
+        audit_metadata: dict[str, object] | None = None,
+        **kwargs: object,
+    ) -> object:
+        """Mutating-tool gateway: managed mode requires Environment authority.
+
+        When ``managed_development`` is off, this is exactly ``invoke``.
+        When on, the named session must exist and its live claims plus
+        authority must allow the scoped action; every outcome (including
+        the authority check itself) lands in the audit log. Fail closed.
+        """
+        if not selected.managed_development:
+            return invoke(name, function, *args, audit_metadata=audit_metadata, **kwargs)  # type: ignore[return-value]
+        decision = environment_sessions.authorize(env_session, name, scope)
+        check_audit = dict(decision.get("audit", {}))
+        if not decision.get("allowed"):
+            audit.record(
+                name,
+                success=False,
+                error="ENVIRONMENT_AUTHORITY_DENIED",
+                duration_seconds=0.0,
+                **check_audit,
+            )
+            LOGGER.info("MCP call denied tool=%s reason=%s", name, decision.get("reason"))
+            return {
+                "error": "ENVIRONMENT_AUTHORITY_DENIED",
+                "message": decision.get("reason"),
+                "authority": {"verdict": decision.get("verdict")},
+            }
+        audit.record(name, success=True, duration_seconds=0.0, **check_audit)
+        meta = dict(audit_metadata or {})
+        meta["env_session"] = check_audit.get("session_id")
+        if check_audit.get("claim_id"):
+            meta["env_claim"] = check_audit["claim_id"]
+        return invoke(name, function, *args, audit_metadata=meta, **kwargs)  # type: ignore[return-value]
 
     def _sync_commons_work_state(payload: dict[str, object], fabric_work_id: str) -> None:
         """Project observed Fabric state into the inert Commons lineage.
@@ -204,202 +287,842 @@ def build_server(config: ControlConfig | None = None) -> Any:
     destructive = annotation(read_only=False, destructive=True)
     network_mutate = annotation(read_only=False, open_world=True)
 
-    @server.tool(name="workspace_info", description="Describe the protected workspace and active sandbox policy.", annotations=ro, structured_output=True)
+    @server.tool(
+        name="workspace_info",
+        description="Describe the protected workspace and active sandbox policy.",
+        annotations=ro,
+        structured_output=True,
+    )
     def workspace_info() -> dict[str, object]:
         return invoke("workspace_info", projects.workspace_info)  # type: ignore[return-value]
 
-    @server.tool(name="workspace_storage_inventory", description="Measure workspace disk use and classify common generated-data roots without changing files.", annotations=ro, structured_output=True)
+    @server.tool(
+        name="workspace_storage_inventory",
+        description="Measure workspace disk use and classify common generated-data roots without changing files.",
+        annotations=ro,
+        structured_output=True,
+    )
     def workspace_storage_inventory() -> dict[str, object]:
         return invoke("workspace_storage_inventory", storage.inventory)  # type: ignore[return-value]
 
-    @server.tool(name="workspace_storage_plan", description="Plan safe reclamation of recognized Cargo outputs; unknown, dirty, active, or multi-worktree data is preserved.", annotations=ro, structured_output=True)
+    @server.tool(
+        name="workspace_storage_plan",
+        description="Plan safe reclamation of recognized Cargo outputs; unknown, dirty, active, or multi-worktree data is preserved.",
+        annotations=ro,
+        structured_output=True,
+    )
     def workspace_storage_plan() -> dict[str, object]:
         return invoke("workspace_storage_plan", storage.plan)  # type: ignore[return-value]
 
-    @server.tool(name="workspace_storage_reclaim", description="Remove only Cargo outputs from a fresh storage plan after explicit confirmation.", annotations=destructive, structured_output=True)
-    def workspace_storage_reclaim(plan_id: str, confirm: bool = False) -> dict[str, object]:
-        return invoke(
+    @server.tool(
+        name="workspace_storage_reclaim",
+        description="Remove only Cargo outputs from a fresh storage plan after explicit confirmation.",
+        annotations=destructive,
+        structured_output=True,
+    )
+    def workspace_storage_reclaim(
+        plan_id: str, confirm: bool = False, env_session: str | None = None
+    ) -> dict[str, object]:
+        return invoke_mut(
             "workspace_storage_reclaim",
             storage.reclaim,
+            {"action": "execute", "stewardship_plan": plan_id},
+            env_session,
             plan_id,
             confirm=confirm,
             audit_metadata={"plan_id": plan_id, "confirmed": confirm},
         )  # type: ignore[return-value]
 
-    @server.tool(name="list_projects", description="Dynamically discover immediate workspace projects and build/Git indicators.", annotations=ro, structured_output=True)
+    @server.tool(
+        name="list_projects",
+        description="Dynamically discover immediate workspace projects and build/Git indicators.",
+        annotations=ro,
+        structured_output=True,
+    )
     def list_projects(limit: int = 500) -> dict[str, object]:
         return invoke("list_projects", projects.list_projects, limit=limit)  # type: ignore[return-value]
 
-    @server.tool(name="project_info", description="Inspect one dynamically discovered workspace project.", annotations=ro, structured_output=True)
+    @server.tool(
+        name="project_info",
+        description="Inspect one dynamically discovered workspace project.",
+        annotations=ro,
+        structured_output=True,
+    )
     def project_info(project: str) -> dict[str, object]:
         return invoke("project_info", projects.info, project)  # type: ignore[return-value]
 
-    @server.tool(name="project_review", description="Aggregate bounded project, Git, test, documentation, and integration context for agent planning.", annotations=ro, structured_output=True)
+    @server.tool(
+        name="project_review",
+        description="Aggregate bounded project, Git, test, documentation, and integration context for agent planning.",
+        annotations=ro,
+        structured_output=True,
+    )
     def project_review(project: str, depth: str = "standard") -> dict[str, object]:
-        return invoke("project_review", control_plane.review, project, depth=depth, audit_metadata={"project": project, "depth": depth})  # type: ignore[return-value]
+        return invoke(
+            "project_review",
+            control_plane.review,
+            project,
+            depth=depth,
+            audit_metadata={"project": project, "depth": depth},
+        )  # type: ignore[return-value]
 
-    @server.tool(name="project_create", description="Create an empty, Python, Rust, or Node project inside the workspace.", annotations=mutate, structured_output=True)
-    def project_create(name: str, kind: str = "empty", git_init: bool = False) -> dict[str, object]:
-        return invoke("project_create", projects.create, name, kind=kind, git_init=git_init, audit_metadata={"project": name})  # type: ignore[return-value]
+    @server.tool(
+        name="project_create",
+        description="Create an empty, Python, Rust, or Node project inside the workspace.",
+        annotations=mutate,
+        structured_output=True,
+    )
+    def project_create(
+        name: str, kind: str = "empty", git_init: bool = False, env_session: str | None = None
+    ) -> dict[str, object]:
+        return invoke_mut(
+            "project_create",
+            projects.create,
+            {"action": "write", "create_name": name},
+            env_session,
+            name,
+            kind=kind,
+            git_init=git_init,
+            audit_metadata={"project": name},
+        )  # type: ignore[return-value]
 
-    @server.tool(name="file_stat", description="Stat a workspace-relative path without following escapes.", annotations=ro, structured_output=True)
+    @server.tool(
+        name="file_stat",
+        description="Stat a workspace-relative path without following escapes.",
+        annotations=ro,
+        structured_output=True,
+    )
     def file_stat(path: str) -> dict[str, object]:
         return invoke("file_stat", files.stat, path)  # type: ignore[return-value]
 
-    @server.tool(name="file_list", description="List a bounded workspace directory.", annotations=ro, structured_output=True)
+    @server.tool(
+        name="file_list",
+        description="List a bounded workspace directory.",
+        annotations=ro,
+        structured_output=True,
+    )
     def file_list(path: str = ".", limit: int | None = None) -> dict[str, object]:
         return invoke("file_list", files.list, path, limit=limit)  # type: ignore[return-value]
 
-    @server.tool(name="file_tree", description="Return a bounded recursive workspace tree without following symlinks.", annotations=ro, structured_output=True)
+    @server.tool(
+        name="file_tree",
+        description="Return a bounded recursive workspace tree without following symlinks.",
+        annotations=ro,
+        structured_output=True,
+    )
     def file_tree(path: str = ".", depth: int = 3, limit: int | None = None) -> dict[str, object]:
         return invoke("file_tree", files.tree, path, depth=depth, limit=limit)  # type: ignore[return-value]
 
-    @server.tool(name="file_read", description="Read bounded UTF-8 text or base64 binary content from a workspace file.", annotations=ro, structured_output=True)
+    @server.tool(
+        name="file_read",
+        description="Read bounded UTF-8 text or base64 binary content from a workspace file.",
+        annotations=ro,
+        structured_output=True,
+    )
     def file_read(path: str, offset: int = 0, limit: int | None = None) -> dict[str, object]:
         return invoke("file_read", files.read, path, offset=offset, limit=limit)  # type: ignore[return-value]
 
-    @server.tool(name="file_write", description="Write UTF-8 or base64 content to a workspace-relative regular file.", annotations=mutate, structured_output=True)
-    def file_write(path: str, content: str, encoding: str = "utf-8", overwrite: bool = True, create_parents: bool = False) -> dict[str, object]:
-        return invoke("file_write", files.write, path, content, encoding=encoding, overwrite=overwrite, create_parents=create_parents, audit_metadata={"path": path})  # type: ignore[return-value]
+    @server.tool(
+        name="file_write",
+        description="Write UTF-8 or base64 content to a workspace-relative regular file.",
+        annotations=mutate,
+        structured_output=True,
+    )
+    def file_write(
+        path: str,
+        content: str,
+        encoding: str = "utf-8",
+        overwrite: bool = True,
+        create_parents: bool = False,
+        env_session: str | None = None,
+    ) -> dict[str, object]:
+        return invoke_mut(
+            "file_write",
+            files.write,
+            {"action": "write", "path": path},
+            env_session,
+            path,
+            content,
+            encoding=encoding,
+            overwrite=overwrite,
+            create_parents=create_parents,
+            audit_metadata={"path": path},
+        )  # type: ignore[return-value]
 
-    @server.tool(name="file_patch", description="Validate and apply a unified Git-style patch to workspace files.", annotations=mutate, structured_output=True)
-    def file_patch(patch: str) -> dict[str, object]:
-        return invoke("file_patch", files.patch, patch, audit_metadata={"patch_bytes": len(patch.encode())})  # type: ignore[return-value]
+    @server.tool(
+        name="file_patch",
+        description="Validate and apply a unified Git-style patch to workspace files.",
+        annotations=mutate,
+        structured_output=True,
+    )
+    def file_patch(patch: str, env_session: str | None = None) -> dict[str, object]:
+        return invoke_mut(
+            "file_patch",
+            files.patch,
+            {"action": "write", "patch_paths": _patch_paths(patch)},
+            env_session,
+            patch,
+            audit_metadata={"patch_bytes": len(patch.encode())},
+        )  # type: ignore[return-value]
 
-    @server.tool(name="file_mkdir", description="Create a workspace directory.", annotations=mutate, structured_output=True)
-    def file_mkdir(path: str, parents: bool = False, exist_ok: bool = False) -> dict[str, object]:
-        return invoke("file_mkdir", files.mkdir, path, parents=parents, exist_ok=exist_ok, audit_metadata={"path": path})  # type: ignore[return-value]
+    @server.tool(
+        name="file_mkdir",
+        description="Create a workspace directory.",
+        annotations=mutate,
+        structured_output=True,
+    )
+    def file_mkdir(
+        path: str, parents: bool = False, exist_ok: bool = False, env_session: str | None = None
+    ) -> dict[str, object]:
+        return invoke_mut(
+            "file_mkdir",
+            files.mkdir,
+            {"action": "write", "path": path},
+            env_session,
+            path,
+            parents=parents,
+            exist_ok=exist_ok,
+            audit_metadata={"path": path},
+        )  # type: ignore[return-value]
 
-    @server.tool(name="file_move", description="Move a workspace file or directory without crossing the workspace boundary.", annotations=destructive, structured_output=True)
-    def file_move(source: str, destination: str, overwrite: bool = False) -> dict[str, object]:
-        return invoke("file_move", files.move, source, destination, overwrite=overwrite, audit_metadata={"source": source, "destination": destination})  # type: ignore[return-value]
+    @server.tool(
+        name="file_move",
+        description="Move a workspace file or directory without crossing the workspace boundary.",
+        annotations=destructive,
+        structured_output=True,
+    )
+    def file_move(
+        source: str, destination: str, overwrite: bool = False, env_session: str | None = None
+    ) -> dict[str, object]:
+        return invoke_mut(
+            "file_move",
+            files.move,
+            {"action": "write", "path": source, "also_path": destination},
+            env_session,
+            source,
+            destination,
+            overwrite=overwrite,
+            audit_metadata={"source": source, "destination": destination},
+        )  # type: ignore[return-value]
 
-    @server.tool(name="file_copy", description="Copy a regular workspace file or directory; symbolic links are refused.", annotations=mutate, structured_output=True)
-    def file_copy(source: str, destination: str, overwrite: bool = False) -> dict[str, object]:
-        return invoke("file_copy", files.copy, source, destination, overwrite=overwrite, audit_metadata={"source": source, "destination": destination})  # type: ignore[return-value]
+    @server.tool(
+        name="file_copy",
+        description="Copy a regular workspace file or directory; symbolic links are refused.",
+        annotations=mutate,
+        structured_output=True,
+    )
+    def file_copy(
+        source: str, destination: str, overwrite: bool = False, env_session: str | None = None
+    ) -> dict[str, object]:
+        return invoke_mut(
+            "file_copy",
+            files.copy,
+            {"action": "write", "path": source, "also_path": destination},
+            env_session,
+            source,
+            destination,
+            overwrite=overwrite,
+            audit_metadata={"source": source, "destination": destination},
+        )  # type: ignore[return-value]
 
-    @server.tool(name="file_delete", description="Delete a workspace path; the workspace root is always protected.", annotations=destructive, structured_output=True)
-    def file_delete(path: str, recursive: bool = False) -> dict[str, object]:
-        return invoke("file_delete", files.delete, path, recursive=recursive, audit_metadata={"path": path, "recursive": recursive})  # type: ignore[return-value]
+    @server.tool(
+        name="file_delete",
+        description="Delete a workspace path; the workspace root is always protected.",
+        annotations=destructive,
+        structured_output=True,
+    )
+    def file_delete(
+        path: str, recursive: bool = False, env_session: str | None = None
+    ) -> dict[str, object]:
+        return invoke_mut(
+            "file_delete",
+            files.delete,
+            {"action": "write", "path": path},
+            env_session,
+            path,
+            recursive=recursive,
+            audit_metadata={"path": path, "recursive": recursive},
+        )  # type: ignore[return-value]
 
-    @server.tool(name="file_glob", description="Find bounded workspace paths by a relative glob.", annotations=ro, structured_output=True)
+    @server.tool(
+        name="file_glob",
+        description="Find bounded workspace paths by a relative glob.",
+        annotations=ro,
+        structured_output=True,
+    )
     def file_glob(pattern: str, limit: int | None = None) -> dict[str, object]:
         return invoke("file_glob", files.glob, pattern, limit=limit)  # type: ignore[return-value]
 
-    @server.tool(name="file_search", description="Search bounded UTF-8 workspace files with literal or regular-expression matching.", annotations=ro, structured_output=True)
-    def file_search(query: str, path: str = ".", glob: str = "*", regex: bool = False, case_sensitive: bool = True, limit: int | None = None) -> dict[str, object]:
-        return invoke("file_search", files.search, query, path=path, glob=glob, regex=regex, case_sensitive=case_sensitive, limit=limit)  # type: ignore[return-value]
+    @server.tool(
+        name="file_search",
+        description="Search bounded UTF-8 workspace files with literal or regular-expression matching.",
+        annotations=ro,
+        structured_output=True,
+    )
+    def file_search(
+        query: str,
+        path: str = ".",
+        glob: str = "*",
+        regex: bool = False,
+        case_sensitive: bool = True,
+        limit: int | None = None,
+    ) -> dict[str, object]:
+        return invoke(
+            "file_search",
+            files.search,
+            query,
+            path=path,
+            glob=glob,
+            regex=regex,
+            case_sensitive=case_sensitive,
+            limit=limit,
+        )  # type: ignore[return-value]
 
-    @server.tool(name="terminal_exec", description="Run an arbitrary Bash command inside the real Fedora workspace sandbox. Project scope is default; workspace scope and network are explicit.", annotations=annotation(read_only=False, destructive=True, open_world=True), structured_output=True)
-    def terminal_exec(command: str, cwd: str = ".", scope: str = "project", project: str | None = None, timeout: float | None = None, network: bool | None = None, environment: dict[str, str] | None = None) -> dict[str, object]:
-        return invoke("terminal_exec", lambda: sandbox.run(command, scope=scope, project=project, cwd=cwd, timeout_seconds=timeout, network=network, environment=environment).as_dict(), audit_metadata={"command": command, "cwd": cwd, "scope": scope, "project": project, "network": network})  # type: ignore[return-value]
+    @server.tool(
+        name="terminal_exec",
+        description="Run an arbitrary Bash command inside the real Fedora workspace sandbox. Project scope is default; workspace scope and network are explicit.",
+        annotations=annotation(read_only=False, destructive=True, open_world=True),
+        structured_output=True,
+    )
+    def terminal_exec(
+        command: str,
+        cwd: str = ".",
+        scope: str = "project",
+        project: str | None = None,
+        timeout: float | None = None,
+        network: bool | None = None,
+        environment: dict[str, str] | None = None,
+        env_session: str | None = None,
+    ) -> dict[str, object]:
+        return invoke_mut(
+            "terminal_exec",
+            lambda: sandbox.run(
+                command,
+                scope=scope,
+                project=project,
+                cwd=cwd,
+                timeout_seconds=timeout,
+                network=network,
+                environment=environment,
+            ).as_dict(),
+            {"action": "execute", "repository": project, "path": cwd, "terminal_scope": scope},
+            env_session,
+            audit_metadata={
+                "command": command,
+                "cwd": cwd,
+                "scope": scope,
+                "project": project,
+                "network": network,
+            },
+        )  # type: ignore[return-value]
 
-    @server.tool(name="terminal_start", description="Start a tracked asynchronous command in the Fedora workspace sandbox.", annotations=annotation(read_only=False, destructive=True, open_world=True), structured_output=True)
-    def terminal_start(command: str, cwd: str = ".", scope: str = "project", project: str | None = None, timeout: float | None = None, network: bool | None = None, environment: dict[str, str] | None = None) -> dict[str, object]:
-        return invoke("terminal_start", processes.start, command, scope=scope, project=project, cwd=cwd, timeout_seconds=timeout, network=network, environment=environment, audit_metadata={"command": command, "cwd": cwd, "scope": scope, "project": project, "network": network})  # type: ignore[return-value]
+    @server.tool(
+        name="terminal_start",
+        description="Start a tracked asynchronous command in the Fedora workspace sandbox.",
+        annotations=annotation(read_only=False, destructive=True, open_world=True),
+        structured_output=True,
+    )
+    def terminal_start(
+        command: str,
+        cwd: str = ".",
+        scope: str = "project",
+        project: str | None = None,
+        timeout: float | None = None,
+        network: bool | None = None,
+        environment: dict[str, str] | None = None,
+        env_session: str | None = None,
+    ) -> dict[str, object]:
+        return invoke_mut(
+            "terminal_start",
+            processes.start,
+            {"action": "execute", "repository": project, "path": cwd, "terminal_scope": scope},
+            env_session,
+            command,
+            scope=scope,
+            project=project,
+            cwd=cwd,
+            timeout_seconds=timeout,
+            network=network,
+            environment=environment,
+            audit_metadata={
+                "command": command,
+                "cwd": cwd,
+                "scope": scope,
+                "project": project,
+                "network": network,
+            },
+        )  # type: ignore[return-value]
 
-    @server.tool(name="terminal_status", description="Inspect a terminal job owned by this server.", annotations=ro, structured_output=True)
+    @server.tool(
+        name="terminal_status",
+        description="Inspect a terminal job owned by this server.",
+        annotations=ro,
+        structured_output=True,
+    )
     def terminal_status(job_id: str) -> dict[str, object]:
         return invoke("terminal_status", processes.status, job_id)  # type: ignore[return-value]
 
-    @server.tool(name="terminal_output", description="Read incremental bounded stdout/stderr from an owned terminal job.", annotations=ro, structured_output=True)
-    def terminal_output(job_id: str, stdout_offset: int = 0, stderr_offset: int = 0) -> dict[str, object]:
-        return invoke("terminal_output", processes.output, job_id, stdout_offset=stdout_offset, stderr_offset=stderr_offset)  # type: ignore[return-value]
+    @server.tool(
+        name="terminal_output",
+        description="Read incremental bounded stdout/stderr from an owned terminal job.",
+        annotations=ro,
+        structured_output=True,
+    )
+    def terminal_output(
+        job_id: str, stdout_offset: int = 0, stderr_offset: int = 0
+    ) -> dict[str, object]:
+        return invoke(
+            "terminal_output",
+            processes.output,
+            job_id,
+            stdout_offset=stdout_offset,
+            stderr_offset=stderr_offset,
+        )  # type: ignore[return-value]
 
-    @server.tool(name="terminal_write", description="Write bounded UTF-8 input to an owned running terminal job.", annotations=mutate, structured_output=True)
-    def terminal_write(job_id: str, data: str, close: bool = False) -> dict[str, object]:
-        return invoke("terminal_write", processes.write, job_id, data, close=close, audit_metadata={"job_id": job_id, "bytes": len(data.encode())})  # type: ignore[return-value]
+    @server.tool(
+        name="terminal_write",
+        description="Write bounded UTF-8 input to an owned running terminal job.",
+        annotations=mutate,
+        structured_output=True,
+    )
+    def terminal_write(
+        job_id: str, data: str, close: bool = False, env_session: str | None = None
+    ) -> dict[str, object]:
+        return invoke_mut(
+            "terminal_write",
+            processes.write,
+            {"action": "execute", "job_id": job_id},
+            env_session,
+            job_id,
+            data,
+            close=close,
+            audit_metadata={"job_id": job_id, "bytes": len(data.encode())},
+        )  # type: ignore[return-value]
 
-    @server.tool(name="terminal_stop", description="Terminate an owned terminal job and its process group.", annotations=destructive, structured_output=True)
-    def terminal_stop(job_id: str, force: bool = False) -> dict[str, object]:
-        return invoke("terminal_stop", processes.stop, job_id, force=force, audit_metadata={"job_id": job_id, "force": force})  # type: ignore[return-value]
+    @server.tool(
+        name="terminal_stop",
+        description="Terminate an owned terminal job and its process group.",
+        annotations=destructive,
+        structured_output=True,
+    )
+    def terminal_stop(
+        job_id: str, force: bool = False, env_session: str | None = None
+    ) -> dict[str, object]:
+        return invoke_mut(
+            "terminal_stop",
+            processes.stop,
+            {"action": "execute", "job_id": job_id},
+            env_session,
+            job_id,
+            force=force,
+            audit_metadata={"job_id": job_id, "force": force},
+        )  # type: ignore[return-value]
 
-    @server.tool(name="control_jobs", description="List terminal jobs and completed upstream Fabric, Forge, or Harness execution records.", annotations=ro, structured_output=True)
+    @server.tool(
+        name="control_jobs",
+        description="List terminal jobs and completed upstream Fabric, Forge, or Harness execution records.",
+        annotations=ro,
+        structured_output=True,
+    )
     def control_jobs() -> dict[str, object]:
         return invoke("control_jobs", processes.list)  # type: ignore[return-value]
 
-    @server.tool(name="git_status", description="Inspect structured status for any Git repository inside the workspace.", annotations=ro, structured_output=True)
+    @server.tool(
+        name="git_status",
+        description="Inspect structured status for any Git repository inside the workspace.",
+        annotations=ro,
+        structured_output=True,
+    )
     def git_status(repository: str) -> dict[str, object]:
         return invoke("git_status", git.status, repository)  # type: ignore[return-value]
 
-    @server.tool(name="git_diff", description="Inspect bounded working-tree or staged diffs.", annotations=ro, structured_output=True)
-    def git_diff(repository: str, staged: bool = False, path: str | None = None, context_lines: int = 3) -> dict[str, object]:
-        return invoke("git_diff", git.diff, repository, staged=staged, path=path, context_lines=context_lines)  # type: ignore[return-value]
+    @server.tool(
+        name="git_diff",
+        description="Inspect bounded working-tree or staged diffs.",
+        annotations=ro,
+        structured_output=True,
+    )
+    def git_diff(
+        repository: str, staged: bool = False, path: str | None = None, context_lines: int = 3
+    ) -> dict[str, object]:
+        return invoke(
+            "git_diff", git.diff, repository, staged=staged, path=path, context_lines=context_lines
+        )  # type: ignore[return-value]
 
-    @server.tool(name="git_log", description="Inspect structured Git commit history.", annotations=ro, structured_output=True)
+    @server.tool(
+        name="git_log",
+        description="Inspect structured Git commit history.",
+        annotations=ro,
+        structured_output=True,
+    )
     def git_log(repository: str, limit: int = 20, revision: str = "HEAD") -> dict[str, object]:
         return invoke("git_log", git.log, repository, limit=limit, revision=revision)  # type: ignore[return-value]
 
-    @server.tool(name="git_show", description="Show one bounded Git revision.", annotations=ro, structured_output=True)
-    def git_show(repository: str, revision: str = "HEAD", stat_only: bool = False) -> dict[str, object]:
+    @server.tool(
+        name="git_show",
+        description="Show one bounded Git revision.",
+        annotations=ro,
+        structured_output=True,
+    )
+    def git_show(
+        repository: str, revision: str = "HEAD", stat_only: bool = False
+    ) -> dict[str, object]:
         return invoke("git_show", git.show, repository, revision, stat_only=stat_only)  # type: ignore[return-value]
 
-    @server.tool(name="git_branches", description="List local and remote Git branches.", annotations=ro, structured_output=True)
+    @server.tool(
+        name="git_branches",
+        description="List local and remote Git branches.",
+        annotations=ro,
+        structured_output=True,
+    )
     def git_branches(repository: str, all_branches: bool = True) -> dict[str, object]:
         return invoke("git_branches", git.branches, repository, all_branches=all_branches)  # type: ignore[return-value]
 
-    @server.tool(name="git_create_branch", description="Create a non-forced Git branch, optionally checking it out.", annotations=mutate, structured_output=True)
-    def git_create_branch(repository: str, branch: str, checkout: bool = True) -> dict[str, object]:
-        return invoke("git_create_branch", git.create_branch, repository, branch, checkout=checkout, audit_metadata={"repository": repository, "branch": branch})  # type: ignore[return-value]
+    @server.tool(
+        name="git_create_branch",
+        description="Create a non-forced Git branch, optionally checking it out.",
+        annotations=mutate,
+        structured_output=True,
+    )
+    def git_create_branch(
+        repository: str, branch: str, checkout: bool = True, env_session: str | None = None
+    ) -> dict[str, object]:
+        return invoke_mut(
+            "git_create_branch",
+            git.create_branch,
+            {"action": "write", "repository": repository},
+            env_session,
+            repository,
+            branch,
+            checkout=checkout,
+            audit_metadata={"repository": repository, "branch": branch},
+        )  # type: ignore[return-value]
 
-    @server.tool(name="git_checkout", description="Switch to an existing Git branch without forced reset.", annotations=destructive, structured_output=True)
-    def git_checkout(repository: str, branch: str) -> dict[str, object]:
-        return invoke("git_checkout", git.checkout, repository, branch, audit_metadata={"repository": repository, "branch": branch})  # type: ignore[return-value]
+    @server.tool(
+        name="git_checkout",
+        description="Switch to an existing Git branch without forced reset.",
+        annotations=destructive,
+        structured_output=True,
+    )
+    def git_checkout(
+        repository: str, branch: str, env_session: str | None = None
+    ) -> dict[str, object]:
+        return invoke_mut(
+            "git_checkout",
+            git.checkout,
+            {"action": "write", "repository": repository},
+            env_session,
+            repository,
+            branch,
+            audit_metadata={"repository": repository, "branch": branch},
+        )  # type: ignore[return-value]
 
-    @server.tool(name="git_add", description="Stage validated repository-relative paths.", annotations=mutate, structured_output=True)
-    def git_add(repository: str, paths: list[str]) -> dict[str, object]:
-        return invoke("git_add", git.add, repository, paths, audit_metadata={"repository": repository, "paths": paths})  # type: ignore[return-value]
+    @server.tool(
+        name="git_add",
+        description="Stage validated repository-relative paths.",
+        annotations=mutate,
+        structured_output=True,
+    )
+    def git_add(
+        repository: str, paths: list[str], env_session: str | None = None
+    ) -> dict[str, object]:
+        return invoke_mut(
+            "git_add",
+            git.add,
+            {"action": "write", "repository": repository, "paths": paths},
+            env_session,
+            repository,
+            paths,
+            audit_metadata={"repository": repository, "paths": paths},
+        )  # type: ignore[return-value]
 
-    @server.tool(name="git_commit", description="Create a normal Git commit; hooks run inside the workspace sandbox.", annotations=mutate, structured_output=True)
-    def git_commit(repository: str, message: str, allow_empty: bool = False) -> dict[str, object]:
-        return invoke("git_commit", git.commit, repository, message, allow_empty=allow_empty, audit_metadata={"repository": repository})  # type: ignore[return-value]
+    @server.tool(
+        name="git_commit",
+        description="Create a normal Git commit; hooks run inside the workspace sandbox.",
+        annotations=mutate,
+        structured_output=True,
+    )
+    def git_commit(
+        repository: str, message: str, allow_empty: bool = False, env_session: str | None = None
+    ) -> dict[str, object]:
+        return invoke_mut(
+            "git_commit",
+            git.commit,
+            {"action": "write", "repository": repository},
+            env_session,
+            repository,
+            message,
+            allow_empty=allow_empty,
+            audit_metadata={"repository": repository},
+        )  # type: ignore[return-value]
 
-    @server.tool(name="git_fetch", description="Fetch from a configured remote using sandboxed network access and optional SSH agent forwarding.", annotations=annotation(read_only=False, idempotent=True, open_world=True), structured_output=True)
-    def git_fetch(repository: str, remote: str = "origin", prune: bool = False) -> dict[str, object]:
-        return invoke("git_fetch", git.fetch, repository, remote, prune=prune, audit_metadata={"repository": repository, "remote": remote, "network": True})  # type: ignore[return-value]
+    @server.tool(
+        name="git_fetch",
+        description="Fetch from a configured remote using sandboxed network access and optional SSH agent forwarding.",
+        annotations=annotation(read_only=False, idempotent=True, open_world=True),
+        structured_output=True,
+    )
+    def git_fetch(
+        repository: str, remote: str = "origin", prune: bool = False, env_session: str | None = None
+    ) -> dict[str, object]:
+        return invoke_mut(
+            "git_fetch",
+            git.fetch,
+            {"action": "write", "repository": repository},
+            env_session,
+            repository,
+            remote,
+            prune=prune,
+            audit_metadata={"repository": repository, "remote": remote, "network": True},
+        )  # type: ignore[return-value]
 
-    @server.tool(name="git_pull", description="Fetch and integrate a remote branch without forced reset.", annotations=network_mutate, structured_output=True)
-    def git_pull(repository: str, remote: str = "origin", branch: str | None = None, rebase: bool = False) -> dict[str, object]:
-        return invoke("git_pull", git.pull, repository, remote, branch, rebase=rebase, audit_metadata={"repository": repository, "remote": remote, "network": True})  # type: ignore[return-value]
+    @server.tool(
+        name="git_pull",
+        description="Fetch and integrate a remote branch without forced reset.",
+        annotations=network_mutate,
+        structured_output=True,
+    )
+    def git_pull(
+        repository: str,
+        remote: str = "origin",
+        branch: str | None = None,
+        rebase: bool = False,
+        env_session: str | None = None,
+    ) -> dict[str, object]:
+        return invoke_mut(
+            "git_pull",
+            git.pull,
+            {"action": "write", "repository": repository},
+            env_session,
+            repository,
+            remote,
+            branch,
+            rebase=rebase,
+            audit_metadata={"repository": repository, "remote": remote, "network": True},
+        )  # type: ignore[return-value]
 
-    @server.tool(name="git_push", description="Push normally through the sandbox and SSH agent; force push is not exposed.", annotations=network_mutate, structured_output=True)
-    def git_push(repository: str, remote: str = "origin", branch: str | None = None, set_upstream: bool = False) -> dict[str, object]:
-        return invoke("git_push", git.push, repository, remote, branch, set_upstream=set_upstream, audit_metadata={"repository": repository, "remote": remote, "network": True})  # type: ignore[return-value]
+    @server.tool(
+        name="git_push",
+        description="Push normally through the sandbox and SSH agent; force push is not exposed.",
+        annotations=network_mutate,
+        structured_output=True,
+    )
+    def git_push(
+        repository: str,
+        remote: str = "origin",
+        branch: str | None = None,
+        set_upstream: bool = False,
+        env_session: str | None = None,
+    ) -> dict[str, object]:
+        return invoke_mut(
+            "git_push",
+            git.push,
+            {"action": "publish", "repository": repository},
+            env_session,
+            repository,
+            remote,
+            branch,
+            set_upstream=set_upstream,
+            audit_metadata={"repository": repository, "remote": remote, "network": True},
+        )  # type: ignore[return-value]
 
-    @server.tool(name="git_clone", description="Clone a repository into a new workspace-relative destination.", annotations=network_mutate, structured_output=True)
-    def git_clone(url: str, destination: str, branch: str | None = None, depth: int | None = None) -> dict[str, object]:
-        return invoke("git_clone", git.clone, url, destination, branch=branch, depth=depth, audit_metadata={"destination": destination, "network": True})  # type: ignore[return-value]
+    @server.tool(
+        name="git_clone",
+        description="Clone a repository into a new workspace-relative destination.",
+        annotations=network_mutate,
+        structured_output=True,
+    )
+    def git_clone(
+        url: str,
+        destination: str,
+        branch: str | None = None,
+        depth: int | None = None,
+        env_session: str | None = None,
+    ) -> dict[str, object]:
+        return invoke_mut(
+            "git_clone",
+            git.clone,
+            {"action": "write", "create_name": destination.split("/")[0]},
+            env_session,
+            url,
+            destination,
+            branch=branch,
+            depth=depth,
+            audit_metadata={"destination": destination, "network": True},
+        )  # type: ignore[return-value]
 
-    @server.tool(name="git_remotes", description="List configured Git remotes.", annotations=ro, structured_output=True)
+    @server.tool(
+        name="git_remotes",
+        description="List configured Git remotes.",
+        annotations=ro,
+        structured_output=True,
+    )
     def git_remotes(repository: str) -> dict[str, object]:
         return invoke("git_remotes", git.remotes, repository)  # type: ignore[return-value]
 
-    @server.tool(name="git_restore", description="Restore selected paths without exposing hard reset.", annotations=destructive, structured_output=True)
-    def git_restore(repository: str, paths: list[str], staged: bool = False) -> dict[str, object]:
-        return invoke("git_restore", git.restore, repository, paths, staged=staged, audit_metadata={"repository": repository, "paths": paths})  # type: ignore[return-value]
+    @server.tool(
+        name="git_restore",
+        description="Restore selected paths without exposing hard reset.",
+        annotations=destructive,
+        structured_output=True,
+    )
+    def git_restore(
+        repository: str, paths: list[str], staged: bool = False, env_session: str | None = None
+    ) -> dict[str, object]:
+        return invoke_mut(
+            "git_restore",
+            git.restore,
+            {"action": "write", "repository": repository, "paths": paths},
+            env_session,
+            repository,
+            paths,
+            staged=staged,
+            audit_metadata={"repository": repository, "paths": paths},
+        )  # type: ignore[return-value]
 
-    @server.tool(name="git_stash", description="Stash tracked changes and optionally untracked files.", annotations=destructive, structured_output=True)
-    def git_stash(repository: str, message: str | None = None, include_untracked: bool = False) -> dict[str, object]:
-        return invoke("git_stash", git.stash, repository, message, include_untracked=include_untracked, audit_metadata={"repository": repository})  # type: ignore[return-value]
+    @server.tool(
+        name="git_stash",
+        description="Stash tracked changes and optionally untracked files.",
+        annotations=destructive,
+        structured_output=True,
+    )
+    def git_stash(
+        repository: str,
+        message: str | None = None,
+        include_untracked: bool = False,
+        env_session: str | None = None,
+    ) -> dict[str, object]:
+        return invoke_mut(
+            "git_stash",
+            git.stash,
+            {"action": "write", "repository": repository},
+            env_session,
+            repository,
+            message,
+            include_untracked=include_untracked,
+            audit_metadata={"repository": repository},
+        )  # type: ignore[return-value]
 
-    @server.tool(name="tool_inventory", description="Detect safe paths and versions for installed developer tools without exposing environment secrets.", annotations=ro, structured_output=True)
+    @server.tool(
+        name="git_worktree_list",
+        description="List managed worktrees of a repository with branch and head.",
+        annotations=ro,
+        structured_output=True,
+    )
+    def git_worktree_list(repository: str) -> dict[str, object]:
+        return invoke(
+            "git_worktree_list",
+            git.worktree_list,
+            repository,
+            audit_metadata={"repository": repository},
+        )  # type: ignore[return-value]
+
+    @server.tool(
+        name="git_worktree_add",
+        description="Create a managed worktree at <repository>/.worktrees/<name> on a distinct branch; shares object storage, never disturbs existing work.",
+        annotations=mutate,
+        structured_output=True,
+    )
+    def git_worktree_add(
+        repository: str,
+        branch: str,
+        name: str | None = None,
+        start_point: str | None = None,
+        env_session: str | None = None,
+    ) -> dict[str, object]:
+        return invoke_mut(
+            "git_worktree_add",
+            git.worktree_add,
+            {"action": "write", "repository": repository},
+            env_session,
+            repository,
+            branch,
+            start_point=start_point,
+            name=name,
+            audit_metadata={"repository": repository, "branch": branch, "name": name},
+        )  # type: ignore[return-value]
+
+    @server.tool(
+        name="git_worktree_remove",
+        description="Remove a managed worktree; refuses unknown or dirty checkouts unless forced, never touches the main checkout.",
+        annotations=destructive,
+        structured_output=True,
+    )
+    def git_worktree_remove(
+        repository: str, name: str, force: bool = False, env_session: str | None = None
+    ) -> dict[str, object]:
+        return invoke_mut(
+            "git_worktree_remove",
+            git.worktree_remove,
+            {"action": "write", "repository": repository},
+            env_session,
+            repository,
+            name,
+            force=force,
+            audit_metadata={"repository": repository, "name": name, "force": force},
+        )  # type: ignore[return-value]
+
+    @server.tool(
+        name="tool_inventory",
+        description="Detect safe paths and versions for installed developer tools without exposing environment secrets.",
+        annotations=ro,
+        structured_output=True,
+    )
     def tool_inventory() -> dict[str, object]:
         return invoke("tool_inventory", inventory.inventory)  # type: ignore[return-value]
 
-    @server.tool(name="control_capabilities", description="Report the structured capabilities, limits, security boundaries, and upstream ownership of this control plane.", annotations=ro, structured_output=True)
+    @server.tool(
+        name="control_capabilities",
+        description="Report the structured capabilities, limits, security boundaries, and upstream ownership of this control plane.",
+        annotations=ro,
+        structured_output=True,
+    )
     def control_capabilities() -> dict[str, object]:
         return invoke("control_capabilities", control_plane.capabilities)  # type: ignore[return-value]
 
-    @server.tool(name="developer_readiness", description="Observe whether the protected environment can carry a development task through analysis, GitHub, and Forge without granting those capabilities.", annotations=ro, structured_output=True)
+    @server.tool(
+        name="developer_readiness",
+        description="Observe whether the protected environment can carry a development task through analysis, GitHub, and Forge without granting those capabilities.",
+        annotations=ro,
+        structured_output=True,
+    )
     def developer_readiness(repository: str | None = None) -> dict[str, object]:
-        return invoke("developer_readiness", control_plane.developer_readiness, repository, audit_metadata={"repository": repository})  # type: ignore[return-value]
+        return invoke(
+            "developer_readiness",
+            control_plane.developer_readiness,
+            repository,
+            audit_metadata={"repository": repository},
+        )  # type: ignore[return-value]
 
-    @server.tool(name="journal_context_status", description="Report bounded MNCS local evidence classes available to the Atlas journal editor; this is readiness only and never writes project memory.", annotations=ro, structured_output=True)
+    @server.tool(
+        name="journal_context_status",
+        description="Report bounded MNCS local evidence classes available to the Atlas journal editor; this is readiness only and never writes project memory.",
+        annotations=ro,
+        structured_output=True,
+    )
     def journal_context_status() -> dict[str, object]:
         return invoke("journal_context_status", journal_context.status)  # type: ignore[return-value]
 
-    @server.tool(name="journal_context_collect", description="Collect an immutable, bounded, provenance-rich local MNCS evidence bundle for an explicit journal interval. Evidence is untrusted developmental data; Atlas owns journal semantics.", annotations=ro, structured_output=True)
-    def journal_context_collect(start: str, end: str, projects: list[str] | None = None, include_local_git: bool = True, include_uncommitted: bool = True, include_experiments: bool = True, include_commons: bool = True, include_control_activity: bool = True, include_fabric_refs: bool = True, include_forge_refs: bool = True, editor_hints: list[str] | None = None, page_size: int = 50) -> dict[str, object]:
+    @server.tool(
+        name="journal_context_collect",
+        description="Collect an immutable, bounded, provenance-rich local MNCS evidence bundle for an explicit journal interval. Evidence is untrusted developmental data; Atlas owns journal semantics.",
+        annotations=ro,
+        structured_output=True,
+    )
+    def journal_context_collect(
+        start: str,
+        end: str,
+        projects: list[str] | None = None,
+        include_local_git: bool = True,
+        include_uncommitted: bool = True,
+        include_experiments: bool = True,
+        include_commons: bool = True,
+        include_control_activity: bool = True,
+        include_fabric_refs: bool = True,
+        include_forge_refs: bool = True,
+        editor_hints: list[str] | None = None,
+        page_size: int = 50,
+    ) -> dict[str, object]:
         return invoke(
             "journal_context_collect",
             journal_context.collect,
@@ -418,15 +1141,43 @@ def build_server(config: ControlConfig | None = None) -> Any:
             audit_metadata={"projects": projects},
         )  # type: ignore[return-value]
 
-    @server.tool(name="journal_context_get", description="Retrieve a bounded page from an immutable local journal context bundle by stable bundle ID and cursor.", annotations=ro, structured_output=True)
-    def journal_context_get(bundle_id: str, cursor: int = 0, page_size: int = 50) -> dict[str, object]:
-        return invoke("journal_context_get", journal_context.get, bundle_id, cursor=cursor, page_size=page_size)  # type: ignore[return-value]
+    @server.tool(
+        name="journal_context_get",
+        description="Retrieve a bounded page from an immutable local journal context bundle by stable bundle ID and cursor.",
+        annotations=ro,
+        structured_output=True,
+    )
+    def journal_context_get(
+        bundle_id: str, cursor: int = 0, page_size: int = 50
+    ) -> dict[str, object]:
+        return invoke(
+            "journal_context_get",
+            journal_context.get,
+            bundle_id,
+            cursor=cursor,
+            page_size=page_size,
+        )  # type: ignore[return-value]
 
-    @server.tool(name="experiment_readiness", description="Inspect whether the MNCS experiment stack may start experiments. Observation only; does not repair, refresh, or publish.", annotations=ro, structured_output=True)
+    @server.tool(
+        name="experiment_readiness",
+        description="Inspect whether the MNCS experiment stack may start experiments. Observation only; does not repair, refresh, or publish.",
+        annotations=ro,
+        structured_output=True,
+    )
     def experiment_readiness(profile: str = "base-inference") -> dict[str, object]:
-        return invoke("experiment_readiness", control_plane.experiment_readiness, profile, audit_metadata={"profile": profile})  # type: ignore[return-value]
+        return invoke(
+            "experiment_readiness",
+            control_plane.experiment_readiness,
+            profile,
+            audit_metadata={"profile": profile},
+        )  # type: ignore[return-value]
 
-    @server.tool(name="specialist_route_shadow", description="Evaluate an external MNEL routing proposal in shadow mode. The existing policy decision remains authoritative; no tool is authorized or executed by this operation.", annotations=annotation(read_only=False, destructive=True), structured_output=True)
+    @server.tool(
+        name="specialist_route_shadow",
+        description="Evaluate an external MNEL routing proposal in shadow mode. The existing policy decision remains authoritative; no tool is authorized or executed by this operation.",
+        annotations=annotation(read_only=False, destructive=True),
+        structured_output=True,
+    )
     def specialist_route_shadow(
         artifact: dict[str, object],
         request_features: list[int],
@@ -446,7 +1197,12 @@ def build_server(config: ControlConfig | None = None) -> Any:
             timeout_seconds=timeout_seconds,
         )  # type: ignore[return-value]
 
-    @server.tool(name="experiment_start", description="Start a durable multi-turn experiment. Control persists coordinator state; Harness resolves exact model pins; Fabric owns detached execution. The MCP client may disconnect after acceptance.", annotations=network_mutate, structured_output=True)
+    @server.tool(
+        name="experiment_start",
+        description="Start a durable multi-turn experiment. Control persists coordinator state; Harness resolves exact model pins; Fabric owns detached execution. The MCP client may disconnect after acceptance.",
+        annotations=network_mutate,
+        structured_output=True,
+    )
     def experiment_start(spec: dict[str, object]) -> dict[str, object]:
         def start() -> dict[str, object]:
             readiness = control_plane.experiment_readiness("sustained-experiment")
@@ -456,7 +1212,9 @@ def build_server(config: ControlConfig | None = None) -> Any:
                 blockers = [
                     name
                     for name, layer in (readiness.get("layers") or {}).items()
-                    if name in required and isinstance(layer, dict) and layer.get("status") != "READY"
+                    if name in required
+                    and isinstance(layer, dict)
+                    and layer.get("status") != "READY"
                 ]
                 raise ControlError(
                     "EXPERIMENT_NOT_READY",
@@ -471,39 +1229,92 @@ def build_server(config: ControlConfig | None = None) -> Any:
             audit_metadata={"profile": "sustained-experiment"},
         )  # type: ignore[return-value]
 
-    @server.tool(name="experiment_status", description="Inspect one durable experiment and its current Fabric-backed turn without executing work.", annotations=ro, structured_output=True)
+    @server.tool(
+        name="experiment_status",
+        description="Inspect one durable experiment and its current Fabric-backed turn without executing work.",
+        annotations=ro,
+        structured_output=True,
+    )
     def experiment_status(experiment_id: str) -> dict[str, object]:
         return invoke("experiment_status", experiments.status, experiment_id)  # type: ignore[return-value]
 
-    @server.tool(name="experiment_result", description="Read retained outputs, failures, and Fabric evidence for one durable experiment.", annotations=ro, structured_output=True)
+    @server.tool(
+        name="experiment_result",
+        description="Read retained outputs, failures, and Fabric evidence for one durable experiment.",
+        annotations=ro,
+        structured_output=True,
+    )
     def experiment_result(experiment_id: str) -> dict[str, object]:
         return invoke("experiment_result", experiments.result, experiment_id)  # type: ignore[return-value]
 
-    @server.tool(name="experiment_list", description="List bounded durable experiment state retained by Control.", annotations=ro, structured_output=True)
+    @server.tool(
+        name="experiment_list",
+        description="List bounded durable experiment state retained by Control.",
+        annotations=ro,
+        structured_output=True,
+    )
     def experiment_list() -> dict[str, object]:
         return invoke("experiment_list", experiments.list)  # type: ignore[return-value]
 
-    @server.tool(name="experiment_stop", description="Stop a durable experiment coordinator from starting more turns. Already-detached Fabric work remains Fabric-owned and may complete independently.", annotations=destructive, structured_output=True)
+    @server.tool(
+        name="experiment_stop",
+        description="Stop a durable experiment coordinator from starting more turns. Already-detached Fabric work remains Fabric-owned and may complete independently.",
+        annotations=destructive,
+        structured_output=True,
+    )
     def experiment_stop(experiment_id: str) -> dict[str, object]:
         return invoke("experiment_stop", experiments.stop, experiment_id)  # type: ignore[return-value]
 
-    @server.tool(name="experiment_attach_reference", description="Attach one exact producer-owned identity to a durable Concept Experiment without copying or reinterpreting its payload.", annotations=mutate, structured_output=True)
-    def experiment_attach_reference(experiment_id: str, relation: str, reference: dict[str, object]) -> dict[str, object]:
-        return invoke("experiment_attach_reference", experiments.attach_reference, experiment_id, relation, reference)  # type: ignore[return-value]
+    @server.tool(
+        name="experiment_attach_reference",
+        description="Attach one exact producer-owned identity to a durable Concept Experiment without copying or reinterpreting its payload.",
+        annotations=mutate,
+        structured_output=True,
+    )
+    def experiment_attach_reference(
+        experiment_id: str, relation: str, reference: dict[str, object]
+    ) -> dict[str, object]:
+        return invoke(
+            "experiment_attach_reference",
+            experiments.attach_reference,
+            experiment_id,
+            relation,
+            reference,
+        )  # type: ignore[return-value]
 
-    @server.tool(name="experiment_publish", description="Idempotently publish or synchronize a terminal Concept Experiment revision through the separate Commons operator boundary.", annotations=network_mutate, structured_output=True)
+    @server.tool(
+        name="experiment_publish",
+        description="Idempotently publish or synchronize a terminal Concept Experiment revision through the separate Commons operator boundary.",
+        annotations=network_mutate,
+        structured_output=True,
+    )
     def experiment_publish(experiment_id: str) -> dict[str, object]:
         return invoke("experiment_publish", experiments.publish, experiment_id)  # type: ignore[return-value]
 
-    @server.tool(name="experiment_rerun", description="Create a new frozen durable experiment with explicit rerun/predecessor lineage to an existing experiment.", annotations=network_mutate, structured_output=True)
+    @server.tool(
+        name="experiment_rerun",
+        description="Create a new frozen durable experiment with explicit rerun/predecessor lineage to an existing experiment.",
+        annotations=network_mutate,
+        structured_output=True,
+    )
     def experiment_rerun(experiment_id: str) -> dict[str, object]:
         return invoke("experiment_rerun", experiments.rerun, experiment_id)  # type: ignore[return-value]
 
-    @server.tool(name="experiment_graph", description="Inspect the Commons Family Record graph for one durable Concept Experiment.", annotations=ro, structured_output=True)
+    @server.tool(
+        name="experiment_graph",
+        description="Inspect the Commons Family Record graph for one durable Concept Experiment.",
+        annotations=ro,
+        structured_output=True,
+    )
     def experiment_graph(experiment_id: str) -> dict[str, object]:
         return invoke("experiment_graph", integrations.commons.experiment, experiment_id)  # type: ignore[return-value]
 
-    @server.tool(name="experiment_replicate", description="Replicate one already-frozen Concept Experiment realization on one exactly requested Fabric worker without recompiling. Control verifies the frozen identities through the MNCS language CLI, executes the exact bundle via Fabric's no-fallback exact-target boundary, records baseline/replication comparison evidence in Forge, and publishes a Replication Family Record to Commons. Identity mismatches fail closed.", annotations=network_mutate, structured_output=True)
+    @server.tool(
+        name="experiment_replicate",
+        description="Replicate one already-frozen Concept Experiment realization on one exactly requested Fabric worker without recompiling. Control verifies the frozen identities through the MNCS language CLI, executes the exact bundle via Fabric's no-fallback exact-target boundary, records baseline/replication comparison evidence in Forge, and publishes a Replication Family Record to Commons. Identity mismatches fail closed.",
+        annotations=network_mutate,
+        structured_output=True,
+    )
     def experiment_replicate(spec: dict[str, object]) -> dict[str, object]:
         return invoke(
             "experiment_replicate",
@@ -512,51 +1323,190 @@ def build_server(config: ControlConfig | None = None) -> Any:
             audit_metadata={"profile": "frozen-experiment-replication"},
         )  # type: ignore[return-value]
 
-    @server.tool(name="replication_status", description="Inspect one durable replication: its verified language identities, Fabric execution attempt evidence, Forge comparison reference, and Commons Family Record publication. Safe to call after reconnecting; the coordinator persists state on disk.", annotations=ro, structured_output=True)
+    @server.tool(
+        name="replication_status",
+        description="Inspect one durable replication: its verified language identities, Fabric execution attempt evidence, Forge comparison reference, and Commons Family Record publication. Safe to call after reconnecting; the coordinator persists state on disk.",
+        annotations=ro,
+        structured_output=True,
+    )
     def replication_status(replication_id: str) -> dict[str, object]:
         return invoke("replication_status", replications.status, replication_id)  # type: ignore[return-value]
 
-    @server.tool(name="replication_list", description="List durable replication attempts with their coordination outcomes.", annotations=ro, structured_output=True)
+    @server.tool(
+        name="replication_list",
+        description="List durable replication attempts with their coordination outcomes.",
+        annotations=ro,
+        structured_output=True,
+    )
     def replication_list() -> dict[str, object]:
         return invoke("replication_list", replications.list)  # type: ignore[return-value]
 
-    @server.tool(name="forge_candidate_status", description="Inspect whether the current Forge candidate still matches the working tree.", annotations=ro, structured_output=True)
+    @server.tool(
+        name="forge_candidate_status",
+        description="Inspect whether the current Forge candidate still matches the working tree.",
+        annotations=ro,
+        structured_output=True,
+    )
     def forge_candidate_status(repository: str) -> dict[str, object]:
-        return invoke("forge_candidate_status", integrations.forge.candidate_status, repository, audit_metadata={"repository": repository})  # type: ignore[return-value]
+        return invoke(
+            "forge_candidate_status",
+            integrations.forge.candidate_status,
+            repository,
+            audit_metadata={"repository": repository},
+        )  # type: ignore[return-value]
 
-    @server.tool(name="forge_candidate_refresh", description="Rebind the active Forge candidate to current content and keep prior evidence attached to the previous identity.", annotations=mutate, structured_output=True)
-    def forge_candidate_refresh(repository: str, hypothesis: str = "working-tree content changed after the previous candidate binding", changed_files: list[str] | None = None) -> dict[str, object]:
-        return invoke("forge_candidate_refresh", integrations.forge.refresh_candidate, repository, hypothesis=hypothesis, changed_files=changed_files, audit_metadata={"repository": repository})  # type: ignore[return-value]
+    @server.tool(
+        name="forge_candidate_refresh",
+        description="Rebind the active Forge candidate to current content and keep prior evidence attached to the previous identity.",
+        annotations=mutate,
+        structured_output=True,
+    )
+    def forge_candidate_refresh(
+        repository: str,
+        hypothesis: str = "working-tree content changed after the previous candidate binding",
+        changed_files: list[str] | None = None,
+        env_session: str | None = None,
+    ) -> dict[str, object]:
+        return invoke_mut(
+            "forge_candidate_refresh",
+            integrations.forge.refresh_candidate,
+            {"action": "write", "repository": repository, "paths": changed_files or []},
+            env_session,
+            repository,
+            hypothesis=hypothesis,
+            changed_files=changed_files,
+            audit_metadata={"repository": repository},
+        )  # type: ignore[return-value]
 
-    @server.tool(name="env_status", description="Report whether the sibling mncs-environment checkout is available, with session schema and Store versions.", annotations=ro, structured_output=True)
+    @server.tool(
+        name="env_status",
+        description="Report whether the sibling mncs-environment checkout is available, with session schema and Store versions.",
+        annotations=ro,
+        structured_output=True,
+    )
     def env_status() -> dict[str, object]:
         return invoke("env_status", environment_sessions.status)  # type: ignore[return-value]
 
-    @server.tool(name="env_enter", description="Resolve an environment definition and enter it as a durable session: tri-state authority, rights gate, and lifecycle to active.", annotations=mutate, structured_output=True)
-    def env_enter(definition: dict[str, object], consumer: str, workspace: str | None = None, consumer_kind: str = "agent") -> dict[str, object]:
-        return invoke("env_enter", environment_sessions.enter, definition, consumer, workspace=workspace, consumer_kind=consumer_kind, audit_metadata={"consumer": consumer})  # type: ignore[return-value]
+    @server.tool(
+        name="env_enter",
+        description="Resolve an environment definition and enter it as a durable session: tri-state authority, rights gate, and lifecycle to active.",
+        annotations=mutate,
+        structured_output=True,
+    )
+    def env_enter(
+        definition: dict[str, object],
+        consumer: str,
+        workspace: str | None = None,
+        consumer_kind: str = "agent",
+    ) -> dict[str, object]:
+        return invoke(
+            "env_enter",
+            environment_sessions.enter,
+            definition,
+            consumer,
+            workspace=workspace,
+            consumer_kind=consumer_kind,
+            audit_metadata={"consumer": consumer},
+        )  # type: ignore[return-value]
 
-    @server.tool(name="env_inspect", description="Read-only inspection of one environment session: lifecycle, authority, rights, claims, bindings, recent events.", annotations=ro, structured_output=True)
+    @server.tool(
+        name="env_inspect",
+        description="Read-only inspection of one environment session: lifecycle, authority, rights, claims, bindings, recent events.",
+        annotations=ro,
+        structured_output=True,
+    )
     def env_inspect(session_id: str) -> dict[str, object]:
-        return invoke("env_inspect", environment_sessions.inspect, session_id, audit_metadata={"session_id": session_id})  # type: ignore[return-value]
+        return invoke(
+            "env_inspect",
+            environment_sessions.inspect,
+            session_id,
+            audit_metadata={"session_id": session_id},
+        )  # type: ignore[return-value]
 
-    @server.tool(name="env_resume", description="Resume participation in one environment session without changing its lifecycle state.", annotations=mutate, structured_output=True)
+    @server.tool(
+        name="env_resume",
+        description="Resume participation in one environment session without changing its lifecycle state.",
+        annotations=mutate,
+        structured_output=True,
+    )
     def env_resume(session_id: str) -> dict[str, object]:
-        return invoke("env_resume", environment_sessions.resume, session_id, audit_metadata={"session_id": session_id})  # type: ignore[return-value]
+        return invoke(
+            "env_resume",
+            environment_sessions.resume,
+            session_id,
+            audit_metadata={"session_id": session_id},
+        )  # type: ignore[return-value]
 
-    @server.tool(name="env_claim_acquire", description="Claim one workspace repository for a session; fails when another live session holds it.", annotations=mutate, structured_output=True)
-    def env_claim_acquire(session_id: str, repository: str, reason: str = "", basis: str = "explicit-claim", ttl_hours: int = 24) -> dict[str, object]:
-        return invoke("env_claim_acquire", environment_sessions.acquire_claim, session_id, repository, reason=reason, basis=basis, ttl_hours=ttl_hours, audit_metadata={"session_id": session_id, "repository": repository})  # type: ignore[return-value]
+    @server.tool(
+        name="env_claim_acquire",
+        description="Claim one workspace repository for a session; fails when another live session holds it.",
+        annotations=mutate,
+        structured_output=True,
+    )
+    def env_claim_acquire(
+        session_id: str,
+        repository: str,
+        reason: str = "",
+        basis: str = "explicit-claim",
+        ttl_hours: int = 24,
+        paths: list[str] | None = None,
+        worktree: str | None = None,
+        branch: str | None = None,
+    ) -> dict[str, object]:
+        scope: dict[str, object] | None = None
+        if paths or worktree:
+            scope = {
+                "kind": "worktree" if worktree else "paths",
+                "checkout": worktree,
+                "branch": branch,
+                "paths": paths,
+            }
+        return invoke(
+            "env_claim_acquire",
+            environment_sessions.acquire_claim,
+            session_id,
+            repository,
+            reason=reason,
+            basis=basis,
+            ttl_hours=ttl_hours,
+            scope=scope,
+            audit_metadata={"session_id": session_id, "repository": repository},
+        )  # type: ignore[return-value]
 
-    @server.tool(name="env_claim_release", description="Release a workspace repository claim held by a session.", annotations=mutate, structured_output=True)
-    def env_claim_release(session_id: str, repository: str, reason: str = "") -> dict[str, object]:
-        return invoke("env_claim_release", environment_sessions.release_claim, session_id, repository, reason=reason, audit_metadata={"session_id": session_id, "repository": repository})  # type: ignore[return-value]
+    @server.tool(
+        name="env_claim_release",
+        description="Release a workspace repository claim held by a session.",
+        annotations=mutate,
+        structured_output=True,
+    )
+    def env_claim_release(
+        session_id: str, repository: str, reason: str = "", claim_id: str | None = None
+    ) -> dict[str, object]:
+        return invoke(
+            "env_claim_release",
+            environment_sessions.release_claim,
+            session_id,
+            repository,
+            reason=reason,
+            claim_id=claim_id,
+            audit_metadata={"session_id": session_id, "repository": repository},
+        )  # type: ignore[return-value]
 
-    @server.tool(name="env_claims", description="List all workspace claim records known to the environment state.", annotations=ro, structured_output=True)
+    @server.tool(
+        name="env_claims",
+        description="List all workspace claim records known to the environment state.",
+        annotations=ro,
+        structured_output=True,
+    )
     def env_claims() -> dict[str, object]:
         return invoke("env_claims", environment_sessions.list_claims)  # type: ignore[return-value]
 
-    @server.tool(name="system_status", description="Inspect Fedora host resources, sandbox, MCP jobs, and MNCS subsystem availability.", annotations=ro, structured_output=True)
+    @server.tool(
+        name="system_status",
+        description="Inspect Fedora host resources, sandbox, MCP jobs, and MNCS subsystem availability.",
+        annotations=ro,
+        structured_output=True,
+    )
     def system_status() -> dict[str, object]:
         def view() -> dict[str, object]:
             fabric = integrations.fabric.status()
@@ -572,7 +1522,11 @@ def build_server(config: ControlConfig | None = None) -> Any:
             )
             return {
                 **integrations.system.status(),
-                "sandbox": {"backend": sandbox.backend, "available": sandbox.available, "required": selected.require_real_sandbox},
+                "sandbox": {
+                    "backend": sandbox.backend,
+                    "available": sandbox.available,
+                    "required": selected.require_real_sandbox,
+                },
                 "workspace": projects.workspace_info(),
                 "jobs": processes.list(),
                 "local_harness": integrations.harness.status(),
@@ -612,88 +1566,271 @@ def build_server(config: ControlConfig | None = None) -> Any:
             view,
         )  # type: ignore[return-value]
 
-    @server.tool(name="audit_summary", description="Show bounded aggregate control activity from the private audit log without exposing raw commands or secrets.", annotations=ro, structured_output=True)
+    @server.tool(
+        name="audit_summary",
+        description="Show bounded aggregate control activity from the private audit log without exposing raw commands or secrets.",
+        annotations=ro,
+        structured_output=True,
+    )
     def audit_summary(limit: int = 50) -> dict[str, object]:
         return invoke("audit_summary", audit.summary, limit=limit)  # type: ignore[return-value]
 
-    @server.tool(name="list_repositories", description="List configured MNCS aliases; aliases specialize but do not authorize general workspace access.", annotations=ro, structured_output=True)
+    @server.tool(
+        name="list_repositories",
+        description="List configured MNCS aliases; aliases specialize but do not authorize general workspace access.",
+        annotations=ro,
+        structured_output=True,
+    )
     def list_repositories() -> dict[str, object]:
-        return invoke("list_repositories", lambda: {"workspace_root": str(policy.root), "repositories": [{"alias": key, "path": value, "exists": (policy.root / value).is_dir()} for key, value in sorted(selected.repositories.items())]})  # type: ignore[return-value]
+        return invoke(
+            "list_repositories",
+            lambda: {
+                "workspace_root": str(policy.root),
+                "repositories": [
+                    {"alias": key, "path": value, "exists": (policy.root / value).is_dir()}
+                    for key, value in sorted(selected.repositories.items())
+                ],
+            },
+        )  # type: ignore[return-value]
 
-    @server.tool(name="repo_status", description="Backward-compatible Git status for one configured MNCS alias.", annotations=ro, structured_output=True)
+    @server.tool(
+        name="repo_status",
+        description="Backward-compatible Git status for one configured MNCS alias.",
+        annotations=ro,
+        structured_output=True,
+    )
     def repo_status(repository: str) -> dict[str, object]:
         def status_alias() -> dict[str, object]:
             if repository not in selected.repositories:
-                raise ControlError("UNAUTHORIZED_REPOSITORY", f"repository alias is unknown: {repository}")
+                raise ControlError(
+                    "UNAUTHORIZED_REPOSITORY", f"repository alias is unknown: {repository}"
+                )
             return git.status(selected.repositories[repository])
 
         return invoke("repo_status", status_alias)  # type: ignore[return-value]
 
-    @server.tool(name="commons_status", description="Inspect the controller-local Commons service through the Harness-owned MCP boundary.", annotations=ro, structured_output=True)
+    @server.tool(
+        name="commons_status",
+        description="Inspect the controller-local Commons service through the Harness-owned MCP boundary.",
+        annotations=ro,
+        structured_output=True,
+    )
     def commons_status() -> dict[str, object]:
         return invoke("commons_status", integrations.commons.status)  # type: ignore[return-value]
 
-    @server.tool(name="commons_work", description="List bounded durable Commons work records as untrusted inert data.", annotations=ro, structured_output=True)
+    @server.tool(
+        name="commons_work",
+        description="List bounded durable Commons work records as untrusted inert data.",
+        annotations=ro,
+        structured_output=True,
+    )
     def commons_work(limit: int = 100) -> dict[str, object]:
         return invoke("commons_work", integrations.commons.work, limit)  # type: ignore[return-value]
 
-    @server.tool(name="commons_work_status", description="Read one durable Commons work record and its append-only history as untrusted inert data.", annotations=ro, structured_output=True)
+    @server.tool(
+        name="commons_work_status",
+        description="Read one durable Commons work record and its append-only history as untrusted inert data.",
+        annotations=ro,
+        structured_output=True,
+    )
     def commons_work_status(work_id: str) -> dict[str, object]:
         return invoke("commons_work_status", integrations.commons.work_status, work_id)  # type: ignore[return-value]
 
-    @server.tool(name="commons_opportunities", description="List legacy open Commons work opportunities as untrusted inert data.", annotations=ro, structured_output=True)
+    @server.tool(
+        name="commons_opportunities",
+        description="List legacy open Commons work opportunities as untrusted inert data.",
+        annotations=ro,
+        structured_output=True,
+    )
     def commons_opportunities(limit: int = 100) -> dict[str, object]:
         return invoke("commons_opportunities", integrations.commons.opportunities, limit)  # type: ignore[return-value]
 
-    @server.tool(name="commons_query", description="Run a bounded read-only Commons query through the Harness-owned MCP boundary.", annotations=ro, structured_output=True)
-    def commons_query(kind: str | None = None, state: str | None = None, subject: str | None = None, related: str | None = None, limit: int = 100, open_work: bool = False) -> dict[str, object]:
-        return invoke("commons_query", integrations.commons.query, kind=kind, state=state, subject=subject, related=related, limit=limit, open_work=open_work)  # type: ignore[return-value]
+    @server.tool(
+        name="commons_query",
+        description="Run a bounded read-only Commons query through the Harness-owned MCP boundary.",
+        annotations=ro,
+        structured_output=True,
+    )
+    def commons_query(
+        kind: str | None = None,
+        state: str | None = None,
+        subject: str | None = None,
+        related: str | None = None,
+        limit: int = 100,
+        open_work: bool = False,
+    ) -> dict[str, object]:
+        return invoke(
+            "commons_query",
+            integrations.commons.query,
+            kind=kind,
+            state=state,
+            subject=subject,
+            related=related,
+            limit=limit,
+            open_work=open_work,
+        )  # type: ignore[return-value]
 
-    @server.tool(name="commons_get", description="Get one Commons record by digest as untrusted inert data.", annotations=ro, structured_output=True)
+    @server.tool(
+        name="commons_get",
+        description="Get one Commons record by digest as untrusted inert data.",
+        annotations=ro,
+        structured_output=True,
+    )
     def commons_get(digest: str) -> dict[str, object]:
         return invoke("commons_get", integrations.commons.get, digest)  # type: ignore[return-value]
 
-    @server.tool(name="commons_conversation", description="Project a bounded Commons conversation graph rooted at one digest.", annotations=ro, structured_output=True)
+    @server.tool(
+        name="commons_conversation",
+        description="Project a bounded Commons conversation graph rooted at one digest.",
+        annotations=ro,
+        structured_output=True,
+    )
     def commons_conversation(digest: str) -> dict[str, object]:
         return invoke("commons_conversation", integrations.commons.conversation, digest)  # type: ignore[return-value]
 
-    @server.tool(name="commons_evidence", description="Trace bounded Commons evidence lineage rooted at one digest.", annotations=ro, structured_output=True)
+    @server.tool(
+        name="commons_evidence",
+        description="Trace bounded Commons evidence lineage rooted at one digest.",
+        annotations=ro,
+        structured_output=True,
+    )
     def commons_evidence(digest: str) -> dict[str, object]:
         return invoke("commons_evidence", integrations.commons.evidence, digest)  # type: ignore[return-value]
 
-    @server.tool(name="commons_sync", description="Read a bounded ordered Commons ledger slice after an optional store-local cursor.", annotations=ro, structured_output=True)
-    def commons_sync(cursor: dict[str, object] | None = None, limit: int = 1000) -> dict[str, object]:
+    @server.tool(
+        name="commons_sync",
+        description="Read a bounded ordered Commons ledger slice after an optional store-local cursor.",
+        annotations=ro,
+        structured_output=True,
+    )
+    def commons_sync(
+        cursor: dict[str, object] | None = None, limit: int = 1000
+    ) -> dict[str, object]:
         return invoke("commons_sync", integrations.commons.sync, cursor, limit)  # type: ignore[return-value]
 
-    @server.tool(name="fabric_status", description="Inspect Fabric workers through FabricClient's public API.", annotations=ro, structured_output=True)
+    @server.tool(
+        name="fabric_status",
+        description="Inspect Fabric workers through FabricClient's public API.",
+        annotations=ro,
+        structured_output=True,
+    )
     def fabric_status() -> dict[str, object]:
         return invoke("fabric_status", integrations.fabric.status)  # type: ignore[return-value]
 
-    @server.tool(name="model_status", description="Report local Ollama and Fabric model observations.", annotations=ro, structured_output=True)
+    @server.tool(
+        name="model_status",
+        description="Report local Ollama and Fabric model observations.",
+        annotations=ro,
+        structured_output=True,
+    )
     def model_status() -> dict[str, object]:
         return invoke("model_status", integrations.models.status)  # type: ignore[return-value]
 
-    @server.tool(name="test_discover", description="Detect a bounded test workflow for a workspace project without executing it.", annotations=ro, structured_output=True)
+    @server.tool(
+        name="test_discover",
+        description="Detect a bounded test workflow for a workspace project without executing it.",
+        annotations=ro,
+        structured_output=True,
+    )
     def test_discover(project: str) -> dict[str, object]:
-        return invoke("test_discover", integrations.tests.discover, project, audit_metadata={"project": project})  # type: ignore[return-value]
+        return invoke(
+            "test_discover",
+            integrations.tests.discover,
+            project,
+            audit_metadata={"project": project},
+        )  # type: ignore[return-value]
 
-    @server.tool(name="test_run", description="Run a detected pytest, Cargo, Node, Go, or CTest workflow inside the project sandbox.", annotations=mutate, structured_output=True)
-    def test_run(project: str, test_suite: str = "repository", component: str | None = None, timeout: float | None = None) -> dict[str, object]:
-        return invoke("test_run", integrations.tests.run, project, test_suite, component, timeout, audit_metadata={"project": project})  # type: ignore[return-value]
+    @server.tool(
+        name="test_run",
+        description="Run a detected pytest, Cargo, Node, Go, or CTest workflow inside the project sandbox.",
+        annotations=mutate,
+        structured_output=True,
+    )
+    def test_run(
+        project: str,
+        test_suite: str = "repository",
+        component: str | None = None,
+        timeout: float | None = None,
+        env_session: str | None = None,
+    ) -> dict[str, object]:
+        return invoke_mut(
+            "test_run",
+            integrations.tests.run,
+            {"action": "execute", "repository": project},
+            env_session,
+            project,
+            test_suite,
+            component,
+            timeout,
+            audit_metadata={"project": project},
+        )  # type: ignore[return-value]
 
-    @server.tool(name="project_check", description="Run a bounded quick, standard, or full project verification profile using detected tooling.", annotations=mutate, structured_output=True)
-    def project_check(project: str, profile: str = "standard", timeout: float | None = None) -> dict[str, object]:
-        return invoke("project_check", integrations.tests.check, project, profile, timeout, audit_metadata={"project": project, "profile": profile})  # type: ignore[return-value]
+    @server.tool(
+        name="project_check",
+        description="Run a bounded quick, standard, or full project verification profile using detected tooling.",
+        annotations=mutate,
+        structured_output=True,
+    )
+    def project_check(
+        project: str,
+        profile: str = "standard",
+        timeout: float | None = None,
+        env_session: str | None = None,
+    ) -> dict[str, object]:
+        return invoke_mut(
+            "project_check",
+            integrations.tests.check,
+            {"action": "execute", "repository": project},
+            env_session,
+            project,
+            profile,
+            timeout,
+            audit_metadata={"project": project, "profile": profile},
+        )  # type: ignore[return-value]
 
-    @server.tool(name="run_mncs_evaluation", description="Invoke a configured Forge development workflow through Forge's public operation registry.", annotations=mutate, structured_output=True)
-    def run_mncs_evaluation(repository: str, case_study: str, model: str | None = None, evaluation_profile: str | None = None) -> dict[str, object]:
-        return invoke("run_mncs_evaluation", integrations.forge.evaluate, repository, case_study, model, evaluation_profile, audit_metadata={"project": repository})  # type: ignore[return-value]
+    @server.tool(
+        name="run_mncs_evaluation",
+        description="Invoke a configured Forge development workflow through Forge's public operation registry.",
+        annotations=mutate,
+        structured_output=True,
+    )
+    def run_mncs_evaluation(
+        repository: str,
+        case_study: str,
+        model: str | None = None,
+        evaluation_profile: str | None = None,
+        env_session: str | None = None,
+    ) -> dict[str, object]:
+        return invoke_mut(
+            "run_mncs_evaluation",
+            integrations.forge.evaluate,
+            {"action": "execute", "repository": repository},
+            env_session,
+            repository,
+            case_study,
+            model,
+            evaluation_profile,
+            audit_metadata={"project": repository},
+        )  # type: ignore[return-value]
 
-    @server.tool(name="dispatch_fabric_job", description="Build validated Fabric plans/manifests/bundles and dispatch bounded pytest, Python, or cargo-test work through FabricClient.", annotations=network_mutate, structured_output=True)
-    def dispatch_fabric_job(task_type: str, project: str, model: str | None = None, node: str | None = None, parameters: dict[str, object] | None = None, wait: bool = True) -> dict[str, object]:
+    @server.tool(
+        name="dispatch_fabric_job",
+        description="Build validated Fabric plans/manifests/bundles and dispatch bounded pytest, Python, or cargo-test work through FabricClient.",
+        annotations=network_mutate,
+        structured_output=True,
+    )
+    def dispatch_fabric_job(
+        task_type: str,
+        project: str,
+        model: str | None = None,
+        node: str | None = None,
+        parameters: dict[str, object] | None = None,
+        wait: bool = True,
+    ) -> dict[str, object]:
         def dispatch() -> dict[str, object]:
             def operation() -> dict[str, object]:
                 return integrations.fabric.dispatch(task_type, project, model, node, parameters)
+
             if not wait:
                 if selected.fabric_mode == "service":
                     result = integrations.fabric.dispatch(
@@ -732,19 +1869,21 @@ def build_server(config: ControlConfig | None = None) -> Any:
                             )
                             commons_lifecycle = {"submitted": submitted}
                             if submitted.get("currentDigest"):
-                                commons_lifecycle["accepted"] = integrations.commons.transition_work(
-                                    commons_work_id,
-                                    {
-                                        "state": "accepted",
-                                        "actor": {
-                                            "type": "service",
-                                            "id": selected.fabric_consumer_identity,
+                                commons_lifecycle["accepted"] = (
+                                    integrations.commons.transition_work(
+                                        commons_work_id,
+                                        {
+                                            "state": "accepted",
+                                            "actor": {
+                                                "type": "service",
+                                                "id": selected.fabric_consumer_identity,
+                                            },
+                                            "expectedPreviousDigest": submitted["currentDigest"],
+                                            "fabricJobId": fabric_work_id,
+                                            "workerId": node,
+                                            "modelId": model,
                                         },
-                                        "expectedPreviousDigest": submitted["currentDigest"],
-                                        "fabricJobId": fabric_work_id,
-                                        "workerId": node,
-                                        "modelId": model,
-                                    },
+                                    )
                                 )
                         except Exception as exc:
                             # Fabric remains the execution authority; expose the
@@ -771,31 +1910,48 @@ def build_server(config: ControlConfig | None = None) -> Any:
                     if commons_lifecycle is not None:
                         result["commons_lifecycle"] = commons_lifecycle
                     return result
-                return {"status": "running", "control_job": processes.submit_external(
-                    "fabric_" + task_type,
-                    operation,
-                    project=project,
-                    node=node,
-                    model=model,
-                    timeout_seconds=(
-                        float(parameters["timeout_seconds"])
-                        if isinstance(parameters, dict) and parameters.get("timeout_seconds") is not None
-                        else None
+                return {
+                    "status": "running",
+                    "control_job": processes.submit_external(
+                        "fabric_" + task_type,
+                        operation,
+                        project=project,
+                        node=node,
+                        model=model,
+                        timeout_seconds=(
+                            float(parameters["timeout_seconds"])
+                            if isinstance(parameters, dict)
+                            and parameters.get("timeout_seconds") is not None
+                            else None
+                        ),
                     ),
-                )}
+                }
             result = operation()
             result["control_job"] = processes.record_external(
                 "fabric_" + task_type,
                 project=project,
                 node=node,
                 model=model,
-                result_summary={"status": result.get("status"), "task_type": task_type, "node": node},
+                result_summary={
+                    "status": result.get("status"),
+                    "task_type": task_type,
+                    "node": node,
+                },
             )
             return result
 
-        return invoke("dispatch_fabric_job", dispatch, audit_metadata={"project": project, "task_type": task_type, "node": node})  # type: ignore[return-value]
+        return invoke(
+            "dispatch_fabric_job",
+            dispatch,
+            audit_metadata={"project": project, "task_type": task_type, "node": node},
+        )  # type: ignore[return-value]
 
-    @server.tool(name="fabric_work_status", description="Read one detached persistent Fabric workload state.", annotations=ro, structured_output=True)
+    @server.tool(
+        name="fabric_work_status",
+        description="Read one detached persistent Fabric workload state.",
+        annotations=ro,
+        structured_output=True,
+    )
     def fabric_work_status(work_id: str) -> dict[str, object]:
         def read() -> dict[str, object]:
             payload = dict(integrations.fabric.work_status(work_id))
@@ -804,7 +1960,12 @@ def build_server(config: ControlConfig | None = None) -> Any:
 
         return invoke("fabric_work_status", read)  # type: ignore[return-value]
 
-    @server.tool(name="fabric_work_result", description="Read one detached persistent Fabric workload result.", annotations=ro, structured_output=True)
+    @server.tool(
+        name="fabric_work_result",
+        description="Read one detached persistent Fabric workload result.",
+        annotations=ro,
+        structured_output=True,
+    )
     def fabric_work_result(work_id: str) -> dict[str, object]:
         def read() -> dict[str, object]:
             payload = dict(integrations.fabric.work_result(work_id))
@@ -813,29 +1974,65 @@ def build_server(config: ControlConfig | None = None) -> Any:
 
         return invoke("fabric_work_result", read)  # type: ignore[return-value]
 
-    @server.tool(name="fabric_work_list", description="List detached persistent Fabric workloads.", annotations=ro, structured_output=True)
+    @server.tool(
+        name="fabric_work_list",
+        description="List detached persistent Fabric workloads.",
+        annotations=ro,
+        structured_output=True,
+    )
     def fabric_work_list(limit: int = 100) -> dict[str, object]:
         return invoke("fabric_work_list", integrations.fabric.work_list, limit)  # type: ignore[return-value]
 
-    @server.tool(name="fabric_schedule_list", description="List Fabric scheduled work. Commons has no execution authority.", annotations=ro, structured_output=True)
+    @server.tool(
+        name="fabric_schedule_list",
+        description="List Fabric scheduled work. Commons has no execution authority.",
+        annotations=ro,
+        structured_output=True,
+    )
     def fabric_schedule_list() -> dict[str, object]:
         return invoke("fabric_schedule_list", integrations.fabric.schedule_list)  # type: ignore[return-value]
 
-    @server.tool(name="fabric_schedule_tick", description="Evaluate availability windows and dispatch eligible queued Fabric work.", annotations=destructive, structured_output=True)
+    @server.tool(
+        name="fabric_schedule_tick",
+        description="Evaluate availability windows and dispatch eligible queued Fabric work.",
+        annotations=destructive,
+        structured_output=True,
+    )
     def fabric_schedule_tick(now: str | None = None) -> dict[str, object]:
         return invoke("fabric_schedule_tick", integrations.fabric.schedule_tick, now)  # type: ignore[return-value]
 
-    @server.tool(name="control_job_status", description="Inspect a local terminal or upstream control-plane job by stable control ID.", annotations=ro, structured_output=True)
+    @server.tool(
+        name="control_job_status",
+        description="Inspect a local terminal or upstream control-plane job by stable control ID.",
+        annotations=ro,
+        structured_output=True,
+    )
     def control_job_status(job_id: str) -> dict[str, object]:
         return invoke("control_job_status", processes.status, job_id)  # type: ignore[return-value]
 
-    @server.tool(name="control_job_result", description="Retrieve a completed upstream result or bounded terminal output for a control job.", annotations=ro, structured_output=True)
+    @server.tool(
+        name="control_job_result",
+        description="Retrieve a completed upstream result or bounded terminal output for a control job.",
+        annotations=ro,
+        structured_output=True,
+    )
     def control_job_result(job_id: str) -> dict[str, object]:
         return invoke("control_job_result", processes.result, job_id)  # type: ignore[return-value]
 
-    @server.tool(name="control_job_stop", description="Stop a local process or request cancellation of an upstream control job; Fabric-owned work cannot be force-killed by this MCP.", annotations=destructive, structured_output=True)
-    def control_job_stop(job_id: str) -> dict[str, object]:
-        return invoke("control_job_stop", processes.stop_control, job_id)  # type: ignore[return-value]
+    @server.tool(
+        name="control_job_stop",
+        description="Stop a local process or request cancellation of an upstream control job; Fabric-owned work cannot be force-killed by this MCP.",
+        annotations=destructive,
+        structured_output=True,
+    )
+    def control_job_stop(job_id: str, env_session: str | None = None) -> dict[str, object]:
+        return invoke_mut(
+            "control_job_stop",
+            processes.stop_control,
+            {"action": "execute", "job_id": job_id},
+            env_session,
+            job_id,
+        )  # type: ignore[return-value]
 
     server._control_processes = processes
     return server

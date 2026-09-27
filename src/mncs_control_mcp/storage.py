@@ -52,9 +52,25 @@ _CATEGORIES = {
     ".bootstrap": "build-output-unknown",
 }
 _BUILD_TOOLS = {
-    "cargo", "rustc", "rust-analyzer", "mncs", "pytest",
-    "make", "cmake", "ninja", "gcc", "g++", "clang", "clang++", "node", "npm",
-    "pnpm", "yarn", "tsc", "gradle", "mvn",
+    "cargo",
+    "rustc",
+    "rust-analyzer",
+    "mncs",
+    "pytest",
+    "make",
+    "cmake",
+    "ninja",
+    "gcc",
+    "g++",
+    "clang",
+    "clang++",
+    "node",
+    "npm",
+    "pnpm",
+    "yarn",
+    "tsc",
+    "gradle",
+    "mvn",
 }
 
 
@@ -152,7 +168,9 @@ class StorageService:
                 "total_bytes": total_bytes,
                 "used_bytes": used_bytes,
                 "available_bytes": available_bytes,
-                "available_fraction": round(available_bytes / total_bytes, 6) if total_bytes else None,
+                "available_fraction": round(available_bytes / total_bytes, 6)
+                if total_bytes
+                else None,
             },
             "workspace": {
                 "allocated_bytes": workspace_bytes,
@@ -179,7 +197,9 @@ class StorageService:
         if not scan_complete or processes.incomplete:
             # A partial inventory or partial same-user process scan cannot authorize deletion.
             for item in eligible:
-                item["reasons"] = ["workspace_scan_incomplete" if not scan_complete else "process_scan_incomplete"]
+                item["reasons"] = [
+                    "workspace_scan_incomplete" if not scan_complete else "process_scan_incomplete"
+                ]
                 item["state"] = "unknown"
             eligible = []
 
@@ -224,16 +244,39 @@ class StorageService:
             "scan_errors": list(scan_errors[:20]),
         }
 
-    def reclaim(self, plan_id: str, *, confirm: bool) -> dict[str, object]:
-        """Execute a fresh, identity-bound plan only after an explicit confirmation."""
-        if confirm is not True:
-            raise ControlError("CONFIRMATION_REQUIRED", "set confirm=true to authorize the listed Cargo outputs")
-        if not isinstance(plan_id, str) or not plan_id:
-            raise ControlError("INVALID_PLAN", "plan_id must be a non-empty storage plan identifier")
+    def plan_repositories(self, plan_id: str) -> list[str] | None:
+        """Repository names touched by a live plan (None when unknown/expired)."""
         with self._lock:
             plan = self._plans.get(plan_id)
             if plan is None:
-                raise ControlError("PLAN_NOT_FOUND", "storage plan is absent, already used, or expired")
+                return None
+            expires, selected = plan
+            if time.monotonic() >= expires:
+                return None
+            names: list[str] = []
+            for stored in selected:
+                root = str(stored.get("repo_root", ""))
+                name = root.rstrip("/").rsplit("/", 1)[-1] if root else ""
+                if name and name not in names:
+                    names.append(name)
+            return names
+
+    def reclaim(self, plan_id: str, *, confirm: bool) -> dict[str, object]:
+        """Execute a fresh, identity-bound plan only after an explicit confirmation."""
+        if confirm is not True:
+            raise ControlError(
+                "CONFIRMATION_REQUIRED", "set confirm=true to authorize the listed Cargo outputs"
+            )
+        if not isinstance(plan_id, str) or not plan_id:
+            raise ControlError(
+                "INVALID_PLAN", "plan_id must be a non-empty storage plan identifier"
+            )
+        with self._lock:
+            plan = self._plans.get(plan_id)
+            if plan is None:
+                raise ControlError(
+                    "PLAN_NOT_FOUND", "storage plan is absent, already used, or expired"
+                )
             expires, selected = plan
             if time.monotonic() >= expires:
                 self._plans.pop(plan_id, None)
@@ -252,7 +295,9 @@ class StorageService:
         # Validate every entry before the first deletion so a stale plan is all-or-nothing.
         processes = self._process_snapshot()
         if processes.incomplete:
-            raise ControlError("PROCESS_SCAN_INCOMPLETE", "cannot prove that workspace build outputs are idle")
+            raise ControlError(
+                "PROCESS_SCAN_INCOMPLETE", "cannot prove that workspace build outputs are idle"
+            )
         repo_cache: dict[Path, _RepositoryState] = {}
         for stored in selected:
             path = self._absolute(stored["path"])
@@ -264,11 +309,25 @@ class StorageService:
                 raise ControlError(
                     "PLAN_STALE",
                     "a planned Cargo output is no longer proven safe; create a fresh plan",
-                    details={"path": stored["path"], "reasons": current["reasons"] if current else ["path_missing_or_unrecognized"]},
+                    details={
+                        "path": stored["path"],
+                        "reasons": current["reasons"]
+                        if current
+                        else ["path_missing_or_unrecognized"],
+                    },
                 )
             if any(
                 current[key] != stored[key]
-                for key in ("bytes", "repo_root", "branch", "head", "manifest_sha256", "device", "inode", "mtime_ns")
+                for key in (
+                    "bytes",
+                    "repo_root",
+                    "branch",
+                    "head",
+                    "manifest_sha256",
+                    "device",
+                    "inode",
+                    "mtime_ns",
+                )
             ):
                 raise ControlError(
                     "PLAN_STALE",
@@ -283,12 +342,21 @@ class StorageService:
             # Recheck process references immediately before each destructive operation.
             latest_processes = self._process_snapshot()
             if latest_processes.incomplete:
-                raise ControlError("PROCESS_SCAN_INCOMPLETE", "process inspection became incomplete during reclaim")
+                raise ControlError(
+                    "PROCESS_SCAN_INCOMPLETE", "process inspection became incomplete during reclaim"
+                )
             path = self._absolute(stored["path"])
-            repo_root = str(self.root / stored["repo_root"]) if stored["repo_root"] not in {".", None} else str(self.root)
+            repo_root = (
+                str(self.root / stored["repo_root"])
+                if stored["repo_root"] not in {".", None}
+                else str(self.root)
+            )
             process_use = self._process_references(path, repo_root, latest_processes)
             if process_use is not False:
-                raise ControlError("ARTIFACT_IN_USE_OR_UNKNOWN", "process use could not be ruled out for a planned Cargo output")
+                raise ControlError(
+                    "ARTIFACT_IN_USE_OR_UNKNOWN",
+                    "process use could not be ruled out for a planned Cargo output",
+                )
             self._cargo_clean(Path(repo_root), path)
             if path.exists():
                 raise ControlError(
@@ -319,7 +387,9 @@ class StorageService:
         def on_error(error: OSError) -> None:
             errors.append(self.policy.relative(Path(error.filename or self.root)))
 
-        for current, directories, _files in os.walk(self.root, topdown=True, followlinks=False, onerror=on_error):
+        for current, directories, _files in os.walk(
+            self.root, topdown=True, followlinks=False, onerror=on_error
+        ):
             current_path = Path(current)
             visited += 1 + len(directories)
             if visited > _MAX_WALK_ENTRIES:
@@ -362,7 +432,11 @@ class StorageService:
             errors.append("classified_root_limit_exceeded")
         found = found[:_MAX_CANDIDATES]
         normalized = [
-            {"path": path["path"], "relative": self.policy.relative(path["path"]), "kind": path["kind"]}
+            {
+                "path": path["path"],
+                "relative": self.policy.relative(path["path"]),
+                "kind": path["kind"],
+            }
             for path in found
         ]
         return normalized, not errors, errors
@@ -500,7 +574,12 @@ class StorageService:
         reasons: list[str] = []
         if not measured:
             reasons.append(measurement_error or "measurement_incomplete")
-        if any(error == "directory_entry_limit_exceeded" or relative.startswith(error.rstrip("/") + "/") or relative == error for error in scan_errors):
+        if any(
+            error == "directory_entry_limit_exceeded"
+            or relative.startswith(error.rstrip("/") + "/")
+            or relative == error
+            for error in scan_errors
+        ):
             reasons.append("inventory_incomplete_for_path")
         manifest = self._manifest(path)
         reasons.extend(manifest.unsafe_reasons)
@@ -528,7 +607,9 @@ class StorageService:
         if processes.incomplete:
             reasons.append("process_scan_incomplete")
         else:
-            process_use = self._process_references(path, str(repo.root) if repo else None, processes)
+            process_use = self._process_references(
+                path, str(repo.root) if repo else None, processes
+            )
             if process_use is True:
                 reasons.append("referenced_by_running_process")
             elif process_use is None:
@@ -591,14 +672,18 @@ class StorageService:
         reasons: set[str] = set()
         hardlinks: dict[tuple[int, int], tuple[int, int]] = {}
         if os.path.ismount(root):
-            return _TreeManifest(digest.hexdigest(), entries, logical_bytes, ("target_is_mountpoint",))
+            return _TreeManifest(
+                digest.hexdigest(), entries, logical_bytes, ("target_is_mountpoint",)
+            )
         if not self._has_cargo_cache_marker(root):
             reasons.add("cargo_cache_marker_missing_or_invalid")
 
         def on_error(_error: OSError) -> None:
             reasons.add("artifact_tree_unreadable")
 
-        for current, directories, files in os.walk(root, topdown=True, followlinks=False, onerror=on_error):
+        for current, directories, files in os.walk(
+            root, topdown=True, followlinks=False, onerror=on_error
+        ):
             current_path = Path(current)
             directories[:] = sorted(directories, key=str.casefold)
             for name in [*directories, *sorted(files, key=str.casefold)]:
@@ -624,7 +709,9 @@ class StorageService:
                         directories.remove(name)
                 entries += 1
                 logical_bytes += info.st_size
-                relative = child.relative_to(root).as_posix().encode("utf-8", errors="surrogateescape")
+                relative = (
+                    child.relative_to(root).as_posix().encode("utf-8", errors="surrogateescape")
+                )
                 digest.update(relative)
                 digest.update(b"\x00")
                 digest.update(
@@ -633,7 +720,9 @@ class StorageService:
                 digest.update(b"\x00")
                 if entries > _MAX_WALK_ENTRIES:
                     reasons.add("artifact_entry_limit_exceeded")
-                    return _TreeManifest(digest.hexdigest(), entries, logical_bytes, tuple(sorted(reasons)))
+                    return _TreeManifest(
+                        digest.hexdigest(), entries, logical_bytes, tuple(sorted(reasons))
+                    )
         if any(expected > seen for seen, expected in hardlinks.values()):
             reasons.add("contains_hardlink_outside_tree")
         return _TreeManifest(digest.hexdigest(), entries, logical_bytes, tuple(sorted(reasons)))
@@ -654,7 +743,9 @@ class StorageService:
         head_result = self._git(root, "rev-parse", "HEAD")
         status_result = self._git(root, "status", "--porcelain=v1", "--untracked-files=normal")
         worktrees_result = self._git(root, "worktree", "list", "--porcelain")
-        origin_head = self._git(root, "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD")
+        origin_head = self._git(
+            root, "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"
+        )
         branches = self._git(root, "branch", "--list", "main", "master")
         complete = all(
             item is not None and item[0] == 0
@@ -669,8 +760,12 @@ class StorageService:
             default_branch = origin_head[1].strip().removeprefix("origin/")
         else:
             branch_names = set(branches[1].split()) if branches and branches[0] == 0 else set()
-            default_branch = "main" if "main" in branch_names else "master" if "master" in branch_names else None
-        worktree_count = sum(1 for line in worktrees_result[1].splitlines() if line.startswith("worktree "))
+            default_branch = (
+                "main" if "main" in branch_names else "master" if "master" in branch_names else None
+            )
+        worktree_count = sum(
+            1 for line in worktrees_result[1].splitlines() if line.startswith("worktree ")
+        )
         state = _RepositoryState(
             root=root,
             branch=branch,
@@ -763,7 +858,11 @@ class StorageService:
     ) -> bool | None:
         target = target.resolve()
         target_text = str(target)
-        target_workspace = "/workspace/" + target.relative_to(self.root).as_posix() if target.is_relative_to(self.root) else None
+        target_workspace = (
+            "/workspace/" + target.relative_to(self.root).as_posix()
+            if target.is_relative_to(self.root)
+            else None
+        )
         repo = Path(repo_root).resolve() if repo_root else None
         for process in snapshot.processes:
             for reference in process.references:

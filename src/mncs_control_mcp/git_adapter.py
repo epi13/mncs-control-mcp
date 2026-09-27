@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import os
 import re
 import shlex
+import subprocess
 from pathlib import Path
 
 from .config import ControlConfig
@@ -78,7 +80,9 @@ class GitService:
         return value
 
     def status(self, repository: str) -> dict[str, object]:
-        result = self._run(repository, ["status", "--porcelain=v1", "--branch", "--untracked-files=all"])
+        result = self._run(
+            repository, ["status", "--porcelain=v1", "--branch", "--untracked-files=all"]
+        )
         lines = result.stdout.splitlines()
         header = lines[0] if lines and lines[0].startswith("## ") else ""
         changed = [line for line in lines[1:] if len(line) >= 3]
@@ -112,22 +116,45 @@ class GitService:
             return self._run(repository, args, allow_failure=allow_failure)
 
         head = run(["rev-parse", "--verify", "HEAD"], allow_failure=True).stdout.strip() or None
-        branch = run(["symbolic-ref", "--quiet", "--short", "HEAD"], allow_failure=True).stdout.strip() or None
-        upstream = run(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], allow_failure=True).stdout.strip() or None
+        branch = (
+            run(["symbolic-ref", "--quiet", "--short", "HEAD"], allow_failure=True).stdout.strip()
+            or None
+        )
+        upstream = (
+            run(
+                ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], allow_failure=True
+            ).stdout.strip()
+            or None
+        )
         remotes = run(["remote"], allow_failure=True).stdout.splitlines()
         ahead_behind: dict[str, object] = {"status": "UNKNOWN", "ahead": None, "behind": None}
         if upstream:
-            comparison = run(["rev-list", "--left-right", "--count", f"{upstream}...HEAD"], allow_failure=True)
+            comparison = run(
+                ["rev-list", "--left-right", "--count", f"{upstream}...HEAD"], allow_failure=True
+            )
             fields = comparison.stdout.strip().split()
-            if comparison.exit_code == 0 and len(fields) == 2 and all(field.isdigit() for field in fields):
-                ahead_behind = {"status": "AVAILABLE", "ahead": int(fields[1]), "behind": int(fields[0]), "upstream": upstream}
+            if (
+                comparison.exit_code == 0
+                and len(fields) == 2
+                and all(field.isdigit() for field in fields)
+            ):
+                ahead_behind = {
+                    "status": "AVAILABLE",
+                    "ahead": int(fields[1]),
+                    "behind": int(fields[0]),
+                    "upstream": upstream,
+                }
         elif not remotes:
             ahead_behind["reason"] = "no configured remote or tracking branch"
         else:
             ahead_behind["reason"] = "current branch has no trusted tracking branch"
 
         branches_result = run(
-            ["for-each-ref", "--format=%(refname:short)%x1f%(objectname)%x1f%(upstream:short)%x1f%(HEAD)", "refs/heads"],
+            [
+                "for-each-ref",
+                "--format=%(refname:short)%x1f%(objectname)%x1f%(upstream:short)%x1f%(HEAD)",
+                "refs/heads",
+            ],
             allow_failure=True,
         )
         branches: list[dict[str, object]] = []
@@ -165,7 +192,9 @@ class GitService:
                             allow_failure=True,
                         )
                         local_only_commits.update(
-                            item.strip() for item in local_log.stdout.splitlines() if re.fullmatch(r"[0-9a-f]{40}", item.strip())
+                            item.strip()
+                            for item in local_log.stdout.splitlines()
+                            if re.fullmatch(r"[0-9a-f]{40}", item.strip())
                         )
             branches.append(row)
 
@@ -188,7 +217,13 @@ class GitService:
             if "\x1f" in line:
                 fields = line.split("\x1f", 3)
                 if len(fields) == 4:
-                    current = {"commit": fields[0], "occurred_at": fields[1], "author": fields[2], "subject": fields[3], "files": []}
+                    current = {
+                        "commit": fields[0],
+                        "occurred_at": fields[1],
+                        "author": fields[2],
+                        "subject": fields[3],
+                        "files": [],
+                    }
                     commits.append(current)
             elif current is not None and line.strip():
                 status, _, path = line.partition("\t")
@@ -232,7 +267,12 @@ class GitService:
             self._repo_path(repository, path, must_exist=False)
             args.extend(("--", path))
         result = self._run(repository, args)
-        return {"repository": repository, "staged": staged, "diff": result.stdout, **self._output(result)}
+        return {
+            "repository": repository,
+            "staged": staged,
+            "diff": result.stdout,
+            **self._output(result),
+        }
 
     def log(self, repository: str, *, limit: int = 20, revision: str = "HEAD") -> dict[str, object]:
         if limit < 1 or limit > 200:
@@ -240,7 +280,13 @@ class GitService:
         revision = self._ref(revision)
         result = self._run(
             repository,
-            ["log", f"-{limit}", "--date=iso-strict", "--format=%H%x1f%h%x1f%an%x1f%ae%x1f%ad%x1f%s", revision],
+            [
+                "log",
+                f"-{limit}",
+                "--date=iso-strict",
+                "--format=%H%x1f%h%x1f%an%x1f%ae%x1f%ad%x1f%s",
+                revision,
+            ],
         )
         commits = []
         for line in result.stdout.splitlines():
@@ -257,14 +303,24 @@ class GitService:
                 )
         return {"repository": repository, "commits": commits, **self._output(result)}
 
-    def show(self, repository: str, revision: str = "HEAD", *, stat_only: bool = False) -> dict[str, object]:
+    def show(
+        self, repository: str, revision: str = "HEAD", *, stat_only: bool = False
+    ) -> dict[str, object]:
         revision = self._ref(revision)
         args = ["show", "--format=fuller", "--stat" if stat_only else "--patch", revision]
         result = self._run(repository, args)
-        return {"repository": repository, "revision": revision, "content": result.stdout, **self._output(result)}
+        return {
+            "repository": repository,
+            "revision": revision,
+            "content": result.stdout,
+            **self._output(result),
+        }
 
     def branches(self, repository: str, *, all_branches: bool = True) -> dict[str, object]:
-        args = ["branch", "--format=%(refname:short)%09%(objectname:short)%09%(upstream:short)%09%(HEAD)"]
+        args = [
+            "branch",
+            "--format=%(refname:short)%09%(objectname:short)%09%(upstream:short)%09%(HEAD)",
+        ]
         if all_branches:
             args.append("--all")
         result = self._run(repository, args)
@@ -272,14 +328,203 @@ class GitService:
         for line in result.stdout.splitlines():
             fields = line.split("\t")
             if len(fields) >= 4:
-                branches.append({"name": fields[0], "commit": fields[1], "upstream": fields[2] or None, "current": fields[3] == "*"})
+                branches.append(
+                    {
+                        "name": fields[0],
+                        "commit": fields[1],
+                        "upstream": fields[2] or None,
+                        "current": fields[3] == "*",
+                    }
+                )
         return {"repository": repository, "branches": branches, **self._output(result)}
 
-    def create_branch(self, repository: str, branch: str, *, checkout: bool = True) -> dict[str, object]:
+    def _run_workspace(self, repository: str, arguments: list[str]):
+        """Run git at workspace scope (whole-root writable mount).
+
+        Worktree administration writes outside any single project
+        directory, so it cannot use project scope. Requires
+        allow_workspace_scope; Environment authority still gates the
+        tools that call this.
+        """
+        root, project, cwd = self._repository(repository)
+        relative = root.relative_to(self.policy.root).as_posix()
+        command = shlex.join(["git", "--no-pager", *arguments])
+        result = self.sandbox.run(
+            command,
+            scope="workspace",
+            project=None,
+            cwd=relative,
+            timeout_seconds=self.config.default_timeout_seconds,
+            network=False,
+        )
+        if result.exit_code != 0:
+            raise ControlError(
+                "GIT_FAILED",
+                result.stderr.strip() or result.stdout.strip() or "Git command failed",
+                details={"exit_code": result.exit_code, "timed_out": result.timed_out},
+            )
+        return result
+
+    @staticmethod
+    def _worktree_slug(value: str, field: str = "name") -> str:
+        if (
+            not isinstance(value, str)
+            or not value
+            or len(value) > 64
+            or value.startswith((".", "-", "/"))
+            or not re.fullmatch(r"[A-Za-z0-9._-]+", value)
+        ):
+            raise ControlError("INVALID_WORKTREE_NAME", f"{field} is not a safe worktree name")
+        return value
+
+    def _host_git(self, repo_root: Path, arguments: list[str]) -> subprocess.CompletedProcess[str]:
+        """Run git on the host for worktree administration.
+
+        Worktree metadata bakes absolute paths, so administration must run
+        in one namespace consistently. Inputs here are control-constructed
+        (validated slugs/refs, computed paths) -- never raw agent strings.
+        Agent content commands keep going through the sandbox.
+        """
+        return subprocess.run(
+            ["git", "--no-pager", *arguments],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            timeout=self.config.default_timeout_seconds,
+        )
+
+    def worktree_list(self, repository: str) -> dict[str, object]:
+        repo_root, _, _ = self._repository(repository)
+        completed = self._host_git(repo_root, ["worktree", "list", "--porcelain"])
+        if completed.returncode != 0:
+            raise ControlError("GIT_FAILED", completed.stderr.strip() or "worktree list failed")
+        worktrees: list[dict[str, object]] = []
+        current: dict[str, object] = {}
+        for line in completed.stdout.splitlines():
+            if line.startswith("worktree "):
+                if current:
+                    worktrees.append(current)
+                current = {"path": line[9:].strip()}
+            elif line.startswith("branch "):
+                current["branch"] = line[7:].strip().removeprefix("refs/heads/")
+            elif line.startswith("HEAD "):
+                current["head"] = line[5:].strip()
+            elif line == "detached":
+                current["branch"] = None
+        if current:
+            worktrees.append(current)
+        root = self.policy.root.resolve()
+        for entry in worktrees:
+            try:
+                entry["workspace_path"] = (
+                    Path(str(entry["path"])).resolve().relative_to(root).as_posix()
+                )
+            except ValueError:
+                entry["workspace_path"] = None
+        return {"repository": repository, "worktrees": worktrees, "exit_code": completed.returncode}
+
+    def worktree_add(
+        self, repository: str, branch: str, name: str | None = None, start_point: str | None = None
+    ) -> dict[str, object]:
+        """Create a managed worktree at <repository>/.worktrees/<name>.
+
+        Nested inside the project so sandbox project scope stays writable;
+        shares object storage with the main checkout; uses a distinct
+        branch; never deletes or disturbs existing work.
+        """
+        branch = self._ref(branch, "branch")
+        slug = self._worktree_slug(name or branch)
+        if start_point is not None:
+            start_point = self._ref(start_point, "start_point")
+        repo_root, _, _ = self._repository(repository)
+        target = (repo_root / ".worktrees" / slug).resolve()
+        try:
+            target.relative_to(repo_root.resolve())
+        except ValueError as exc:
+            raise ControlError("PATH_ESCAPE", "worktree escapes the repository") from exc
+        if target.exists() or target.is_symlink():
+            raise ControlError("WORKTREE_EXISTS", f"worktree path already exists: {target}")
+        completed = self._host_git(
+            repo_root, ["show-ref", "--verify", "--quiet", f"refs/heads/{branch}"]
+        )
+        args = ["worktree", "add"]
+        if completed.returncode != 0:
+            args += ["-b", branch]
+        else:
+            args.append(branch)
+        if start_point is not None:
+            args.append(start_point)
+        args.append(os.path.relpath(target, repo_root))
+        created = self._host_git(repo_root, args)
+        if created.returncode != 0:
+            raise ControlError("GIT_FAILED", created.stderr.strip() or "worktree add failed")
+        return {
+            "repository": repository,
+            "name": slug,
+            "branch": branch,
+            "path": target.relative_to(self.policy.root.resolve()).as_posix(),
+            "exit_code": created.returncode,
+        }
+
+    def worktree_remove(
+        self, repository: str, name: str, *, force: bool = False
+    ) -> dict[str, object]:
+        """Remove a managed worktree. Refuses unknown, dirty (unless forced),
+        and anything outside <repository>/.worktrees. Never touches the
+        main checkout. Abandoned-dirty worktrees stay for recovery/review:
+        only an explicit forced removal discards them."""
+        slug = self._worktree_slug(name)
+        repo_root, _, _ = self._repository(repository)
+        target = (repo_root / ".worktrees" / slug).resolve()
+        try:
+            target.relative_to(repo_root.resolve())
+        except ValueError as exc:
+            raise ControlError("PATH_ESCAPE", "worktree escapes the repository") from exc
+        listing = self.worktree_list(repository)["worktrees"]
+        assert isinstance(listing, list)
+        known = {
+            Path(str(w.get("path", ""))).resolve()
+            for w in listing
+            if isinstance(w, dict) and w.get("path")
+        }
+        if target not in known:
+            raise ControlError(
+                "WORKTREE_UNKNOWN", f"no managed worktree {repository}/.worktrees/{slug}"
+            )
+        if not force:
+            dirty = self._host_git(target, ["status", "--porcelain"])
+            if dirty.returncode == 0 and dirty.stdout.strip():
+                raise ControlError(
+                    "WORKTREE_DIRTY",
+                    f"worktree {slug} has uncommitted changes; use force to discard",
+                )
+        args = ["worktree", "remove"]
+        if force:
+            args.append("--force")
+        args.append(os.path.relpath(target, repo_root))
+        removed = self._host_git(repo_root, args)
+        if removed.returncode != 0:
+            raise ControlError("GIT_FAILED", removed.stderr.strip() or "worktree remove failed")
+        return {
+            "repository": repository,
+            "name": slug,
+            "removed": True,
+            "forced": force,
+            "exit_code": removed.returncode,
+        }
+
+    def create_branch(
+        self, repository: str, branch: str, *, checkout: bool = True
+    ) -> dict[str, object]:
         branch = self._ref(branch, "branch")
         self._run(repository, ["check-ref-format", "--branch", branch])
         result = self._run(repository, ["switch", "-c", branch] if checkout else ["branch", branch])
-        return {"repository": repository, "branch": branch, "checked_out": checkout, **self._output(result)}
+        return {
+            "repository": repository,
+            "branch": branch,
+            "checked_out": checkout,
+            **self._output(result),
+        }
 
     def checkout(self, repository: str, branch: str) -> dict[str, object]:
         branch = self._ref(branch, "branch")
@@ -306,8 +551,15 @@ class GitService:
         result = self._run(repository, ["add", "--", *paths])
         return {"repository": repository, "paths": paths, **self._output(result)}
 
-    def commit(self, repository: str, message: str, *, allow_empty: bool = False) -> dict[str, object]:
-        if not isinstance(message, str) or not message.strip() or len(message) > 10000 or "\x00" in message:
+    def commit(
+        self, repository: str, message: str, *, allow_empty: bool = False
+    ) -> dict[str, object]:
+        if (
+            not isinstance(message, str)
+            or not message.strip()
+            or len(message) > 10000
+            or "\x00" in message
+        ):
             raise ControlError("INVALID_INPUT", "commit message must be non-empty bounded text")
         args = ["commit", "-m", message]
         if allow_empty:
@@ -316,15 +568,26 @@ class GitService:
         head = self._run(repository, ["rev-parse", "HEAD"])
         return {"repository": repository, "commit": head.stdout.strip(), **self._output(result)}
 
-    def fetch(self, repository: str, remote: str = "origin", *, prune: bool = False) -> dict[str, object]:
+    def fetch(
+        self, repository: str, remote: str = "origin", *, prune: bool = False
+    ) -> dict[str, object]:
         if not self.config.git_allow_fetch:
             raise ControlError("GIT_OPERATION_DISABLED", "git fetch is disabled")
         if not _REMOTE.fullmatch(remote):
             raise ControlError("INVALID_INPUT", "remote name is invalid")
-        result = self._run(repository, ["fetch", *( ["--prune"] if prune else []), remote], network=True)
+        result = self._run(
+            repository, ["fetch", *(["--prune"] if prune else []), remote], network=True
+        )
         return {"repository": repository, "remote": remote, **self._output(result)}
 
-    def pull(self, repository: str, remote: str = "origin", branch: str | None = None, *, rebase: bool = False) -> dict[str, object]:
+    def pull(
+        self,
+        repository: str,
+        remote: str = "origin",
+        branch: str | None = None,
+        *,
+        rebase: bool = False,
+    ) -> dict[str, object]:
         if not self.config.git_allow_pull:
             raise ControlError("GIT_OPERATION_DISABLED", "git pull is disabled")
         if not _REMOTE.fullmatch(remote):
@@ -333,7 +596,12 @@ class GitService:
         if branch:
             args.append(self._ref(branch, "branch"))
         result = self._run(repository, args, network=True)
-        return {"repository": repository, "remote": remote, "branch": branch, **self._output(result)}
+        return {
+            "repository": repository,
+            "remote": remote,
+            "branch": branch,
+            **self._output(result),
+        }
 
     def push(
         self,
@@ -354,12 +622,26 @@ class GitService:
         if branch:
             args.append(self._ref(branch, "branch"))
         result = self._run(repository, args, network=True)
-        return {"repository": repository, "remote": remote, "branch": branch, "force": False, **self._output(result)}
+        return {
+            "repository": repository,
+            "remote": remote,
+            "branch": branch,
+            "force": False,
+            **self._output(result),
+        }
 
-    def clone(self, url: str, destination: str, *, branch: str | None = None, depth: int | None = None) -> dict[str, object]:
+    def clone(
+        self, url: str, destination: str, *, branch: str | None = None, depth: int | None = None
+    ) -> dict[str, object]:
         if not self.config.git_allow_clone:
             raise ControlError("GIT_OPERATION_DISABLED", "git clone is disabled")
-        if not isinstance(url, str) or not url or len(url) > 4096 or "\x00" in url or url.startswith("-"):
+        if (
+            not isinstance(url, str)
+            or not url
+            or len(url) > 4096
+            or "\x00" in url
+            or url.startswith("-")
+        ):
             raise ControlError("INVALID_INPUT", "clone URL is invalid")
         target = self.policy.resolve(destination, allow_root=False, mutation=True)
         if target.exists():
@@ -395,7 +677,9 @@ class GitService:
                 rows.append({"name": fields[0], "url": fields[1], "kind": fields[2].strip("()")})
         return {"repository": repository, "remotes": rows, **self._output(result)}
 
-    def restore(self, repository: str, paths: list[str], *, staged: bool = False) -> dict[str, object]:
+    def restore(
+        self, repository: str, paths: list[str], *, staged: bool = False
+    ) -> dict[str, object]:
         if not paths:
             raise ControlError("INVALID_INPUT", "paths must not be empty")
         for path in paths:
@@ -407,7 +691,9 @@ class GitService:
         result = self._run(repository, args)
         return {"repository": repository, "paths": paths, "staged": staged, **self._output(result)}
 
-    def stash(self, repository: str, message: str | None = None, *, include_untracked: bool = False) -> dict[str, object]:
+    def stash(
+        self, repository: str, message: str | None = None, *, include_untracked: bool = False
+    ) -> dict[str, object]:
         args = ["stash", "push"]
         if include_untracked:
             args.append("--include-untracked")

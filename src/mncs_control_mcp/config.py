@@ -190,6 +190,7 @@ class ControlConfig:
         return self.workspace_root / self.repositories.get("language", "mncs-language")
 
     environment_state_dir: Path | None = None
+    managed_development: bool = False
 
     @property
     def environment_path(self) -> Path:
