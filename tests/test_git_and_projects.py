@@ -159,6 +159,20 @@ def test_worktree_prepare_selects_only_clean_exact_authoritative_checkout(config
     assert selected["branch"] == "campaign/parity"
 
     checkout = config.workspace_root / str(selected["path"])
+    (repository / "input.txt").write_text("advanced\n", encoding="utf-8")
+    run("add", "input.txt")
+    run("commit", "-m", "advance authoritative ref")
+    advanced_head = run("rev-parse", "HEAD")
+    run("update-ref", "refs/remotes/origin/main", advanced_head)
+    advanced = git.worktree_prepare(
+        "prepare-repo",
+        name="campaign",
+        branch="campaign/parity",
+        source_ref="origin/main",
+    )
+    assert advanced["head"] == advanced_head
+    assert advanced["clean"] is True
+
     (checkout / "unrelated.txt").write_text("leave untouched\n", encoding="utf-8")
     with pytest.raises(ControlError) as conflict:
         git.worktree_prepare(

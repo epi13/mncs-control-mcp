@@ -164,6 +164,47 @@ class GitService:
                     "WORKTREE_CONFLICT",
                     f"existing path is not a registered worktree: {target}",
                 )
+            if current.get("branch") != branch:
+                raise ControlError(
+                    "WORKTREE_CONFLICT",
+                    "existing worktree is on a different branch",
+                    details={"branch": current.get("branch"), "expected_branch": branch},
+                )
+            existing_head = str(current.get("head", ""))
+            existing_status = self._host_git(
+                target, ["status", "--porcelain=v1", "--untracked-files=all"]
+            )
+            if existing_status.returncode != 0:
+                raise ControlError("WORKTREE_UNREADABLE", existing_status.stderr.strip())
+            if existing_status.stdout.strip():
+                raise ControlError(
+                    "WORKTREE_CONFLICT",
+                    "existing worktree is dirty; it was left untouched",
+                    details={"head": existing_head, "branch": branch, "clean": False},
+                )
+            if existing_head != source_head:
+                ancestor = self._host_git(
+                    repo_root, ["merge-base", "--is-ancestor", existing_head, source_head]
+                )
+                if ancestor.returncode != 0:
+                    raise ControlError(
+                        "WORKTREE_CONFLICT",
+                        "existing clean worktree is not behind the authoritative ref",
+                        details={"head": existing_head, "authoritative_head": source_head},
+                    )
+                advanced = self._host_git(target, ["merge", "--ff-only", source_head])
+                if advanced.returncode != 0:
+                    raise ControlError(
+                        "WORKTREE_CONFLICT",
+                        advanced.stderr.strip() or "clean worktree fast-forward failed",
+                    )
+                listed = self.worktree_list(repository)["worktrees"]
+                current = next(
+                    (item for item in listed if Path(str(item["path"])).resolve() == target),
+                    None,
+                )
+                if current is None:
+                    raise ControlError("GIT_FAILED", "advanced worktree was not registered")
         else:
             self.worktree_add(repository, branch, slug, source_head)
             listed = self.worktree_list(repository)["worktrees"]
