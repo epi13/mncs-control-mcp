@@ -106,16 +106,23 @@ storage includes protected build trees, environments, Forge cache state, and
 unique run data; the inventory and plan keep those visible without treating
 their names or age as permission to delete them.
 
-The complete post-cleanup inventory classified 30 Cargo target roots at 203.88
-GB, 16 unrecognized `target` roots at 1.22 GB, 17 other build roots at 6.32
-GB, 17 Python environments at 18.88 GB, 107 Python cache roots at 287 MB, 2
-generic cache roots at 685 MB, and 4 execution-output roots at 3.85 GB. It also
-reported 82 `.mncs` roots at 2.70 GB and 7 directories literally named
-`debug` totaling 221 KB. The large `debug` trees were Cargo profile output; the
-MNCS Debug subsystem's snapshot directories were about 45 KB. No
-workspace `.npm` or `.pnpm-store` roots were found. These non-Cargo categories
-remain inventory-only because their ownership or full reconstructability was
-not proven.
+The strict post-cleanup inventory classified 29 marker-confirmed Cargo target
+roots at 191.35 GB, plus 16 unrecognized `target` roots at 1.22 GB. It also
+found 17 other build roots at 6.32 GB, 17 Python environments at 18.88 GB, 107
+Python cache roots at 287 MB, 2 generic cache roots at 685 MB, and 4 execution
+output roots at 3.85 GB. It reported 81 `.mncs` roots at 2.29 GB. No workspace
+`.npm` or `.pnpm-store` roots were found.
+
+One further 12.53 GB Cargo-shaped tree, `.mnel-recon-target`, lacked Cargo's
+`CACHEDIR.TAG`, so it is classified as unknown and not eligible for cleanup.
+Its `.d` files refer to a temporary MNEL reconstruction checkout under `/tmp`
+that is now absent and is not a registered `mncs-language` worktree. The old
+`mncs`/`mncs-mcp`/`mncs-lsp` binaries were not open in the process check; no
+Cargo or rustc build process referenced the tree. Because its cache marker and
+source checkout are missing, its contents were preserved. The remaining seven
+directories literally named `debug` totaled 221 KB, including the MNCS Debug
+subsystem snapshots at about 45 KB. These unknown categories remain
+inventory-only until ownership and reconstructability are established.
 
 ## Ownership and maintenance
 

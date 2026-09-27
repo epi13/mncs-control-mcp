@@ -340,6 +340,10 @@ class StorageService:
                 found.append({"path": current_path, "kind": _CARGO_TARGET_KIND})
                 directories[:] = []
                 continue
+            if self._looks_like_cargo_root(current_path):
+                found.append({"path": current_path, "kind": "unrecognized-cargo-target"})
+                directories[:] = []
+                continue
             if current_path.name == "target":
                 found.append({"path": current_path, "kind": "unrecognized-target"})
                 directories[:] = []
@@ -364,13 +368,17 @@ class StorageService:
         return normalized, not errors, errors
 
     def _cargo_root(self, path: Path) -> dict[str, Any] | None:
-        if not path.is_dir() or path.is_symlink() or not (path / ".rustc_info.json").is_file():
-            return None
-        if not self._has_cargo_cache_marker(path):
-            return None
-        if not any((path / profile / ".fingerprint").is_dir() for profile in ("debug", "release")):
+        if not self._looks_like_cargo_root(path) or not self._has_cargo_cache_marker(path):
             return None
         return {"path": path, "kind": _CARGO_TARGET_KIND}
+
+    @staticmethod
+    def _looks_like_cargo_root(path: Path) -> bool:
+        if not path.is_dir() or path.is_symlink() or not (path / ".rustc_info.json").is_file():
+            return False
+        if not any((path / profile / ".fingerprint").is_dir() for profile in ("debug", "release")):
+            return False
+        return True
 
     @staticmethod
     def _has_cargo_cache_marker(path: Path) -> bool:

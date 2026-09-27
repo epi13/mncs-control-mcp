@@ -137,6 +137,9 @@ def test_plan_preserves_target_without_cargo_cache_marker(tmp_path: Path, monkey
     assert result["eligible_count"] == 0
     assert result["candidates"] == []
     assert target.exists()
+    roots, complete, errors = storage._discover_roots()
+    assert complete and not errors
+    assert {item["path"].name: item["kind"] for item in roots}["target"] == "unrecognized-cargo-target"
 
 
 def test_known_protected_reason_takes_precedence_over_unknown_metadata(
