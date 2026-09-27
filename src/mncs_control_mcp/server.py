@@ -295,8 +295,8 @@ def build_server(config: ControlConfig | None = None) -> Any:
         return invoke("terminal_exec", lambda: sandbox.run(command, scope=scope, project=project, cwd=cwd, timeout_seconds=timeout, network=network, environment=environment).as_dict(), audit_metadata={"command": command, "cwd": cwd, "scope": scope, "project": project, "network": network})  # type: ignore[return-value]
 
     @server.tool(name="terminal_start", description="Start a tracked asynchronous command in the Fedora workspace sandbox.", annotations=annotation(read_only=False, destructive=True, open_world=True), structured_output=True)
-    def terminal_start(command: str, cwd: str = ".", scope: str = "project", project: str | None = None, timeout: float | None = None, network: bool | None = None, environment: dict[str, str] | None = None) -> dict[str, object]:
-        return invoke("terminal_start", processes.start, command, scope=scope, project=project, cwd=cwd, timeout_seconds=timeout, network=network, environment=environment, audit_metadata={"command": command, "cwd": cwd, "scope": scope, "project": project, "network": network})  # type: ignore[return-value]
+    def terminal_start(command: str, cwd: str = ".", execution_scope: str = "project", project: str | None = None, timeout: float | None = None, network: bool | None = None, environment: dict[str, str] | None = None) -> dict[str, object]:
+        return invoke("terminal_start", processes.start, command, scope=execution_scope, project=project, cwd=cwd, timeout_seconds=timeout, network=network, environment=environment, audit_metadata={"command": command, "cwd": cwd, "scope": execution_scope, "project": project, "network": network})  # type: ignore[return-value]
 
     @server.tool(name="terminal_status", description="Inspect a terminal job owned by this server.", annotations=ro, structured_output=True)
     def terminal_status(job_id: str) -> dict[str, object]:
@@ -317,6 +317,10 @@ def build_server(config: ControlConfig | None = None) -> Any:
     @server.tool(name="control_jobs", description="List terminal jobs and completed upstream Fabric, Forge, or Harness execution records.", annotations=ro, structured_output=True)
     def control_jobs() -> dict[str, object]:
         return invoke("control_jobs", processes.list)  # type: ignore[return-value]
+
+    @server.tool(name="terminal_jobs", description="List terminal jobs owned by this server.", annotations=ro, structured_output=True)
+    def terminal_jobs() -> dict[str, object]:
+        return invoke("terminal_jobs", processes.list)  # type: ignore[return-value]
 
     @server.tool(name="git_status", description="Inspect structured status for any Git repository inside the workspace.", annotations=ro, structured_output=True)
     def git_status(repository: str) -> dict[str, object]:

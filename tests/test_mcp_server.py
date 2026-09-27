@@ -127,6 +127,7 @@ audit_path = {str(tmp_path / "state" / "audit.jsonl")!r}
             "file_read",
             "terminal_exec",
             "terminal_start",
+            "terminal_jobs",
             "git_status",
             "git_commit",
             "tool_inventory",
@@ -164,6 +165,10 @@ audit_path = {str(tmp_path / "state" / "audit.jsonl")!r}
         terminal = next(item for item in tools if item["name"] == "terminal_exec")
         assert terminal["annotations"]["destructiveHint"] is True
         assert terminal["annotations"]["openWorldHint"] is True
+        terminal_start = next(item for item in tools if item["name"] == "terminal_start")
+        start_properties = terminal_start["inputSchema"]["properties"]
+        assert "execution_scope" in start_properties
+        assert "scope" not in start_properties
 
         system = client.call("system_status", {})
         assert system["server"]["tool_surface"]["tool_count"] == len(names)
@@ -192,6 +197,28 @@ audit_path = {str(tmp_path / "state" / "audit.jsonl")!r}
                 "project": "e2e",
             },
         )
+        async_job = client.call(
+            "terminal_start",
+            {
+                "command": "printf 'async-ready\\n'",
+                "execution_scope": "project",
+                "project": "e2e",
+                "network": False,
+                "timeout": 20,
+            },
+        )
+        job_id = async_job["job_id"]
+        deadline = time.monotonic() + 5
+        status = async_job
+        while status["status"] == "running" and time.monotonic() < deadline:
+            time.sleep(0.05)
+            status = client.call("terminal_status", {"job_id": job_id})
+        assert status["status"] == "completed", status
+        assert status["exit_code"] == 0
+        output = client.call("terminal_output", {"job_id": job_id})
+        assert output["stdout"] == "async-ready\n"
+        listed = client.call("terminal_jobs", {})
+        assert any(job["job_id"] == job_id for job in listed["jobs"])
         status = client.call("git_status", {"repository": "e2e"})
         assert status["clean"] is False
         client.call("file_delete", {"path": "e2e", "recursive": True})
