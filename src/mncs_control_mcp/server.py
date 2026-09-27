@@ -27,6 +27,7 @@ from .processes import ProcessManager
 from .replication import ReplicationManager
 from .sandbox import Sandbox
 from .security import redact_text
+from .storage import StorageService
 from .tooling import ProjectService, ToolInventory
 from .workspace import WorkspacePolicy
 
@@ -74,6 +75,7 @@ def build_server(config: ControlConfig | None = None) -> Any:
     actions = _register_actions()
     integrations = IntegrationBundle(selected, actions, policy, sandbox)
     files = FileService(selected, policy)
+    storage = StorageService(policy)
     git = GitService(selected, policy, sandbox)
     processes = ProcessManager(selected, policy, sandbox)
     experiments = ExperimentManager(selected)
@@ -203,6 +205,24 @@ def build_server(config: ControlConfig | None = None) -> Any:
     @server.tool(name="workspace_info", description="Describe the protected workspace and active sandbox policy.", annotations=ro, structured_output=True)
     def workspace_info() -> dict[str, object]:
         return invoke("workspace_info", projects.workspace_info)  # type: ignore[return-value]
+
+    @server.tool(name="workspace_storage_inventory", description="Measure workspace disk use and classify common generated-data roots without changing files.", annotations=ro, structured_output=True)
+    def workspace_storage_inventory() -> dict[str, object]:
+        return invoke("workspace_storage_inventory", storage.inventory)  # type: ignore[return-value]
+
+    @server.tool(name="workspace_storage_plan", description="Plan safe reclamation of recognized Cargo outputs; unknown, dirty, active, or multi-worktree data is preserved.", annotations=ro, structured_output=True)
+    def workspace_storage_plan() -> dict[str, object]:
+        return invoke("workspace_storage_plan", storage.plan)  # type: ignore[return-value]
+
+    @server.tool(name="workspace_storage_reclaim", description="Remove only Cargo outputs from a fresh storage plan after explicit confirmation.", annotations=destructive, structured_output=True)
+    def workspace_storage_reclaim(plan_id: str, confirm: bool = False) -> dict[str, object]:
+        return invoke(
+            "workspace_storage_reclaim",
+            storage.reclaim,
+            plan_id,
+            confirm=confirm,
+            audit_metadata={"plan_id": plan_id, "confirmed": confirm},
+        )  # type: ignore[return-value]
 
     @server.tool(name="list_projects", description="Dynamically discover immediate workspace projects and build/Git indicators.", annotations=ro, structured_output=True)
     def list_projects(limit: int = 500) -> dict[str, object]:

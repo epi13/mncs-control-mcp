@@ -169,8 +169,11 @@ Before a large task, agents should call `developer_readiness` or run:
 - `file_stat`, `file_list`, `file_tree`, `file_read`, `file_write`
 - `file_patch`, `file_mkdir`, `file_move`, `file_copy`, `file_delete`
 - `file_glob`, `file_search`
+- `workspace_storage_inventory`, `workspace_storage_plan`, `workspace_storage_reclaim`
 
 Text reads are UTF-8; binary reads use base64. File sizes, listings, trees, search matches, patches, and responses are bounded. Unified patches are path-validated and checked before application.
+
+Storage stewardship is a separate inspect → classify → plan → revalidate → reclaim workflow. The inventory reports common data classes and filesystem space. A plan can authorize only recognized Cargo target directories with a valid Cargo cache marker in a clean default-branch repository with one registered worktree, no tracked target files, symlinks, mountpoints, or hardlinks that escape the target, and no same-user process references. Other build trees, Python environments, MNCS runtime state, snapshots, traces, logs, and test outputs remain visible as preserved or unknown data. Reclamation requires a fresh plan ID plus `confirm=true`; the plan expires after 15 minutes and is invalidated by any detected repository, process, or artifact-tree change. Cargo's own clean operation performs removal. See [docs/STORAGE_STEWARDSHIP.md](docs/STORAGE_STEWARDSHIP.md).
 
 ### Terminal and processes
 
