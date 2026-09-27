@@ -17,6 +17,7 @@ DEFAULT_REPOSITORIES = {
     "commons": "MNCS-Commons",
     "atlas": "mncs-atlas",
     "reference_studies": "mncs-reference-studies",
+    "environment": "mncs-environment",
 }
 LEGACY_HARNESS_DIRECTORIES = ("mncs-harness", "epi13-local-harness")
 
@@ -187,6 +188,12 @@ class ControlConfig:
     @property
     def language_path(self) -> Path:
         return self.workspace_root / self.repositories.get("language", "mncs-language")
+
+    environment_state_dir: Path | None = None
+
+    @property
+    def environment_path(self) -> Path:
+        return self.workspace_root / self.repositories.get("environment", "mncs-environment")
 
     @property
     def resolved_language_binary(self) -> Path:

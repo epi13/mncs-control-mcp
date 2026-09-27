@@ -17,6 +17,7 @@ from .audit import AuditLog
 from .config import ControlConfig, load_config
 from .control_plane import ControlPlaneService
 from .deployment import repository_revision
+from .environment_sessions import EnvironmentService
 from .errors import ControlError
 from .experiments import ExperimentManager
 from .filesystem import FileService
@@ -88,6 +89,7 @@ def build_server(config: ControlConfig | None = None) -> Any:
     journal_context = JournalContextService(selected, policy, git, experiments, integrations, audit, processes)
     projects = ProjectService(selected, policy, sandbox, git)
     inventory = ToolInventory(selected)
+    environment_sessions = EnvironmentService(selected)
     control_plane = ControlPlaneService(
         selected, policy, sandbox, projects, git, integrations.tests, integrations, processes, journal_context
     )
@@ -525,6 +527,34 @@ def build_server(config: ControlConfig | None = None) -> Any:
     @server.tool(name="forge_candidate_refresh", description="Rebind the active Forge candidate to current content and keep prior evidence attached to the previous identity.", annotations=mutate, structured_output=True)
     def forge_candidate_refresh(repository: str, hypothesis: str = "working-tree content changed after the previous candidate binding", changed_files: list[str] | None = None) -> dict[str, object]:
         return invoke("forge_candidate_refresh", integrations.forge.refresh_candidate, repository, hypothesis=hypothesis, changed_files=changed_files, audit_metadata={"repository": repository})  # type: ignore[return-value]
+
+    @server.tool(name="env_status", description="Report whether the sibling mncs-environment checkout is available, with session schema and Store versions.", annotations=ro, structured_output=True)
+    def env_status() -> dict[str, object]:
+        return invoke("env_status", environment_sessions.status)  # type: ignore[return-value]
+
+    @server.tool(name="env_enter", description="Resolve an environment definition and enter it as a durable session: tri-state authority, rights gate, and lifecycle to active.", annotations=mutate, structured_output=True)
+    def env_enter(definition: dict[str, object], consumer: str, workspace: str | None = None, consumer_kind: str = "agent") -> dict[str, object]:
+        return invoke("env_enter", environment_sessions.enter, definition, consumer, workspace=workspace, consumer_kind=consumer_kind, audit_metadata={"consumer": consumer})  # type: ignore[return-value]
+
+    @server.tool(name="env_inspect", description="Read-only inspection of one environment session: lifecycle, authority, rights, claims, bindings, recent events.", annotations=ro, structured_output=True)
+    def env_inspect(session_id: str) -> dict[str, object]:
+        return invoke("env_inspect", environment_sessions.inspect, session_id, audit_metadata={"session_id": session_id})  # type: ignore[return-value]
+
+    @server.tool(name="env_resume", description="Resume participation in one environment session without changing its lifecycle state.", annotations=mutate, structured_output=True)
+    def env_resume(session_id: str) -> dict[str, object]:
+        return invoke("env_resume", environment_sessions.resume, session_id, audit_metadata={"session_id": session_id})  # type: ignore[return-value]
+
+    @server.tool(name="env_claim_acquire", description="Claim one workspace repository for a session; fails when another live session holds it.", annotations=mutate, structured_output=True)
+    def env_claim_acquire(session_id: str, repository: str, reason: str = "", basis: str = "explicit-claim", ttl_hours: int = 24) -> dict[str, object]:
+        return invoke("env_claim_acquire", environment_sessions.acquire_claim, session_id, repository, reason=reason, basis=basis, ttl_hours=ttl_hours, audit_metadata={"session_id": session_id, "repository": repository})  # type: ignore[return-value]
+
+    @server.tool(name="env_claim_release", description="Release a workspace repository claim held by a session.", annotations=mutate, structured_output=True)
+    def env_claim_release(session_id: str, repository: str, reason: str = "") -> dict[str, object]:
+        return invoke("env_claim_release", environment_sessions.release_claim, session_id, repository, reason=reason, audit_metadata={"session_id": session_id, "repository": repository})  # type: ignore[return-value]
+
+    @server.tool(name="env_claims", description="List all workspace claim records known to the environment state.", annotations=ro, structured_output=True)
+    def env_claims() -> dict[str, object]:
+        return invoke("env_claims", environment_sessions.list_claims)  # type: ignore[return-value]
 
     @server.tool(name="system_status", description="Inspect Fedora host resources, sandbox, MCP jobs, and MNCS subsystem availability.", annotations=ro, structured_output=True)
     def system_status() -> dict[str, object]:
