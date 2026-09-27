@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import shlex
+import subprocess
 from pathlib import Path
 
 from .config import ControlConfig
@@ -11,6 +12,7 @@ from .workspace import WorkspacePolicy
 
 _REF = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/@{}~^:+-]{0,255}$")
 _REMOTE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_WORKTREE_SLUG = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
 
 
 class GitService:
@@ -57,6 +59,200 @@ class GitService:
                 details={"exit_code": result.exit_code, "timed_out": result.timed_out},
             )
         return result
+
+    def _host_git(self, repository_root: Path, arguments: list[str]) -> subprocess.CompletedProcess[str]:
+        """Run a provider-constructed Git argv against the common repository.
+
+        Worktree administration mutates Git's shared administrative metadata
+        and creates a sibling checkout. It therefore runs in the owning
+        provider, outside the per-command content sandbox, with validated
+        refs and a provider-computed path. No caller-supplied shell command is
+        accepted here.
+        """
+        return subprocess.run(
+            ["git", "--no-pager", *arguments],
+            cwd=repository_root,
+            capture_output=True,
+            text=True,
+            timeout=self.config.default_timeout_seconds,
+            check=False,
+        )
+
+    @staticmethod
+    def _worktree_slug(value: str) -> str:
+        if not isinstance(value, str) or not _WORKTREE_SLUG.fullmatch(value):
+            raise ControlError(
+                "INVALID_INPUT",
+                "worktree name must be a short path-safe slug",
+            )
+        return value
+
+    def worktree_list(self, repository: str) -> dict[str, object]:
+        repo_root, _, _ = self._repository(repository)
+        completed = self._host_git(repo_root, ["worktree", "list", "--porcelain"])
+        if completed.returncode != 0:
+            raise ControlError("GIT_FAILED", completed.stderr.strip() or "worktree list failed")
+        worktrees: list[dict[str, object]] = []
+        current: dict[str, object] = {}
+        for line in completed.stdout.splitlines():
+            if line.startswith("worktree "):
+                if current:
+                    worktrees.append(current)
+                current = {"path": line[9:].strip()}
+            elif line.startswith("branch "):
+                current["branch"] = line[7:].strip().removeprefix("refs/heads/")
+            elif line.startswith("HEAD "):
+                current["head"] = line[5:].strip()
+            elif line == "detached":
+                current["branch"] = None
+        if current:
+            worktrees.append(current)
+        workspace_root = self.policy.root.resolve()
+        for entry in worktrees:
+            try:
+                entry["workspace_path"] = (
+                    Path(str(entry["path"])).resolve().relative_to(workspace_root).as_posix()
+                )
+            except ValueError:
+                entry["workspace_path"] = None
+        return {"repository": repository, "worktrees": worktrees, "exit_code": completed.returncode}
+
+    def worktree_prepare(
+        self,
+        repository: str,
+        *,
+        name: str,
+        branch: str,
+        source_ref: str = "origin/main",
+    ) -> dict[str, object]:
+        """Select a clean exact-revision worktree or create it safely.
+
+        Existing paths are accepted only when they are already registered
+        worktrees on the requested branch, clean, and at the resolved source
+        commit. This operation never adopts, resets, cleans, or overwrites an
+        existing checkout.
+        """
+        slug = self._worktree_slug(name)
+        branch = self._ref(branch, "branch")
+        source_ref = self._ref(source_ref, "source_ref")
+        repo_root, _, _ = self._repository(repository)
+        authoritative = self._host_git(
+            repo_root, ["rev-parse", "--verify", f"{source_ref}^{{commit}}"]
+        )
+        if authoritative.returncode != 0:
+            raise ControlError(
+                "WORKTREE_SOURCE_UNAVAILABLE",
+                f"cannot resolve authoritative source {source_ref}",
+            )
+        source_head = authoritative.stdout.strip()
+        target = (repo_root / ".worktrees" / slug).resolve()
+        try:
+            target.relative_to(repo_root.resolve())
+        except ValueError as exc:
+            raise ControlError("PATH_ESCAPE", "worktree escapes the repository") from exc
+
+        if target.exists() or target.is_symlink():
+            if target.is_symlink():
+                raise ControlError("WORKTREE_CONFLICT", "managed worktree path is a symbolic link")
+            listed = self.worktree_list(repository)["worktrees"]
+            current = next(
+                (item for item in listed if Path(str(item["path"])).resolve() == target),
+                None,
+            )
+            if current is None:
+                raise ControlError(
+                    "WORKTREE_CONFLICT",
+                    f"existing path is not a registered worktree: {target}",
+                )
+        else:
+            self.worktree_add(repository, branch, slug, source_head)
+            listed = self.worktree_list(repository)["worktrees"]
+            current = next(
+                (item for item in listed if Path(str(item["path"])).resolve() == target),
+                None,
+            )
+            if current is None:
+                raise ControlError("GIT_FAILED", "new worktree was not registered")
+
+        head = str(current.get("head", ""))
+        current_branch = current.get("branch")
+        status = self._host_git(
+            target, ["status", "--porcelain=v1", "--untracked-files=all"]
+        )
+        if status.returncode != 0:
+            raise ControlError("WORKTREE_UNREADABLE", status.stderr.strip())
+        dirty = bool(status.stdout.strip())
+        facts = {
+            "repository": repository,
+            "path": target.relative_to(self.policy.root.resolve()).as_posix(),
+            "branch": current_branch,
+            "head": head,
+            "clean": not dirty,
+            "source_ref": source_ref,
+            "authoritative_head": source_head,
+        }
+        if current_branch != branch or head != source_head or dirty:
+            raise ControlError(
+                "WORKTREE_CONFLICT",
+                "existing worktree does not match the requested clean authoritative checkout",
+                details=facts,
+            )
+        return facts
+
+    def worktree_add(
+        self,
+        repository: str,
+        branch: str,
+        name: str | None = None,
+        start_point: str | None = None,
+    ) -> dict[str, object]:
+        """Create a new managed worktree without touching an existing checkout."""
+        branch = self._ref(branch, "branch")
+        slug = self._worktree_slug(name or branch)
+        if start_point is not None:
+            start_point = self._ref(start_point, "start_point")
+        repo_root, _, _ = self._repository(repository)
+        target = (repo_root / ".worktrees" / slug).resolve()
+        try:
+            target.relative_to(repo_root.resolve())
+        except ValueError as exc:
+            raise ControlError("PATH_ESCAPE", "worktree escapes the repository") from exc
+        if target.exists() or target.is_symlink():
+            raise ControlError("WORKTREE_EXISTS", f"worktree path already exists: {target}")
+
+        branch_exists = self._host_git(
+            repo_root, ["show-ref", "--verify", "--quiet", f"refs/heads/{branch}"]
+        ).returncode == 0
+        path_arg = target.relative_to(repo_root.resolve()).as_posix()
+        args = ["worktree", "add"]
+        if branch_exists:
+            if start_point is not None:
+                existing = self._host_git(repo_root, ["rev-parse", "--verify", branch])
+                requested = self._host_git(repo_root, ["rev-parse", "--verify", start_point])
+                if (
+                    existing.returncode != 0
+                    or requested.returncode != 0
+                    or existing.stdout.strip() != requested.stdout.strip()
+                ):
+                    raise ControlError(
+                        "WORKTREE_BRANCH_CONFLICT",
+                        "existing branch does not point at the requested start_point",
+                    )
+            args.extend([path_arg, branch])
+        else:
+            args.extend(["-b", branch, path_arg])
+            if start_point is not None:
+                args.append(start_point)
+        created = self._host_git(repo_root, args)
+        if created.returncode != 0:
+            raise ControlError("GIT_FAILED", created.stderr.strip() or "worktree add failed")
+        return {
+            "repository": repository,
+            "name": slug,
+            "branch": branch,
+            "path": target.relative_to(self.policy.root.resolve()).as_posix(),
+            "exit_code": created.returncode,
+        }
 
     @staticmethod
     def _output(result: SandboxResult) -> dict[str, object]:

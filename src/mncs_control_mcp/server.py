@@ -322,6 +322,53 @@ def build_server(config: ControlConfig | None = None) -> Any:
     def git_status(repository: str) -> dict[str, object]:
         return invoke("git_status", git.status, repository)  # type: ignore[return-value]
 
+    @server.tool(name="git_worktree_list", description="List a repository's linked worktrees and their observed revisions.", annotations=ro, structured_output=True)
+    def git_worktree_list(repository: str) -> dict[str, object]:
+        return invoke("git_worktree_list", git.worktree_list, repository)  # type: ignore[return-value]
+
+    @server.tool(name="git_worktree_add", description="Create a new managed worktree from an explicit ref without changing existing checkouts.", annotations=mutate, structured_output=True)
+    def git_worktree_add(
+        repository: str,
+        branch: str,
+        name: str | None = None,
+        start_point: str | None = None,
+    ) -> dict[str, object]:
+        return invoke(
+            "git_worktree_add",
+            git.worktree_add,
+            repository,
+            branch,
+            name,
+            start_point,
+            audit_metadata={
+                "repository": repository,
+                "branch": branch,
+                "start_point": start_point,
+            },
+        )  # type: ignore[return-value]
+
+    @server.tool(name="git_worktree_prepare", description="Select a clean worktree at an exact authoritative ref, or safely create it through Control.", annotations=mutate, structured_output=True)
+    def git_worktree_prepare(
+        repository: str,
+        name: str,
+        branch: str,
+        source_ref: str = "origin/main",
+    ) -> dict[str, object]:
+        return invoke(
+            "git_worktree_prepare",
+            git.worktree_prepare,
+            repository,
+            name=name,
+            branch=branch,
+            source_ref=source_ref,
+            audit_metadata={
+                "repository": repository,
+                "name": name,
+                "branch": branch,
+                "source_ref": source_ref,
+            },
+        )  # type: ignore[return-value]
+
     @server.tool(name="git_diff", description="Inspect bounded working-tree or staged diffs.", annotations=ro, structured_output=True)
     def git_diff(repository: str, staged: bool = False, path: str | None = None, context_lines: int = 3) -> dict[str, object]:
         return invoke("git_diff", git.diff, repository, staged=staged, path=path, context_lines=context_lines)  # type: ignore[return-value]

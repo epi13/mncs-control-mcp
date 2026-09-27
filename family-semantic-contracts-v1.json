@@ -1,0 +1,16 @@
+{
+  "schema_version": "mncs.family-semantic-contracts/1",
+  "repository_id": "mncs-control-mcp",
+  "provides": [
+    {
+      "contract_identity": "mncs-control-mcp:workspace.worktree.prepare",
+      "contract_revision": "1",
+      "canonical_entrypoint": "mncs-control-worktrees prepare",
+      "status": "implemented",
+      "invocation": {
+        "kind": "python",
+        "path": "src/mncs_control_mcp/worktree_cli.py"
+      }
+    }
+  ]
+}
