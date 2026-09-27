@@ -186,6 +186,64 @@ def test_worktree_prepare_selects_only_clean_exact_authoritative_checkout(config
     assert (checkout / "unrelated.txt").read_text(encoding="utf-8") == "leave untouched\n"
 
 
+def test_worktree_prepare_refreshes_remote_authority_before_selection(config) -> None:
+    policy = WorkspacePolicy(config)
+    # This worktree administration path uses only provider-constructed argv;
+    # the local bare remote keeps the test independent of network access.
+    git = GitService(config, policy, None)  # type: ignore[arg-type]
+    repository = config.workspace_root / "remote-prepare-repo"
+    repository.mkdir()
+    remote = config.workspace_root / "remote-prepare-origin.git"
+
+    def run(cwd, *args: str) -> str:
+        completed = subprocess.run(
+            ["git", "-C", str(cwd), *args],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return completed.stdout.strip()
+
+    subprocess.run(
+        ["git", "init", "--bare", str(remote)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    run(repository, "init", "-b", "main")
+    run(repository, "config", "user.name", "Control test")
+    run(repository, "config", "user.email", "control-test@example.invalid")
+    (repository / "input.txt").write_text("base\n", encoding="utf-8")
+    run(repository, "add", "input.txt")
+    run(repository, "commit", "-m", "base")
+    run(repository, "remote", "add", "origin", str(remote))
+    run(repository, "push", "-u", "origin", "main")
+    base = run(repository, "rev-parse", "HEAD")
+
+    (repository / "input.txt").write_text("authoritative\n", encoding="utf-8")
+    run(repository, "add", "input.txt")
+    run(repository, "commit", "-m", "authoritative advance")
+    run(repository, "push", "origin", "main")
+    authoritative = run(repository, "rev-parse", "HEAD")
+    # Simulate a checkout whose origin/main observation is stale even though
+    # the remote already contains the newer authority.
+    run(repository, "update-ref", "refs/remotes/origin/main", base)
+    assert run(repository, "rev-parse", "origin/main") == base
+
+    selected = git.worktree_prepare(
+        "remote-prepare-repo",
+        name="campaign",
+        branch="campaign/remote-authority",
+        source_ref="origin/main",
+    )
+
+    assert selected["head"] == authoritative
+    assert selected["authoritative_head"] == authoritative
+    assert selected["clean"] is True
+    checkout = config.workspace_root / str(selected["path"])
+    assert (checkout / "input.txt").read_text(encoding="utf-8") == "authoritative\n"
+
+
 def test_tool_inventory_reports_project_local_candidate_when_system_wrapper_is_broken(config, monkeypatch: pytest.MonkeyPatch) -> None:
     project = config.workspace_root / "fixture-repo" / ".venv" / "bin"
     project.mkdir(parents=True)

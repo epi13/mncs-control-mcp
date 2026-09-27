@@ -78,6 +78,54 @@ class GitService:
             check=False,
         )
 
+    def _refresh_remote_source(
+        self, repository: str, repository_root: Path, source_ref: str
+    ) -> None:
+        """Refresh a remote-tracking source before treating it as authoritative.
+
+        The worktree CLI runs inside the already-authorized Control terminal
+        context and has no nested sandbox object, so it uses the same fixed,
+        argv-only fetch operation directly. MCP callers use Control's normal
+        network-enabled Git sandbox and SSH forwarding.
+        """
+        if source_ref.startswith("refs/") or "/" not in source_ref:
+            return
+        remote, branch = source_ref.split("/", 1)
+        if not _REMOTE.fullmatch(remote) or not branch:
+            return
+        destination = f"refs/remotes/{remote}/{branch}"
+        valid_ref = self._host_git(repository_root, ["check-ref-format", destination])
+        if valid_ref.returncode != 0:
+            raise ControlError("INVALID_GIT_REF", "source_ref is not a remote-tracking branch")
+        configured = self._host_git(repository_root, ["remote", "get-url", remote])
+        if configured.returncode != 0:
+            # Local refs remain useful for isolated provider tests and repos
+            # that deliberately have no remote. Real campaign repositories
+            # with an origin are refreshed below, and fetch failures fail closed.
+            return
+        if not self.config.git_allow_fetch:
+            raise ControlError("GIT_OPERATION_DISABLED", "git fetch is disabled")
+        arguments = [
+            "fetch",
+            "--no-tags",
+            remote,
+            f"+{branch}:{destination}",
+        ]
+        if self.sandbox is None:
+            fetched = self._host_git(repository_root, arguments)
+            if fetched.returncode != 0:
+                raise ControlError(
+                    "WORKTREE_SOURCE_UNAVAILABLE",
+                    fetched.stderr.strip() or f"cannot refresh authoritative source {source_ref}",
+                )
+        else:
+            fetched = self._run(repository, arguments, network=True)
+            if fetched.exit_code != 0:
+                raise ControlError(
+                    "WORKTREE_SOURCE_UNAVAILABLE",
+                    fetched.stderr.strip() or f"cannot refresh authoritative source {source_ref}",
+                )
+
     @staticmethod
     def _worktree_slug(value: str) -> str:
         if not isinstance(value, str) or not _WORKTREE_SLUG.fullmatch(value):
@@ -136,6 +184,7 @@ class GitService:
         branch = self._ref(branch, "branch")
         source_ref = self._ref(source_ref, "source_ref")
         repo_root, _, _ = self._repository(repository)
+        self._refresh_remote_source(repository, repo_root, source_ref)
         authoritative = self._host_git(
             repo_root, ["rev-parse", "--verify", f"{source_ref}^{{commit}}"]
         )
