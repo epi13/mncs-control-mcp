@@ -106,6 +106,12 @@ storage includes protected build trees, environments, Forge cache state, and
 unique run data; the inventory and plan keep those visible without treating
 their names or age as permission to delete them.
 
+Final verification after delivery measured 252,983,820,288 bytes (252.98 GB /
+235.61 GiB), 8.27 GB (7.70 GiB) below the starting workspace measurement.
+Available filesystem space rose from 43.24 GB to 46.86 GB, a 3.62 GB net
+increase. The final workspace total includes concurrent activity during the
+campaign; only the four verified Cargo cleanups are attributed to this change.
+
 The strict post-cleanup inventory classified 29 marker-confirmed Cargo target
 roots at 191.35 GB, plus 16 unrecognized `target` roots at 1.22 GB. It also
 found 17 other build roots at 6.32 GB, 17 Python environments at 18.88 GB, 107
