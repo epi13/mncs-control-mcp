@@ -97,6 +97,33 @@ Terminal tools have two scopes:
 
 Workspace-wide arbitrary shell is destructive-capable. MCP annotations reflect that; clients should keep approval prompts enabled for mutating tools.
 
+## Isolated compiler campaign assembly
+
+Compiler campaigns are assembled from explicit source checkouts. The launcher
+does not accept a Projects-family root and never silently scans one. It creates
+fresh repository administration areas, invokes the pinned Control worktree
+provider, and can enter through the selected `mncs-environment` checkout:
+
+```bash
+python3 src/mncs_control_mcp/campaign_launcher.py \
+  --definition /path/to/mncs-environment/examples/compiler-campaign/environment.json \
+  --workspace-root /tmp/mncs-compiler-campaign \
+  --state-dir /tmp/mncs-compiler-campaign-state \
+  --source mncs-control-mcp=/path/to/mncs-control-mcp \
+  --source mncs-environment=/path/to/mncs-environment \
+  --source mncs-language=/path/to/mncs-language \
+  --source mncs-compiler=/path/to/mncs-compiler \
+  --source mncs-test=/path/to/mncs-test \
+  --source mncs-store=/path/to/mncs-store \
+  --source MNCS-Commons=/path/to/MNCS-Commons \
+  --source RAVEL=/path/to/RAVEL \
+  --enter
+```
+
+The state directory must be unique and outside both the campaign root and the
+shared Environment state directory. Existing source checkouts are read-only
+inputs; provider-owned worktree mutation is confined to the new campaign root.
+
 ## Sandbox design
 
 The Fedora backend is Bubblewrap (`bwrap`). A terminal process receives:
