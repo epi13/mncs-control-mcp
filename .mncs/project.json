@@ -1,17 +1,57 @@
 {
-  "schema_version": "mncs-family.repository-manifest/v0alpha1",
-  "repository": "mncs-control-mcp",
-  "revision": 1,
-  "manifest_location": "in-repository",
-  "authority": {"note": "Control-mcp owns the protected workspace MCP boundary (filesystem, terminal, Git, project-management, tooling, MNCS orchestration) and deterministic worktree preparation; it does not own the repositories it operates on or their semantic content."},
-  "contracts": {
-    "provides": [
-      {"contract": "workspace.worktree.prepare", "version": "1", "kind": "mcp-server-capability", "stability": "experimental", "fingerprint_sources": ["src/mncs_control_mcp/", "family-semantic-contracts-v1.json"]}
+ "schema_version": "mncs-family.repository-manifest/v0alpha1",
+ "repository": "mncs-control-mcp",
+ "revision": 2,
+ "manifest_location": "in-repository",
+ "authority": {
+  "note": "Control-mcp owns the protected workspace MCP boundary (filesystem, terminal, Git, project-management, tooling, MNCS orchestration) and deterministic worktree preparation; it does not own the repositories it operates on or their semantic content."
+ },
+ "contracts": {
+  "provides": [
+   {
+    "contract": "workspace.worktree.prepare",
+    "version": "1",
+    "kind": "mcp-server-capability",
+    "stability": "experimental",
+    "fingerprint_sources": [
+     "src/mncs_control_mcp/",
+     "family-semantic-contracts-v1.json"
+    ]
+   },
+   {
+    "contract": "journal-context",
+    "version": "1",
+    "kind": "mcp-server-capability",
+    "stability": "experimental",
+    "fingerprint_sources": [
+     "src/mncs_control_mcp/server.py",
+     "docs/ATLAS-JOURNAL-INTEGRATION.md"
+    ]
+   }
+  ],
+  "consumes": [],
+  "tests": [
+   {
+    "test": "control-mcp-tests",
+    "covers": [
+     "workspace.worktree.prepare"
     ],
-    "consumes": [],
-    "tests": [{"test": "control-mcp-tests", "covers": ["workspace.worktree.prepare"], "obligation": "self", "command": {"argv": ["python3", "-m", "pytest"], "timeout_seconds": 600}}]
-  }
-,
-  "projection_inventory": ".mncs/projections.json",
-  "structure_profile": {"repository": "machine-native-complexity-development-specification", "path": "profiles/semantic-project.json", "identity": "sha256:259e41ea542e7a1400f1471b0316de4fafc888d6f953c8e91165ff2cfe1e78cb"}
+    "obligation": "self",
+    "command": {
+     "argv": [
+      "python3",
+      "-m",
+      "pytest"
+     ],
+     "timeout_seconds": 600
+    }
+   }
+  ]
+ },
+ "projection_inventory": ".mncs/projections.json",
+ "structure_profile": {
+  "repository": "machine-native-complexity-development-specification",
+  "path": "profiles/semantic-project.json",
+  "identity": "sha256:259e41ea542e7a1400f1471b0316de4fafc888d6f953c8e91165ff2cfe1e78cb"
+ }
 }
