@@ -1,6 +1,19 @@
 # mncs-control-mcp
 
 <!-- MNCS:generated:begin -->
+## Project entry
+
+Protected Fedora development workspace exposed through MCP: filesystem, terminal, Git, project-management, tooling, and MNCS-specific orchestration behind a real Bubblewrap boundary, with deterministic worktree preparation as the canonical capability.
+
+```bash
+python3 -m pytest
+```
+
+Declared capabilities (declarations do not establish execution health):
+
+- `workspace.worktree.prepare/1` — mcp-server-capability (experimental)
+
+Semantic sources and ownership: `.mncs/projections.json`.
 <!-- MNCS:generated:end -->
 
 `mncs-control-mcp` exposes a protected Fedora development workspace through MCP. It provides filesystem, terminal, Git, project-management, tooling, and MNCS-specific orchestration while using a real Bubblewrap boundary to keep commands out of the rest of the user account.

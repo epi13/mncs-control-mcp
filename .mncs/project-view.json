@@ -1,0 +1,23 @@
+{
+  "capabilities": [
+    {
+      "contract": "workspace.worktree.prepare",
+      "fingerprint_sources": [
+        "src/mncs_control_mcp/",
+        "family-semantic-contracts-v1.json"
+      ],
+      "kind": "mcp-server-capability",
+      "stability": "experimental",
+      "version": "1"
+    }
+  ],
+  "dependencies": [],
+  "entry": [
+    "python3 -m pytest"
+  ],
+  "purpose": "Protected Fedora development workspace exposed through MCP: filesystem, terminal, Git, project-management, tooling, and MNCS-specific orchestration behind a real Bubblewrap boundary, with deterministic worktree preparation as the canonical capability.",
+  "repository": "mncs-control-mcp",
+  "schema_version": "mncs.project-view/1",
+  "source_identity": "sha256:7f70024004426be4f621705a4d7ab77404dea0f91c4296061c23d8a67c50c1fe",
+  "structure": {}
+}
