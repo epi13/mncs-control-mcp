@@ -1,0 +1,17 @@
+{
+  "schema_version": "mncs.project-intent/1",
+  "purpose": "Protected Fedora development workspace exposed through MCP: filesystem, terminal, Git, project-management, tooling, and MNCS-specific orchestration behind a real Bubblewrap boundary, with deterministic worktree preparation as the canonical capability.",
+  "entry": [
+    "python3 -m pytest"
+  ],
+  "milestones": [
+    {
+      "id": "mncs-control-mcp:projection-conformance",
+      "title": "Declared ambient projection surfaces satisfy their contract",
+      "subject_slot": "declarations",
+      "evidence": "projection-conformance",
+      "dependencies": [],
+      "blockers": []
+    }
+  ]
+}

@@ -1,5 +1,8 @@
 # mncs-control-mcp
 
+<!-- MNCS:generated:begin -->
+<!-- MNCS:generated:end -->
+
 `mncs-control-mcp` exposes a protected Fedora development workspace through MCP. It provides filesystem, terminal, Git, project-management, tooling, and MNCS-specific orchestration while using a real Bubblewrap boundary to keep commands out of the rest of the user account.
 
 The default workspace is `$HOME/Documents/Projects`. MNCS repositories retain aliases and specialized adapters, but any real project below the workspace can use the general development tools.
