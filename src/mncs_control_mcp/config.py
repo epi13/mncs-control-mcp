@@ -10,7 +10,7 @@ from .errors import ControlError
 DEFAULT_REPOSITORIES = {
     "local_harness": "mncs-harness",
     "fabric": "mncs-fabric",
-    "forge": "mncs-forge-mcp",
+    "forge": "mncs-forge",
     "language": "mncs-language",
     "standard": "machine-native-complexity-standard",
     "mncds": "machine-native-complexity-development-specification",
@@ -164,7 +164,7 @@ class ControlConfig:
 
     @property
     def forge_path(self) -> Path:
-        return self.workspace_root / self.repositories.get("forge", "mncs-forge-mcp")
+        return self.workspace_root / self.repositories.get("forge", "mncs-forge")
 
     @property
     def forge_server_path(self) -> Path:

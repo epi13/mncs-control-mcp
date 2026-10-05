@@ -8,7 +8,7 @@ from mncs_control_mcp.adapters import ForgeAdapter
 from mncs_control_mcp.config import ControlConfig
 
 PROJECTS = Path(__file__).parents[2]
-FORGE_EXECUTABLE = PROJECTS / "mncs-forge-mcp" / "scripts" / "codex-mcp"
+FORGE_EXECUTABLE = PROJECTS / "mncs-forge" / "scripts" / "codex-mcp"
 FORGE_CONFIG = PROJECTS / "mncs-reference-studies" / "mncs-forge.toml"
 
 
