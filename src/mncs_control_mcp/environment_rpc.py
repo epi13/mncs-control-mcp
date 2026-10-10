@@ -133,6 +133,7 @@ class EnvironmentRPCServer:
             "available": available,
             "state": "ready" if available else "unavailable",
             "authorization": "per-execution-grant-and-peer-credentials",
+            "principal_id": self.principal_id,
             "store_mutation": self._store_mutation_status(),
         }
 
@@ -485,6 +486,75 @@ class EnvironmentRPCServer:
                                details={"session_id": session_id,
                                         "next": "request an explicit handoff from the recorded owner"})
 
+    def _authorize_handoff_accept(
+        self,
+        session_id: str,
+        handoff_id: str,
+        principal_id: str,
+        consumer_id: str,
+        consumer_kind: str,
+    ) -> None:
+        """Admit a receiver only for a current owner-issued transfer.
+
+        A handoff identity and consumer label are not credentials. The
+        canonical record must bind this authenticated principal and consumer,
+        and its source must still be the session owner.
+        """
+        pkg = self.environment_service._pkg()
+        store = self.environment_service._store(pkg)
+        try:
+            snapshot = store.load_snapshot(session_id)
+            handoff = store.load_handoff(session_id, handoff_id)
+        finally:
+            store.close()
+        if not isinstance(snapshot, dict) or not isinstance(handoff, dict):
+            raise ControlError("ENVIRONMENT_AUTHORITY_DENIED",
+                               "no current handoff authorizes this continuation")
+        source_principal = snapshot.get("authenticated_principal_id")
+        pending_id = snapshot.get("pending_handoff_id")
+        snapshot_handoffs = snapshot.get("handoffs")
+        legacy_pending = (
+            "pending_handoff_id" not in snapshot
+            and isinstance(snapshot_handoffs, list)
+            and snapshot_handoffs[-1:] == [handoff_id]
+        )
+        if (
+            handoff.get("identity") != handoff_id
+            or handoff.get("session_id") != session_id
+            or not isinstance(snapshot_handoffs, list)
+            or handoff_id not in snapshot_handoffs
+            or not isinstance(source_principal, str)
+            or not source_principal
+            or handoff.get("from_authenticated_principal_id") != source_principal
+            or handoff.get("from_consumer") != snapshot.get("consumer_id")
+            or handoff.get("to_authenticated_principal_id") != principal_id
+            or handoff.get("to_consumer") != consumer_id
+            or handoff.get("to_consumer_kind", "agent") != consumer_kind
+            or snapshot.get("lifecycle") != "handed_off"
+            or (pending_id != handoff_id and not legacy_pending)
+        ):
+            raise ControlError("ENVIRONMENT_AUTHORITY_DENIED",
+                               "no current handoff authorizes this continuation")
+
+    @staticmethod
+    def _accept_positionals(argv: list[str], command_index: int = 0) -> list[str]:
+        """Extract accept's positionals even when common options come first."""
+        result: list[str] = []
+        skip_value = False
+        value_options = {"--consumer", "--consumer-kind"}
+        for item in argv[command_index + 1:]:
+            if skip_value:
+                skip_value = False
+                continue
+            if item in value_options:
+                skip_value = True
+                continue
+            if any(item.startswith(option + "=") for option in value_options):
+                continue
+            if not item.startswith("-"):
+                result.append(item)
+        return result
+
     def dispatch(self, request: dict[str, Any], *, peer_uid: int) -> dict[str, Any]:
         try:
             grant = self._grant(request, peer_uid)
@@ -523,8 +593,13 @@ class EnvironmentRPCServer:
             if isinstance(argv, list) and argv and argv[0] in {
                 "inspect", "context", "resume", "checkpoint", "handoff", "accept", "claims"
             }:
-                session_id = next((item for item in argv[1:]
-                                   if isinstance(item, str) and not item.startswith("-")), None)
+                if argv[0] == "accept":
+                    if all(isinstance(item, str) for item in argv):
+                        positional = self._accept_positionals(argv)
+                        session_id = positional[0] if positional else None
+                else:
+                    session_id = next((item for item in argv[1:]
+                                       if isinstance(item, str) and not item.startswith("-")), None)
             lock = None
             if session_id:
                 with self._lock:
@@ -599,10 +674,38 @@ class EnvironmentRPCServer:
         if command in {"inspect", "context", "resume", "checkpoint", "handoff", "accept", "claims"}:
             try:
                 command_index = argv.index(command)
-                session_id = next(item for item in argv[command_index + 1:] if not item.startswith("-"))
+                positional = (
+                    self._accept_positionals(argv, command_index)
+                    if command == "accept"
+                    else [item for item in argv[command_index + 1:]
+                          if not item.startswith("-")]
+                )
+                session_id = positional[0]
             except (StopIteration, ValueError, IndexError) as error:
                 raise ControlError("ENVIRONMENT_RPC_INVALID_REQUEST", "session identity is required") from error
-            self._authorize_session(session_id, record.principal_id)
+            if command == "accept":
+                try:
+                    handoff_id = positional[1]
+                except IndexError as error:
+                    raise ControlError("ENVIRONMENT_RPC_INVALID_REQUEST",
+                                       "handoff identity is required") from error
+                consumer_id = "local-agent"
+                consumer_kind = "agent"
+                for index, item in enumerate(argv[command_index + 1:], command_index + 1):
+                    if item == "--consumer" and index + 1 < len(argv):
+                        consumer_id = argv[index + 1]
+                    elif item == "--consumer-kind" and index + 1 < len(argv):
+                        consumer_kind = argv[index + 1]
+                    elif item.startswith("--consumer="):
+                        consumer_id = item.split("=", 1)[1]
+                    elif item.startswith("--consumer-kind="):
+                        consumer_kind = item.split("=", 1)[1]
+                self._authorize_handoff_accept(
+                    session_id, handoff_id, record.principal_id,
+                    consumer_id, consumer_kind,
+                )
+            else:
+                self._authorize_session(session_id, record.principal_id)
             if command == "claims" and "--transfer-to" in argv:
                 try:
                     target = argv[argv.index("--transfer-to") + 1]

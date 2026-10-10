@@ -173,6 +173,7 @@ def test_grant_files_live_outside_shared_sandbox_home(tmp_path: Path) -> None:
             "available": True,
             "state": "ready",
             "authorization": "per-execution-grant-and-peer-credentials",
+            "principal_id": server.principal_id,
             "store_mutation": {"state": "store-missing", "code": "store-missing"},
         }
         resolution = SimpleNamespace(
@@ -346,6 +347,98 @@ def test_foreign_session_inspection_requires_authenticated_owner(tmp_path: Path)
     }, peer_uid=0)
 
     assert response["error"]["code"] == "ENVIRONMENT_AUTHORITY_DENIED"
+
+
+def test_accept_requires_current_receiver_bound_owner_handoff(tmp_path: Path, monkeypatch) -> None:
+    token = "receiver-handoff-capability"
+    root = tmp_path / "project"
+    root.mkdir()
+    session_id = "ses_handoff"
+    handoff_id = "hff_receiver"
+    snapshot = {
+        "authenticated_principal_id": "ctrl_source",
+        "consumer_id": "owner-agent",
+        "lifecycle": "handed_off",
+        "pending_handoff_id": handoff_id,
+        "handoffs": [handoff_id],
+    }
+    handoff = {
+        "identity": handoff_id,
+        "session_id": session_id,
+        "from_consumer": "owner-agent",
+        "from_authenticated_principal_id": "ctrl_source",
+        "to_authenticated_principal_id": "ctrl_receiver",
+        "to_consumer": "agent-receiver",
+        "to_consumer_kind": "agent",
+    }
+
+    class Store:
+        def load_snapshot(self, identity):
+            assert identity == session_id
+            return snapshot
+
+        def load_handoff(self, identity, transfer_id):
+            assert identity == session_id
+            assert transfer_id == handoff_id
+            return handoff
+
+        def close(self):
+            pass
+
+    class Environment:
+        state_dir = tmp_path / "state"
+        environment_path = tmp_path / "environment"
+
+        def _pkg(self):
+            return object()
+
+        def _store(self, _pkg):
+            return Store()
+
+    server = EnvironmentRPCServer(
+        ControlConfig(
+            sandbox_home=tmp_path / "home",
+            environment_rpc_socket=tmp_path / "rpc" / "environment.sock",
+        ),
+        environment_service=Environment(),
+        policy=object(),
+    )
+    server._grants[hashlib.sha256(token.encode()).hexdigest()] = _GrantRecord(
+        grant_id="receiver-grant",
+        principal_id="ctrl_receiver",
+        host_root=root,
+        sandbox_root="/workspace/project",
+        scope="project",
+        uid=0,
+        expires_at=time.monotonic() + 60,
+        token_file=tmp_path / "grant",
+    )
+    called = []
+
+    def run(*args, **kwargs):
+        called.append((args, kwargs))
+        return SimpleNamespace(returncode=0, stdout="{}\n", stderr="")
+
+    monkeypatch.setattr("mncs_control_mcp.environment_rpc.subprocess.run", run)
+    response = server.dispatch({
+        "grant": token,
+        "request_id": "req_accept_current_handoff",
+        "argv": ["accept", "--consumer", "agent-receiver", session_id, handoff_id],
+        "cwd": "/workspace/project",
+    }, peer_uid=0)
+    assert response["ok"] is True
+    assert response["result"]["exit_code"] == 0
+    assert len(called) == 1
+
+    handoff["to_authenticated_principal_id"] = "ctrl_someone_else"
+    rejected = server.dispatch({
+        "grant": token,
+        "request_id": "req_reject_foreign_handoff",
+        "argv": ["accept", "--consumer", "agent-receiver", session_id, handoff_id],
+        "cwd": "/workspace/project",
+    }, peer_uid=0)
+    assert rejected["error"]["code"] == "ENVIRONMENT_AUTHORITY_DENIED"
+    assert len(called) == 1
 
 
 def test_store_corruption_during_authorization_is_structured(tmp_path: Path) -> None:
