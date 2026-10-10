@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import os
 import shutil
 import tempfile
 import threading
@@ -110,6 +112,7 @@ def test_grant_files_live_outside_shared_sandbox_home(tmp_path: Path) -> None:
             "available": True,
             "state": "ready",
             "authorization": "per-execution-grant-and-peer-credentials",
+            "store_mutation": {"state": "store-missing", "code": "store-missing"},
         }
         resolution = SimpleNamespace(
             scope="project", project="alpha", host_root=tmp_path / "projects" / "alpha"
@@ -122,6 +125,35 @@ def test_grant_files_live_outside_shared_sandbox_home(tmp_path: Path) -> None:
         server.close()
         assert server.status()["available"] is False
         shutil.rmtree(private_root)
+
+
+def test_status_reports_store_mount_read_only_without_attempting_a_write(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    state_dir = tmp_path / "state"
+    (state_dir / "store").mkdir(parents=True)
+    server = EnvironmentRPCServer(
+        ControlConfig(
+            sandbox_home=tmp_path / "home",
+            environment_rpc_socket=tmp_path / "rpc" / "environment.sock",
+        ),
+        environment_service=SimpleNamespace(state_dir=state_dir),
+        policy=object(),
+    )
+    monkeypatch.setattr(
+        "mncs_control_mcp.environment_rpc.os.statvfs",
+        lambda _path: SimpleNamespace(f_flag=getattr(os, "ST_RDONLY", 1)),
+    )
+    monkeypatch.setattr("mncs_control_mcp.environment_rpc.os.access", lambda *_args: True)
+
+    status = server.status()
+
+    assert status["available"] is False
+    assert status["store_mutation"] == {
+        "state": "direct-filesystem-read-only",
+        "code": "direct-filesystem-read-only",
+    }
+    assert str(state_dir / "store") not in json.dumps(status)
 
 
 def test_same_request_is_serialized_and_replayed_once(tmp_path: Path) -> None:

@@ -88,6 +88,12 @@ canonical Store. It does not accept Store paths, pass file descriptors, or
 expose a general filesystem proxy. Environment still validates campaign
 ownership, rights, claims, and Store generations. The default endpoint can be
 overridden with the Control integration setting `environment_rpc_socket`.
+
+Endpoint status reports IPC availability separately from the configured Store
+mount's mutation state. The read-only mount check does not attempt a write or
+claim Store integrity; `direct-filesystem-read-only` means that this service
+process still needs an authorized Store persistence transport. The endpoint
+never exposes Store paths or file descriptors to the sandbox.
 `env_status` and `system_status` report its live availability; a missing
 endpoint does not trigger file persistence or direct Store writes.
 

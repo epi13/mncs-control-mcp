@@ -133,7 +133,36 @@ class EnvironmentRPCServer:
             "available": available,
             "state": "ready" if available else "unavailable",
             "authorization": "per-execution-grant-and-peer-credentials",
+            "store_mutation": self._store_mutation_status(),
         }
+
+    def _store_mutation_status(self) -> dict[str, str]:
+        """Observe whether this service's mount permits Store publication.
+
+        This checks the service's current mount flags and path permissions;
+        it does not attempt a write or claim that Store integrity is healthy.
+        Agent-visible status therefore distinguishes an available IPC socket
+        from an OS boundary that still prevents the Store owner process from
+        publishing.
+        """
+        store_root = Path(self.environment_service.state_dir).expanduser() / "store"
+        try:
+            store_root.stat()
+            filesystem = os.statvfs(store_root)
+        except FileNotFoundError:
+            return {"state": "store-missing", "code": "store-missing"}
+        except PermissionError:
+            return {"state": "unknown", "code": "store-stat-denied"}
+        except OSError:
+            return {"state": "unknown", "code": "store-stat-unavailable"}
+        if filesystem.f_flag & getattr(os, "ST_RDONLY", 1):
+            return {"state": "direct-filesystem-read-only",
+                    "code": "direct-filesystem-read-only"}
+        if not os.access(store_root, os.W_OK | os.X_OK):
+            return {"state": "filesystem-write-denied",
+                    "code": "filesystem-write-denied"}
+        return {"state": "owner-write-path-available",
+                "code": "owner-write-path-available"}
 
     def _remove_stale_socket(self) -> None:
         try:
