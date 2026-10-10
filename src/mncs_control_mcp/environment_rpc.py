@@ -29,7 +29,8 @@ from .errors import ControlError
 MAX_REQUEST_BYTES = 256 * 1024
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 ALLOWED_COMMANDS = frozenset({
-    "enter", "inspect", "context", "resume", "checkpoint", "handoff", "accept", "claims"
+    "enter", "inspect", "context", "resume", "checkpoint", "handoff", "accept", "claims",
+    "retire",
 })
 RPC_SANDBOX_SOCKET = "/run/mncs-environment-rpc/environment.sock"
 
@@ -363,6 +364,7 @@ class EnvironmentRPCServer:
         if any(item == "--state-dir" or item.startswith("--state-dir=")
                or item.startswith("--state-") or item == "--persistence"
                or item.startswith("--persistence=") or item.startswith("--persist")
+               or item == "--execution-root" or item.startswith("--execution-root=")
                for item in argv):
             raise ControlError("ENVIRONMENT_AUTHORITY_DENIED",
                                "Environment RPC fixes canonical persistence configuration")
@@ -469,6 +471,32 @@ class EnvironmentRPCServer:
         elif command == "claims":
             for option in ("--worktree",):
                 map_path_option(option)
+        elif command == "retire":
+            flags = set(argv)
+            mutation_targets = any(
+                item == "--prune" or item.startswith("--prune=")
+                or item == "--branch" or item.startswith("--branch=")
+                or item == "--worktree" or item.startswith("--worktree=")
+                for item in argv
+            )
+            if "--inventory" not in flags or "--dry-run" not in flags or mutation_targets:
+                raise ControlError(
+                    "ENVIRONMENT_AUTHORITY_DENIED",
+                    "Control exposes only read-only retirement inventory",
+                    details={"required": ["--inventory", "--dry-run"]},
+                )
+            canonical = "origin/main"
+            for index, item in enumerate(translated):
+                if item == "--canonical" and index + 1 < len(translated):
+                    canonical = translated[index + 1]
+                    break
+                if item.startswith("--canonical="):
+                    canonical = item.split("=", 1)[1]
+                    break
+            if canonical not in {"origin/main", "origin/master", "main", "master"}:
+                raise ControlError("ENVIRONMENT_AUTHORITY_DENIED",
+                                   "retirement inventory canonical ref is not exposed")
+            map_path_option("--repository")
         return translated
 
     def _authorize_session(self, session_id: str, principal_id: str) -> None:
@@ -591,7 +619,8 @@ class EnvironmentRPCServer:
             argv = request.get("argv")
             session_id = None
             if isinstance(argv, list) and argv and argv[0] in {
-                "inspect", "context", "resume", "checkpoint", "handoff", "accept", "claims"
+                "inspect", "context", "resume", "checkpoint", "handoff", "accept", "claims",
+                "retire",
             }:
                 if argv[0] == "accept":
                     if all(isinstance(item, str) for item in argv):
@@ -671,7 +700,11 @@ class EnvironmentRPCServer:
             raise ControlError("ENVIRONMENT_WORKSPACE_MISSING", "client cwd is unavailable in the host namespace")
         argv = self._translate_argv(request.get("argv"), cwd, record)
         command = argv[0]
-        if command in {"inspect", "context", "resume", "checkpoint", "handoff", "accept", "claims"}:
+        if command == "retire":
+            # The client cannot choose this root. Environment must not probe a
+            # registered checkout outside the execution grant's namespace.
+            argv.extend(["--execution-root", str(record.host_root)])
+        if command in {"inspect", "context", "resume", "checkpoint", "handoff", "accept", "claims", "retire"}:
             try:
                 command_index = argv.index(command)
                 positional = (

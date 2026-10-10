@@ -96,6 +96,12 @@ process still needs an authorized Store persistence transport. The endpoint
 never exposes Store paths or file descriptors to the sandbox.
 `env_status` and `system_status` report its live availability; a missing
 endpoint does not trigger file persistence or direct Store writes.
+The bridge additionally exposes Environment's retirement inventory only in
+`--inventory --dry-run` mode. It requires the authenticated session principal,
+maps the repository through the current execution grant, rejects branch,
+worktree, and prune mutation targets, and supplies the grant root as the
+inspection boundary. Registered checkouts outside that root are reported as
+out of scope without probing their paths.
 
 ## Audit
 

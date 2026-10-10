@@ -54,6 +54,49 @@ def test_path_options_are_mapped_in_split_and_equals_forms(tmp_path: Path) -> No
     assert equals == ["enter", "--workspace=" + str(host_root / "nested")]
 
 
+def test_retire_rpc_exposes_only_scoped_read_only_inventory(tmp_path: Path) -> None:
+    server = EnvironmentRPCServer(
+        ControlConfig(
+            sandbox_home=tmp_path / "home",
+            environment_rpc_socket=tmp_path / "rpc" / "environment.sock",
+        ),
+        environment_service=SimpleNamespace(state_dir=tmp_path / "state"),
+        policy=object(),
+    )
+    host_root = tmp_path / "project"
+    host_root.mkdir()
+    grant = _GrantRecord(
+        grant_id="grant-retire-test",
+        principal_id="principal-test",
+        host_root=host_root,
+        sandbox_root="/workspace/project",
+        scope="project",
+        uid=0,
+        expires_at=time.monotonic() + 60,
+        token_file=tmp_path / "grant",
+    )
+    translated = server._translate_argv(
+        ["retire", "ses_test", "--repository", "/workspace/project",
+         "--inventory", "--dry-run"],
+        host_root,
+        grant,
+    )
+    assert translated == ["retire", "ses_test", "--repository", str(host_root),
+                          "--inventory", "--dry-run"]
+
+    for argv in (
+        ["retire", "ses_test", "--repository", "/workspace/project", "--inventory"],
+        ["retire", "ses_test", "--repository", "/workspace/project",
+         "--inventory", "--dry-run", "--branch", "main"],
+        ["retire", "ses_test", "--repository", "/workspace/project",
+         "--inventory", "--dry-run", "--execution-root", "/"],
+        ["retire", "ses_test", "--repository", "/workspace/project",
+         "--inventory", "--dry-run", "--canonical=refs/heads/private"],
+    ):
+        with pytest.raises(ControlError):
+            server._translate_argv(argv, host_root, grant)
+
+
 def test_entry_preserves_and_bounds_configured_workspace_root(tmp_path: Path) -> None:
     projects = tmp_path / "projects"
     project = projects / "mncs-environment"
