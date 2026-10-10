@@ -11,8 +11,11 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from mncs_control_mcp.config import ControlConfig
 from mncs_control_mcp.environment_rpc import EnvironmentRPCServer, _GrantRecord
+from mncs_control_mcp.errors import ControlError
 
 
 def test_path_options_are_mapped_in_split_and_equals_forms(tmp_path: Path) -> None:
@@ -49,6 +52,56 @@ def test_path_options_are_mapped_in_split_and_equals_forms(tmp_path: Path) -> No
     )
     assert split == ["enter", "--workspace", str(host_root / "nested")]
     assert equals == ["enter", "--workspace=" + str(host_root / "nested")]
+
+
+def test_entry_preserves_and_bounds_configured_workspace_root(tmp_path: Path) -> None:
+    projects = tmp_path / "projects"
+    project = projects / "mncs-environment"
+    definition_dir = project / ".mncs"
+    definition_dir.mkdir(parents=True)
+    definition = definition_dir / "environment.json"
+    definition.write_text(
+        json.dumps({"workspace_root": "../..", "workspace_scope": {"kind": "workspace"}}),
+        encoding="utf-8",
+    )
+    server = EnvironmentRPCServer(
+        ControlConfig(
+            sandbox_home=tmp_path / "home",
+            environment_rpc_socket=tmp_path / "rpc" / "environment.sock",
+        ),
+        environment_service=SimpleNamespace(state_dir=tmp_path / "state"),
+        policy=object(),
+    )
+    workspace_grant = _GrantRecord(
+        grant_id="workspace-grant",
+        principal_id="principal-test",
+        host_root=projects,
+        sandbox_root="/workspace",
+        scope="workspace",
+        uid=0,
+        expires_at=time.monotonic() + 60,
+        token_file=tmp_path / "grant",
+    )
+
+    translated = server._translate_argv(
+        ["enter"], project, workspace_grant
+    )
+
+    assert translated == ["enter"]
+
+    project_grant = _GrantRecord(
+        grant_id="project-grant",
+        principal_id="principal-test",
+        host_root=project,
+        sandbox_root="/workspace/mncs-environment",
+        scope="project",
+        uid=0,
+        expires_at=time.monotonic() + 60,
+        token_file=tmp_path / "project-grant",
+    )
+    with pytest.raises(ControlError, match="exceeds the execution grant") as raised:
+        server._translate_argv(["enter"], project, project_grant)
+    assert raised.value.code == "ENVIRONMENT_WORKSPACE_ESCAPE"
 
 
 def test_retry_identity_replays_across_fresh_execution_grants(tmp_path: Path) -> None:

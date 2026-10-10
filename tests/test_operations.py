@@ -241,7 +241,11 @@ def test_doctor_reports_missing_required_tunnel_dependencies(tmp_path: Path, cap
     workspace = tmp_path / "projects"
     workspace.mkdir()
     config = tmp_path / "control.toml"
-    config.write_text(f"[workspace]\nroot = {str(workspace)!r}\n", encoding="utf-8")
+    config.write_text(
+        f"[workspace]\nroot = {str(workspace)!r}\n"
+        f"[integration]\nenvironment_rpc_socket = {str(tmp_path / 'environment.sock')!r}\n",
+        encoding="utf-8",
+    )
     assert run_doctor(config, json_output=True) == 1
     output = capsys.readouterr().out
     assert "Tunnel client" in output
@@ -261,7 +265,9 @@ def test_installer_help_is_safe_and_idempotence_contract_is_documented() -> None
 
 @pytest.mark.requires_bwrap_namespace
 @pytest.mark.skipif(shutil.which("bwrap") is None, reason="bubblewrap is not installed")
-def test_doctor_mcp_probe_performs_real_stdio_handshake(tmp_path: Path) -> None:
+def test_doctor_mcp_probe_performs_real_stdio_handshake(
+    tmp_path: Path, environment_rpc_socket: Path
+) -> None:
     repository_executable = Path(__file__).parents[1] / ".venv" / "bin" / "mncs-control-mcp"
     executable = repository_executable if repository_executable.is_file() else Path(shutil.which("mncs-control-mcp") or "")
     if not executable.is_file():
@@ -269,7 +275,11 @@ def test_doctor_mcp_probe_performs_real_stdio_handshake(tmp_path: Path) -> None:
     workspace = tmp_path / "projects"
     workspace.mkdir()
     config = tmp_path / "control.toml"
-    config.write_text(f"[workspace]\nroot = {str(workspace)!r}\n", encoding="utf-8")
+    config.write_text(
+        f"[workspace]\nroot = {str(workspace)!r}\n"
+        f"[integration]\nenvironment_rpc_socket = {str(environment_rpc_socket)!r}\n",
+        encoding="utf-8",
+    )
     result = probe_mcp_stdio(executable, config)
     assert result["tool_count"] >= 50
     assert result["tool_names_sha256"].startswith("sha256:")

@@ -395,9 +395,65 @@ class EnvironmentRPCServer:
         if command == "enter":
             for option in ("--definition", "--workspace"):
                 map_path_option(option)
-            if "--workspace" not in translated:
-                if not any(item.startswith("--workspace=") for item in translated):
-                    translated.extend(("--workspace", str(cwd)))
+            if "--workspace" not in translated and not any(
+                item.startswith("--workspace=") for item in translated
+            ):
+                definition_path = next(
+                    (
+                        Path(translated[index + 1])
+                        for index, item in enumerate(translated[:-1])
+                        if item == "--definition"
+                    ),
+                    next(
+                        (
+                            Path(item.split("=", 1)[1])
+                            for item in translated
+                            if item.startswith("--definition=")
+                        ),
+                        None,
+                    ),
+                )
+                if definition_path is None:
+                    current = cwd
+                    while current == record.host_root or record.host_root in current.parents:
+                        candidate = current / ".mncs" / "environment.json"
+                        if candidate.is_file():
+                            definition_path = candidate
+                            break
+                        if (current / ".git").exists() or current == record.host_root:
+                            break
+                        current = current.parent
+
+                if definition_path is not None:
+                    try:
+                        definition = json.loads(definition_path.read_text(encoding="utf-8"))
+                    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+                        definition = None
+                    scope = definition.get("workspace_scope") if isinstance(definition, dict) else None
+                    provider_owned = bool(
+                        isinstance(definition, dict) and definition.get("workspace_provider")
+                    ) or (isinstance(scope, dict) and scope.get("kind") == "campaign")
+                    declared_root = (
+                        definition.get("workspace_root", ".")
+                        if isinstance(definition, dict)
+                        else None
+                    )
+                    if not provider_owned and isinstance(declared_root, str) and declared_root:
+                        candidate_root = Path(declared_root)
+                        if not candidate_root.is_absolute():
+                            candidate_root = definition_path.parent / candidate_root
+                        resolved_root = candidate_root.resolve(strict=False)
+                        if (
+                            resolved_root != record.host_root
+                            and record.host_root not in resolved_root.parents
+                        ):
+                            raise ControlError(
+                                "ENVIRONMENT_WORKSPACE_ESCAPE",
+                                "configured Environment workspace root exceeds the execution grant",
+                                details={
+                                    "next": "use an authorized workspace-scoped execution or select a definition inside this project"
+                                },
+                            )
         elif command == "claims":
             for option in ("--worktree",):
                 map_path_option(option)

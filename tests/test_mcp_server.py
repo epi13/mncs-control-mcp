@@ -83,7 +83,9 @@ class StdioClient:
 
 @pytest.mark.requires_bwrap_namespace
 @pytest.mark.skipif(shutil.which("bwrap") is None, reason="bubblewrap is not installed")
-def test_stdio_mcp_end_to_end_developer_workspace(tmp_path: Path) -> None:
+def test_stdio_mcp_end_to_end_developer_workspace(
+    tmp_path: Path, environment_rpc_socket: Path
+) -> None:
     pytest.importorskip("mcp")
     pytest.importorskip(
         "mcp.server.fastmcp", reason="installed MCP SDK does not include the FastMCP server API"
@@ -103,6 +105,8 @@ home = {str(tmp_path / "sandbox-home")!r}
 job_state_path = {str(tmp_path / "state" / "jobs.json")!r}
 [server]
 audit_path = {str(tmp_path / "state" / "audit.jsonl")!r}
+[integration]
+environment_rpc_socket = {str(environment_rpc_socket)!r}
 """,
         encoding="utf-8",
     )
@@ -227,7 +231,9 @@ audit_path = {str(tmp_path / "state" / "audit.jsonl")!r}
         client.close()
 
 
-def test_stdio_mcp_protocol_reads_persistent_fabric_without_admin_surface(tmp_path: Path) -> None:
+def test_stdio_mcp_protocol_reads_persistent_fabric_without_admin_surface(
+    tmp_path: Path, environment_rpc_socket: Path
+) -> None:
     pytest.importorskip("mcp")
     pytest.importorskip(
         "mcp.server.fastmcp", reason="installed MCP SDK does not include the FastMCP server API"
@@ -276,6 +282,7 @@ job_state_path = {str(tmp_path / "state" / "jobs.json")!r}
 [integration]
 fabric_mode = "service"
 fabric_socket = {str(socket_path)!r}
+environment_rpc_socket = {str(environment_rpc_socket)!r}
 fabric_execution_mode = "unavailable-until-service-support"
 """,
         encoding="utf-8",
