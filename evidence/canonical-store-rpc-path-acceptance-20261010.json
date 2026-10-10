@@ -1,0 +1,127 @@
+{
+  "schema_version": "mncs.control.canonical-store-rpc-path-acceptance/1",
+  "recorded_at": "2026-10-10T22:19:37Z",
+  "owner": "mncs-control-mcp",
+  "source": {
+    "repository": "mncs-control-mcp",
+    "base_revision": "d3b08e032b29e91106b70a741e1502a3f7638dd7",
+    "unit_path": "deploy/systemd/mncs-control-tunnel.service",
+    "unit_sha256": "b1b56bf1eea0c16c40b48200361c98fc77d0a1dc6c35d18d2bbfc8e29064a285"
+  },
+  "change": {
+    "installed_unit": "/home/epi13/.config/systemd/user/mncs-control-tunnel.service",
+    "only_added_read_write_path": "%h/.local/share/mncs-environment/store",
+    "effective_path": "/home/epi13/.local/share/mncs-environment/store",
+    "retained_restrictions": {
+      "ProtectSystem": "strict",
+      "ProtectHome": "read-only",
+      "NoNewPrivileges": true
+    },
+    "installed_unit_matches_tracked_source": true
+  },
+  "runtime": {
+    "service": "mncs-control-tunnel.service",
+    "active": true,
+    "environment_rpc": {
+      "provider": "mncs-control-environment-rpc",
+      "state": "ready",
+      "authorization": "per-execution-grant-and-peer-credentials",
+      "principal_id": "ctrl_239c9b758998589eb0fb1d069f8b5927",
+      "store_mutation": "owner-write-path-available"
+    },
+    "control_source_revision": "d3b08e032b29e91106b70a741e1502a3f7638dd7",
+    "control_runtime_revision": "d3b08e032b29e91106b70a741e1502a3f7638dd7"
+  },
+  "protected_execution": {
+    "backend": "bwrap",
+    "project": "mncs-environment",
+    "uid": 1000,
+    "persistence_transport": "control-rpc",
+    "canonical_store_path_visible": false,
+    "canonical_store_path_writable": false
+  },
+  "canonical_store_operations": {
+    "campaign_id": "cmp_mncs_continuity_20261010",
+    "session_id": "ses_7226fbcfe65820f7",
+    "session_lifecycle": "active",
+    "checkpoint": {
+      "identity": "chk_77127150d565add7",
+      "sequence": 8,
+      "request_id": "req_storeaccept20261010checkpoint01",
+      "read_in_new_protected_process": true,
+      "same_identity_returned_after_control_service_restarts": true,
+      "identity_count_after_reconciliation": 1
+    },
+    "claim": {
+      "claim_id": "claim:mncs-environment:paths:8a6c3d64fd9f",
+      "identity": "clm_d056a72505b13625",
+      "acquire_request_id": "req_storeaccept20261010claimacquire01",
+      "release_request_id": "req_storeaccept20261010claimrelease01",
+      "scope_kind": "paths",
+      "scope_paths": [
+        ".mncs/acceptance/store-transport-20261010"
+      ],
+      "exclusive": false,
+      "release_returned_true": true,
+      "fresh_process_readback_verdict": "released"
+    },
+    "invalid_capability": {
+      "transport": "live Control Environment Unix socket from protected bwrap",
+      "result": "ENVIRONMENT_AUTHORITY_DENIED",
+      "publication_completed": false
+    },
+    "request_identity_reuse_with_changed_payload": {
+      "result": "rejected",
+      "publication_completed": false
+    },
+    "caller_or_service_interruption": {
+      "outcome_was_ambiguous": true,
+      "stable_request_retried_after_service_restart": true,
+      "durable_checkpoint_readback_count": 1
+    }
+  },
+  "verification": {
+    "systemd_analyze_verify": "passed",
+    "control_environment_rpc_tests": {
+      "command": "python -m pytest -q tests/test_environment_rpc.py",
+      "result": "10 passed"
+    },
+    "environment_continuity_tests": {
+      "command": "python -m pytest -q tests/test_environment.py -k 'transfer_retry_reconciles_lost_response_atomically or concurrent_transfers_fence_competing_recipients or checkpoint_retry_after_restart_reads_original_operation or authenticated_campaign_capsule_survives_fresh_session_object or authenticated_entry_discovers_unique_campaign_without_campaign_id'",
+      "result": "5 passed, 127 deselected"
+    },
+    "canonical_store_stale_generation_evidence": {
+      "path": "mncs-store/evidence/campaign-store-continuity-20261009.json",
+      "store_revision": "0f1b2c3d6fceb6c8e7d5f985f78fce7bd6080ff3",
+      "result": "STALE_GENERATION",
+      "expected_generation": 42856,
+      "observed_generation": 42857,
+      "fresh_process_recovery_and_exact_readback": true,
+      "current_store_main": "40dc47cd250d12ccf3e9f2cf89998f512fdc0055",
+      "store_code_changed_since_tested_revision": false
+    },
+    "current_store_stale_writer_test_attempt": {
+      "command": "python -m pytest -q tests/test_phase2.py::test_generations_and_stale_writer_conflict",
+      "result": "cancelled after 334 seconds while MNCS manifest execution remained active; no pytest result",
+      "used_as_pass_evidence": false
+    }
+  },
+  "ownership": {
+    "control_claim": {
+      "claim_id": "claim:mncs-control-mcp",
+      "owner_session": "ses_7226fbcfe65820f7",
+      "verdict": "live"
+    },
+    "environment_claim": {
+      "claim_id": "claim:mncs-environment",
+      "owner_session": "ses_7226fbcfe65820f7",
+      "verdict": "not-recoverable",
+      "lease_expires_at": "2026-10-12T19:38:47+00:00"
+    },
+    "compiler_language_forge_candidates_touched": false
+  },
+  "limitations": [
+    "The current protected RPC acceptance proves canonical checkpoint and claim publication, authentication rejection, stable retry, and fresh-process readback. It did not inject a raw stale Store generation through the Environment domain API; the stale generation result is from the canonical Store owner evidence cited above.",
+    "Compiler candidate delivery, the full self-host matrix, and the compiler resource-feedback vertical slice remain separate pending work."
+  ]
+}
