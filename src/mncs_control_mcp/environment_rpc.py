@@ -418,7 +418,18 @@ class EnvironmentRPCServer:
                     while current == record.host_root or record.host_root in current.parents:
                         candidate = current / ".mncs" / "environment.json"
                         if candidate.is_file():
-                            definition_path = candidate
+                            definition_path = candidate.resolve(strict=True)
+                            if (
+                                definition_path != record.host_root
+                                and record.host_root not in definition_path.parents
+                            ):
+                                raise ControlError(
+                                    "ENVIRONMENT_WORKSPACE_ESCAPE",
+                                    "discovered Environment definition exceeds the execution grant",
+                                    details={
+                                        "next": "select a definition inside the authorized workspace"
+                                    },
+                                )
                             break
                         if (current / ".git").exists() or current == record.host_root:
                             break

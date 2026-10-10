@@ -103,6 +103,14 @@ def test_entry_preserves_and_bounds_configured_workspace_root(tmp_path: Path) ->
         server._translate_argv(["enter"], project, project_grant)
     assert raised.value.code == "ENVIRONMENT_WORKSPACE_ESCAPE"
 
+    outside_definition = tmp_path / "outside-environment.json"
+    outside_definition.write_text(json.dumps({"workspace_root": "."}), encoding="utf-8")
+    definition.unlink()
+    definition.symlink_to(outside_definition)
+    with pytest.raises(ControlError, match="discovered Environment definition") as raised:
+        server._translate_argv(["enter"], project, workspace_grant)
+    assert raised.value.code == "ENVIRONMENT_WORKSPACE_ESCAPE"
+
 
 def test_retry_identity_replays_across_fresh_execution_grants(tmp_path: Path) -> None:
     server = EnvironmentRPCServer(
