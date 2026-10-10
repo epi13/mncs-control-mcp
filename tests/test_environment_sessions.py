@@ -8,6 +8,7 @@ reports unavailable instead of inventing state.
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -112,3 +113,28 @@ def test_missing_checkout_reports_unavailable(tmp_path: Path) -> None:
     with pytest.raises(ControlError) as excinfo:
         service.enter({"name": "x"}, "consumer")
     assert excinfo.value.code == "ENVIRONMENT_UNAVAILABLE"
+
+
+def test_inspection_rejects_a_foreign_authenticated_session(tmp_path: Path) -> None:
+    service = EnvironmentService(_config(tmp_path))
+    service.authenticated_principal_id = "principal-caller"
+
+    class Store:
+        def load_snapshot(self, _session_id: str):
+            return {"authenticated_principal_id": "principal-owner"}
+
+        def close(self) -> None:
+            pass
+
+    class Session:
+        @staticmethod
+        def open(**_kwargs):
+            raise AssertionError("foreign session must be rejected before inspection")
+
+    package = SimpleNamespace(sessions=SimpleNamespace(Session=Session))
+    service._pkg = lambda: package
+    service._store = lambda _pkg: Store()
+
+    with pytest.raises(ControlError) as excinfo:
+        service.inspect("ses_foreign")
+    assert excinfo.value.code == "ENVIRONMENT_AUTHORITY_DENIED"

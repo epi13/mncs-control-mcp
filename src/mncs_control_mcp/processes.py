@@ -124,6 +124,7 @@ class ProcessManager:
         self.policy = policy
         self.sandbox = sandbox
         self._jobs: dict[str, TerminalJob] = {}
+        self._environment_grants: dict[str, object] = {}
         self._external_futures: dict[str, Future[object]] = {}
         self._external_results: dict[str, object] = {}
         self._external_processes: dict[str, multiprocessing.Process] = {}
@@ -223,12 +224,22 @@ class ProcessManager:
         if timeout <= 0 or timeout > self.config.max_timeout_seconds:
             raise ControlError("INVALID_TIMEOUT", "timeout exceeds the configured terminal limit")
         resolution = self.policy.resolve_scope(scope=scope, project=project, cwd=cwd)
-        argv, network_enabled = self.sandbox.command_argv(
-            command, resolution, network=network, environment=environment
-        )
+        rpc = self.sandbox.environment_rpc
+        rpc_grant = rpc.issue_grant(resolution) if rpc is not None else None
+        try:
+            argv, network_enabled = self.sandbox.command_argv(
+                command, resolution, network=network, environment=environment,
+                environment_rpc_grant=rpc_grant,
+            )
+        except Exception:
+            if rpc is not None:
+                rpc.revoke_grant(rpc_grant)
+            raise
         with self._lock:
             running = sum(job.status == "running" for job in self._jobs.values())
             if running >= self.config.max_concurrent_jobs:
+                if rpc is not None:
+                    rpc.revoke_grant(rpc_grant)
                 raise ControlError("JOB_LIMIT", "maximum concurrent terminal jobs reached")
             try:
                 process = subprocess.Popen(
@@ -241,6 +252,8 @@ class ProcessManager:
                     start_new_session=True,
                 )
             except OSError as exc:
+                if rpc is not None:
+                    rpc.revoke_grant(rpc_grant)
                 raise ControlError("COMMAND_START_FAILED", str(exc)) from exc
             job = TerminalJob(
                 job_id="term-" + secrets.token_hex(12),
@@ -256,6 +269,8 @@ class ProcessManager:
                 stderr=_LogBuffer(self.config.max_output_bytes),
             )
             self._jobs[job.job_id] = job
+            if rpc_grant is not None:
+                self._environment_grants[job.job_id] = rpc_grant
             self._persist()
         assert process.stdout is not None and process.stderr is not None
         threading.Thread(target=self._drain, args=(process.stdout, job.stdout), daemon=True).start()
@@ -287,6 +302,9 @@ class ProcessManager:
             job.completed_at = utc_now()
             job.status = "stopped" if job.stopped else "timed_out" if job.timed_out else "completed" if job.exit_code == 0 else "failed"
             self._persist()
+            grant = self._environment_grants.pop(job.job_id, None)
+        if grant is not None:
+            self.sandbox.environment_rpc.revoke_grant(grant)
 
     def _get(self, job_id: str) -> TerminalJob:
         with self._lock:
@@ -611,6 +629,12 @@ class ProcessManager:
                 process.wait(timeout=remaining)
             except subprocess.TimeoutExpired:
                 self._signal(job, signal.SIGKILL)
+        with self._lock:
+            grants = list(self._environment_grants.values())
+            self._environment_grants.clear()
+        if self.sandbox.environment_rpc is not None:
+            for grant in grants:
+                self.sandbox.environment_rpc.revoke_grant(grant)
         for future in tuple(self._external_futures.values()):
             future.cancel()
         for job_id, cancellation in tuple(self._external_cancel.items()):

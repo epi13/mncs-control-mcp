@@ -77,6 +77,20 @@ directory without making `$HOME`, `.ssh`, `.config`, or `/run/user` writable.
 Podman and other tools that require host daemon sockets may remain degraded
 until an explicit, least-privilege adapter exists.
 
+### Environment persistence transport
+
+Control owns a private AF_UNIX Environment endpoint beside its service state.
+For each protected terminal run it issues an unguessable short-lived grant,
+mounts only that grant and the endpoint socket into the sandbox, and revokes the
+grant when the run exits. The endpoint checks Unix peer credentials and the
+grant, then admits a bounded Environment CLI operation against the configured
+canonical Store. It does not accept Store paths, pass file descriptors, or
+expose a general filesystem proxy. Environment still validates campaign
+ownership, rights, claims, and Store generations. The default endpoint can be
+overridden with the Control integration setting `environment_rpc_socket`.
+`env_status` and `system_status` report its live availability; a missing
+endpoint does not trigger file persistence or direct Store writes.
+
 ## Audit
 
 Audit JSONL lives outside the workspace, mode 0600 under a 0700 directory. It contains bounded/redacted metadata, not full file contents or environment data. Generic workspace tools cannot address it.

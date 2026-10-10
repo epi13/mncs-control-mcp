@@ -69,6 +69,7 @@ class Sandbox:
     def __init__(self, config: ControlConfig, policy: WorkspacePolicy) -> None:
         self.config = config
         self.policy = policy
+        self.environment_rpc = None
         discovered = shutil.which("bwrap")
         requested = config.sandbox_backend
         if requested == "bwrap" and discovered is None:
@@ -264,6 +265,7 @@ class Sandbox:
         environment: dict[str, str] | None = None,
         use_ssh_agent: bool = False,
         runtime_mounts: tuple[tuple[Path, str], ...] = (),
+        environment_rpc_grant: object | None = None,
     ) -> tuple[list[str], bool]:
         if (
             not isinstance(command, str)
@@ -276,6 +278,13 @@ class Sandbox:
         safe_overrides = validate_environment(
             {**self.config.safe_environment, **(environment or {})}
         )
+        environment_client_parent: str | None = None
+        rpc_variables = {
+            "MNCS_ENV_PERSISTENCE_TRANSPORT", "MNCS_ENV_RPC_SOCKET",
+            "MNCS_ENV_RPC_GRANT_FILE", "MNCS_ENV_AUTH_PRINCIPAL_ID",
+        }
+        if rpc_variables.intersection(self.config.safe_environment) or rpc_variables.intersection(environment or {}):
+            raise ControlError("UNSAFE_ENVIRONMENT", "Environment RPC variables are Control-managed")
         if self.executable is None:
             raise ControlError("SANDBOX_UNAVAILABLE", "terminal execution requires bubblewrap")
 
@@ -330,6 +339,33 @@ class Sandbox:
             "/home/developer",
         ]
         argv.extend(self._workspace_host_alias_args())
+        if environment_rpc_grant is not None:
+            if self.environment_rpc is None:
+                raise ControlError("ENVIRONMENT_PERSISTENCE_UNAVAILABLE",
+                                   "Environment grant has no owning Control service")
+            socket_path = Path(self.environment_rpc.socket_path).resolve(strict=True)
+            grant_path = self.environment_rpc.grant_mount_source(environment_rpc_grant).resolve(strict=True)
+            argv.extend(("--dir", "/run/mncs-environment-rpc"))
+            argv.extend(("--ro-bind", str(socket_path),
+                         "/run/mncs-environment-rpc/environment.sock"))
+            argv.extend(("--ro-bind", str(grant_path),
+                         environment_rpc_grant.sandbox_token_file))
+            environment_root = getattr(
+                self.environment_rpc.environment_service, "environment_path", None
+            )
+            if environment_root is not None:
+                client_package = Path(environment_root) / "mncs_env"
+                if client_package.is_dir() and (client_package / "__init__.py").is_file():
+                    client_package = client_package.resolve(strict=True)
+                    environment_client_parent = "/run/mncs-environment-rpc/python"
+                    argv.extend(("--dir", environment_client_parent))
+                    argv.extend(("--ro-bind", str(client_package),
+                                 environment_client_parent + "/mncs_env"))
+            safe_overrides.update({
+                "MNCS_ENV_PERSISTENCE_TRANSPORT": "control-rpc",
+                "MNCS_ENV_RPC_SOCKET": "/run/mncs-environment-rpc/environment.sock",
+                "MNCS_ENV_RPC_GRANT_FILE": str(environment_rpc_grant.sandbox_token_file),
+            })
         if not network_enabled:
             argv.append("--unshare-net")
         else:
@@ -354,6 +390,11 @@ class Sandbox:
             argv.extend(("--bind", str(resolution.host_root), f"/workspace/{resolution.project}"))
 
         self._project_harness_runtime(argv, safe_overrides)
+        if environment_client_parent is not None:
+            existing_pythonpath = safe_overrides.get("PYTHONPATH", "")
+            safe_overrides["PYTHONPATH"] = ":".join(
+                part for part in (environment_client_parent, existing_pythonpath) if part
+            )
 
         # Integrations may request narrowly scoped writable runtime mounts.  A
         # caller cannot mount arbitrary host paths: only directories already
@@ -505,14 +546,22 @@ class Sandbox:
         )
         if timeout <= 0 or timeout > self.config.max_timeout_seconds:
             raise ControlError("INVALID_TIMEOUT", "timeout exceeds the configured terminal limit")
-        argv, network_enabled = self.command_argv(
-            command,
-            resolution,
-            network=network,
-            environment=environment,
-            use_ssh_agent=use_ssh_agent,
-            runtime_mounts=runtime_mounts,
-        )
+        rpc = self.environment_rpc
+        rpc_grant = rpc.issue_grant(resolution) if rpc is not None else None
+        try:
+            argv, network_enabled = self.command_argv(
+                command,
+                resolution,
+                network=network,
+                environment=environment,
+                use_ssh_agent=use_ssh_agent,
+                runtime_mounts=runtime_mounts,
+                environment_rpc_grant=rpc_grant,
+            )
+        except Exception:
+            if rpc is not None:
+                rpc.revoke_grant(rpc_grant)
+            raise
         started_at = utc_now()
         started = time.monotonic()
         try:
@@ -526,14 +575,20 @@ class Sandbox:
                 start_new_session=True,
             )
         except OSError as exc:
+            if rpc is not None:
+                rpc.revoke_grant(rpc_grant)
             raise ControlError("COMMAND_START_FAILED", str(exc)) from exc
-        stdout, stderr, truncated = _communicate_bounded(
-            process, self.config.max_output_bytes, timeout, input_bytes=input_bytes
-        )
-        timed_out = process.poll() is None
-        if timed_out:
-            _terminate_group(process)
-        process.wait()
+        try:
+            stdout, stderr, truncated = _communicate_bounded(
+                process, self.config.max_output_bytes, timeout, input_bytes=input_bytes
+            )
+            timed_out = process.poll() is None
+            if timed_out:
+                _terminate_group(process)
+            process.wait()
+        finally:
+            if rpc is not None:
+                rpc.revoke_grant(rpc_grant)
         return SandboxResult(
             command=command,
             cwd=resolution.sandbox_cwd,

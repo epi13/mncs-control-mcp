@@ -2,12 +2,17 @@ from __future__ import annotations
 
 import os
 import shutil
+import subprocess
+import tempfile
 import time
+from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from mncs_control_mcp.audit import AuditLog
+from mncs_control_mcp.environment_rpc import EnvironmentRPCServer
 from mncs_control_mcp.errors import ControlError
 from mncs_control_mcp.processes import ProcessManager
 from mncs_control_mcp.sandbox import Sandbox
@@ -66,6 +71,73 @@ def test_real_bwrap_blocks_home_and_project_sibling_mutation(config) -> None:
     )
     assert "--unshare-net" not in network_argv
     assert enabled is True
+
+
+@pytest.mark.requires_bwrap_namespace
+def test_environment_grant_is_mounted_only_in_its_execution(config) -> None:
+    project = config.workspace_root / "alpha"
+    project.mkdir()
+    environment_root = config.workspace_root / "environment-client"
+    client_package = environment_root / "mncs_env"
+    client_package.mkdir(parents=True)
+    (client_package / "__init__.py").write_text("VALUE = 'mounted-client'\n")
+    policy = WorkspacePolicy(config)
+    private_root = Path(tempfile.mkdtemp(prefix="mncsr-", dir="/tmp"))
+    endpoint_config = replace(
+        config,
+        environment_rpc_socket=private_root / "environment.sock",
+    )
+    rpc = EnvironmentRPCServer(
+        endpoint_config,
+        environment_service=SimpleNamespace(
+            state_dir=config.job_state_path.parent / "env-state",
+            environment_path=environment_root,
+        ),
+        policy=policy,
+    )
+    rpc.start()
+    first_sandbox = Sandbox(config, policy)
+    first_sandbox.environment_rpc = rpc
+    resolution = policy.resolve_scope(scope="project", project="alpha", cwd=".")
+    grant = rpc.issue_grant(resolution)
+    argv, _enabled = first_sandbox.command_argv(
+        "python3 -c 'import mncs_env; open(\"client-ready\", \"w\").write(mncs_env.VALUE)' "
+        "&& echo ready > ready; sleep 5",
+        resolution,
+        network=False,
+        environment_rpc_grant=grant,
+    )
+    process = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env={})
+    try:
+        deadline = time.monotonic() + 3
+        while not (project / "ready").is_file() and time.monotonic() < deadline:
+            if process.poll() is not None:
+                raise AssertionError(process.stderr.read().decode(errors="replace"))
+            time.sleep(0.02)
+        assert (project / "ready").is_file()
+        assert (project / "client-ready").read_text() == "mounted-client"
+        second_sandbox = Sandbox(config, policy)
+        result = second_sandbox.run(
+            "test ! -e /run/mncs-environment-rpc/grant && "
+            "test ! -S /run/mncs-environment-rpc/environment.sock && "
+            "test ! -d /run/mncs-environment-rpc/python/mncs_env",
+            scope="project",
+            project="alpha",
+            cwd=".",
+            timeout_seconds=10,
+            network=False,
+        )
+        assert result.exit_code == 0, result.stderr
+    finally:
+        process.terminate()
+        try:
+            process.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=3)
+        rpc.revoke_grant(grant)
+        rpc.close()
+        shutil.rmtree(private_root)
 
 
 @pytest.mark.requires_bwrap_namespace

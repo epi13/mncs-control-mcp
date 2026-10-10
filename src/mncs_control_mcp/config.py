@@ -190,6 +190,9 @@ class ControlConfig:
         return self.workspace_root / self.repositories.get("language", "mncs-language")
 
     environment_state_dir: Path | None = None
+    environment_rpc_socket: Path = field(
+        default_factory=lambda: Path.home() / ".local" / "state" / "mncs-control-mcp" / "environment-rpc" / "environment.sock"
+    )
 
     @property
     def environment_path(self) -> Path:
@@ -428,6 +431,11 @@ def load_config(path: Path | str | None = None) -> ControlConfig:
             Path.home() / ".local" / "state" / "mncs-commons" / "commons-operator.sock",
         ),
         commons_service_timeout_seconds=commons_timeout,
+        environment_rpc_socket=state_path(
+            integration,
+            "environment_rpc_socket",
+            Path.home() / ".local" / "state" / "mncs-control-mcp" / "environment-rpc" / "environment.sock",
+        ),
         fabric_execution_mode=fabric_execution_mode,
         fabric_controller_id=str(integration.get("fabric_controller_id", "mncs-harness")),
         forge_config_name=str(integration.get("forge_config_name", "mncs-forge.toml")),

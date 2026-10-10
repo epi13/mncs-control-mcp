@@ -66,6 +66,7 @@ class EnvironmentService:
 
     def __init__(self, config: ControlConfig) -> None:
         self._config = config
+        self.authenticated_principal_id: str | None = None
 
     @property
     def environment_path(self) -> Path:
@@ -79,7 +80,8 @@ class EnvironmentService:
 
     def _pkg(self) -> Any:
         try:
-            return _load_flat_package(PACKAGE, self.environment_path, ("sessions", "session_store"))
+            return _load_flat_package(PACKAGE, self.environment_path,
+                                      ("sessions", "session_store", "entry"))
         except ControlError:
             raise
         except Exception as exc:
@@ -139,62 +141,66 @@ class EnvironmentService:
         workspace: str | None = None,
         consumer_kind: str = "agent",
     ) -> dict[str, Any]:
-        sessions = self._sessions()
+        pkg = self._pkg()
         workspace_root = self._resolve_workspace(workspace)
-        store = self._store(self._pkg())
         try:
-            environment = sessions.resolve_environment(
+            return pkg.entry.enter(
                 definition=definition,
-                workspace_root=workspace_root,
+                definition_path=None,
+                workspace_root=str(workspace_root),
                 state_dir=self.state_dir,
+                backend="store",
                 consumer_id=consumer,
-                store=store,
+                consumer_kind=consumer_kind,
+                authenticated_principal_id=self.authenticated_principal_id,
             )
-            try:
-                session = sessions.Session.create(
-                    state_dir=self.state_dir,
-                    environment=environment,
-                    consumer_id=consumer,
-                    consumer_kind=consumer_kind,
-                    store=store,
-                )
-            except Exception as exc:
-                name = type(exc).__name__
-                if name in ("RightsBlocked", "AuthorityDenied"):
-                    raise ControlError("ENVIRONMENT_ENTER_DENIED", str(exc)) from exc
-                raise
-            session.transition("resolving", "control: resolving environment")
-            session.transition("ready", "control: environment resolved")
-            session.transition("active", f"control: consumer {consumer} entered")
-            return session.inspect()
         except ControlError:
             raise
         except Exception as exc:
+            if type(exc).__name__ == "RightsBlocked":
+                raise ControlError("ENVIRONMENT_ENTER_DENIED", str(exc)) from exc
+            if type(exc).__name__ == "AuthorityDenied":
+                raise ControlError("ENVIRONMENT_AUTHORITY_DENIED", str(exc)) from exc
             raise ControlError("ENVIRONMENT_ENTER_FAILED", str(exc)) from exc
-        finally:
-            close = getattr(store, "close", None)
-            if callable(close):
-                close()
 
     def _open_session(self, sessions: Any, store: Any, session_id: str) -> Any:
         try:
+            self._authorize_session(store, session_id)
             return sessions.Session.resume(
                 state_dir=self.state_dir, session_id=session_id, store=store
             )
+        except ControlError:
+            raise
         except Exception as exc:
             name = type(exc).__name__
             if name == "LifecycleError":
                 raise ControlError("ENVIRONMENT_SESSION_TERMINAL", str(exc)) from exc
             raise ControlError("ENVIRONMENT_SESSION_MISSING", str(exc)) from exc
 
+    def _authorize_session(self, store: Any, session_id: str) -> dict[str, Any]:
+        snapshot = store.load_snapshot(session_id)
+        if not isinstance(snapshot, dict):
+            raise ControlError("ENVIRONMENT_SESSION_MISSING",
+                               f"session {session_id} is not in canonical Store")
+        if (self.authenticated_principal_id is not None
+                and snapshot.get("authenticated_principal_id") != self.authenticated_principal_id):
+            raise ControlError("ENVIRONMENT_AUTHORITY_DENIED",
+                               "session lacks Control-authenticated continuation provenance",
+                               details={"session_id": session_id,
+                                        "next": "request an explicit handoff from the recorded owner"})
+        return snapshot
+
     def inspect(self, session_id: str) -> dict[str, Any]:
         sessions = self._sessions()
         store = self._store(self._pkg())
         try:
+            self._authorize_session(store, session_id)
             session = sessions.Session.open(
                 state_dir=self.state_dir, session_id=session_id, store=store
             )
             return session.inspect()
+        except ControlError:
+            raise
         except Exception as exc:
             raise ControlError("ENVIRONMENT_SESSION_MISSING", str(exc)) from exc
         finally:

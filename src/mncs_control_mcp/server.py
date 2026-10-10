@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import atexit
 import json
 import logging
 import os
@@ -17,6 +18,7 @@ from .audit import AuditLog
 from .config import ControlConfig, load_config
 from .control_plane import ControlPlaneService
 from .deployment import repository_revision
+from .environment_rpc import EnvironmentRPCServer
 from .environment_sessions import EnvironmentService
 from .errors import ControlError
 from .experiments import ExperimentManager
@@ -90,6 +92,11 @@ def build_server(config: ControlConfig | None = None) -> Any:
     projects = ProjectService(selected, policy, sandbox, git)
     inventory = ToolInventory(selected)
     environment_sessions = EnvironmentService(selected)
+    environment_rpc = EnvironmentRPCServer(selected, environment_sessions, policy)
+    environment_rpc.start()
+    environment_sessions.authenticated_principal_id = environment_rpc.principal_id
+    sandbox.environment_rpc = environment_rpc
+    atexit.register(environment_rpc.close)
     control_plane = ControlPlaneService(
         selected, policy, sandbox, projects, git, integrations.tests, integrations, processes, journal_context
     )
@@ -581,7 +588,12 @@ def build_server(config: ControlConfig | None = None) -> Any:
 
     @server.tool(name="env_status", description="Report whether the sibling mncs-environment checkout is available, with session schema and Store versions.", annotations=ro, structured_output=True)
     def env_status() -> dict[str, object]:
-        return invoke("env_status", environment_sessions.status)  # type: ignore[return-value]
+        def view() -> dict[str, object]:
+            return {
+                **environment_sessions.status(),
+                "persistence_transport": environment_rpc.status(),
+            }
+        return invoke("env_status", view)  # type: ignore[return-value]
 
     @server.tool(name="env_enter", description="Resolve an environment definition and enter it as a durable session: tri-state authority, rights gate, and lifecycle to active.", annotations=mutate, structured_output=True)
     def env_enter(definition: dict[str, object], consumer: str, workspace: str | None = None, consumer_kind: str = "agent") -> dict[str, object]:
@@ -630,6 +642,7 @@ def build_server(config: ControlConfig | None = None) -> Any:
                 "commons": integrations.commons.status(),
                 "fabric": fabric,
                 "forge": integrations.forge.status(),
+                "environment_persistence": environment_rpc.status(),
                 "server": {
                     "name": selected.name,
                     "version": __version__,
