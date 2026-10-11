@@ -1,0 +1,121 @@
+{
+  "schema_version": "mncs.control.protected-canonical-store-verify-proof/1",
+  "identity": "ev_control_store_verify_rpc_20261011",
+  "recorded_at": "2026-10-11T21:46:21Z",
+  "owner": "mncs-control-mcp",
+  "campaign_identity": "cmp_mncs_continuity_20261010",
+  "environment_session_id": "ses_7226fbcfe65820f7",
+  "source": {
+    "control": {
+      "repository": "mncs-control-mcp",
+      "revision": "8e84ceb3e91cd9955d4138129b3b2c0e29e26c3a",
+      "working_tree_before_evidence": "clean",
+      "files": {
+        "src/mncs_control_mcp/environment_rpc.py": "86c034e8147bd59b1d68ddd92712491d30bad49d22666da98164eb413c8b51f2",
+        "tests/test_environment_rpc.py": "dfe150ab03f4afa1b821fe587be45393b4897b91ae8a55f9cb11032e3696f1fc",
+        "docs/SECURITY.md": "28e392b306e5eb758450996ed55f9da4bf9519b218b91cc86560b0da2b001a70"
+      }
+    },
+    "environment": {
+      "repository": "mncs-environment",
+      "revision": "f5069486a61fe6942c811118d2a29ac06d966ffa",
+      "files": {
+        "mncs_env/cli.py": "59c6eebb7ce8433fcd833e0e96380e4ec936f8f4a5283a7a1463fe8ea7ffafa4",
+        "mncs_env/rpc_client.py": "0200a517d7daff5fd0683a5d357f6c0d71ebc0a13df87ddbdddc10aee5dc9a1d",
+        "mncs_env/session_store.py": "a68bee6a46a09d9c1df4bdca96589f9f5a82d6c919dbfc3367b9b08624a99dea",
+        "mncs_env/store_backend.py": "3fa0dc9b17f4984b6b2b2dd9654f0f50ddeba809420dd2c49dca6efb119bb7cf"
+      }
+    },
+    "store": {
+      "repository": "mncs-store",
+      "revision": "40dc47cd250d12ccf3e9f2cf89998f512fdc0055",
+      "python_package": "/home/epi13/Documents/Projects/mncs-store/python",
+      "session_provider_override": null,
+      "files": {
+        "python/mncs_store/embedded.py": "81ebc11d91cbabb38337bf4bb27ac2c2ccf617c08d2f65c368764f10b2177450"
+      }
+    }
+  },
+  "operation_contract": {
+    "exact_client_argv": [
+      "store",
+      "--session",
+      "<authenticated-session>",
+      "--verify"
+    ],
+    "authorization": "Control validates the session snapshot principal against the short-lived authenticated grant before invoking Environment.",
+    "serialization": "The request is serialized on the authorized session identity.",
+    "fixed_persistence": "Control supplies its configured state directory and the Store backend.",
+    "domain_owner": "mncs-environment",
+    "persistence_owner": "mncs-store",
+    "store_paths_or_file_descriptors_exposed_to_client": false,
+    "other_store_commands_or_roots_exposed": false
+  },
+  "host_service": {
+    "unit": "user/mncs-control-tunnel.service",
+    "unit_file_sha256": "b1b56bf1eea0c16c40b48200361c98fc77d0a1dc6c35d18d2bbfc8e29064a285",
+    "active_after_source_restart": true,
+    "active_enter_timestamp": "2026-10-11 13:36:32 AKDT",
+    "protect_system": "strict",
+    "protect_home": "read-only",
+    "no_new_privileges": true,
+    "canonical_store_read_write_path_was_already_present": true
+  },
+  "protected_execution": {
+    "sandbox_backend": "bwrap",
+    "scope": "project",
+    "project": "mncs-environment",
+    "network": false,
+    "canonical_store_root": "/home/epi13/.local/share/mncs-environment/store",
+    "canonical_store_path_visible_to_client": false,
+    "canonical_store_path_writable_by_client": false,
+    "transport": "Control Sandbox plus authenticated EnvironmentRPCServer over a test-owned local AF_UNIX endpoint",
+    "canonical_store_redirected": false,
+    "temporary_test_state": "Only the local IPC endpoint and its short-lived grant used a temporary directory; the configured Environment state directory and canonical Store root were unchanged.",
+    "command": "python3 -B -m mncs_env.cli store --session ses_7226fbcfe65820f7 --verify",
+    "exit_code": 0
+  },
+  "store_verification": {
+    "status": "passed",
+    "generation": 45116,
+    "objects_verified": 45118,
+    "relations": 0,
+    "provenance_records": 0,
+    "commit_feed": "4d430100000000000000b03c0000b03e0000000000000000e28a24481665deb03b198bfcca352f713e80926c06ec8190a1faa40bf4bb5ca9",
+    "recovery": "RECOVERED_OLD",
+    "artifact": {
+      "sha256": "dca4d73fd237ba61d95a1458a157403f50fdb3b9adb35a7d601f91b14f9c56bf",
+      "backend": "mncs-research-bytecode",
+      "toolchain": "/home/epi13/Documents/Projects/mncs-language/target/release/mncs"
+    }
+  },
+  "validation": {
+    "focused_rpc_test": {
+      "command": ".venv/bin/python -m pytest -q tests/test_environment_rpc.py::test_store_verify_rpc_is_session_bound_and_read_only",
+      "result": "passed"
+    },
+    "focused_rpc_suite": {
+      "command": ".venv/bin/python -m pytest -q tests/test_environment_rpc.py",
+      "result": "passed",
+      "test_count": 30
+    },
+    "protected_bwrap_bridge_test": {
+      "command": ".venv/bin/python -m pytest -q tests/test_sandbox_terminal.py::test_project_bwrap_reads_campaign_capsule_through_environment_rpc",
+      "result": "passed",
+      "test_count": 1
+    },
+    "static_checks": {
+      "checks": [
+        "ruff check src/mncs_control_mcp/environment_rpc.py tests/test_environment_rpc.py",
+        "git diff --check"
+      ],
+      "result": "passed"
+    }
+  },
+  "related_canonical_write_acceptance": "mncs-environment/evidence/canonical-store-path-grant-acceptance-20261011.json",
+  "result": "PASS",
+  "limits": [
+    "The tunnel MCP terminal_exec request timed out after the systemd restart. The successful Bwrap proof used the same just-pushed Control Sandbox and RPC implementation in a test-owned host process, with the same configured canonical Store root and authenticated session. The running tunnel service remained active on the new source revision.",
+    "This evidence proves read-only canonical integrity verification. Checkpoint and claim publication are covered by the separately referenced canonical write acceptance; it does not replace that evidence."
+  ]
+}
