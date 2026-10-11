@@ -549,6 +549,38 @@ class EnvironmentRPCServer:
                 map_path_option(option)
             has_workspace = any(item == "--workspace" or item.startswith("--workspace=")
                                 for item in translated)
+            has_definition = any(
+                item == "--definition" or item.startswith("--definition=")
+                for item in translated
+            )
+            if record.scope == "project" and not has_definition:
+                # Project grants have a repository-scoped Environment
+                # definition. Keep that choice owner-controlled and explicit
+                # when invoking Environment, so its default discovery cannot
+                # fall through to the broader workspace definition.
+                project_definition = (
+                    record.host_root / ".mncs" / "project-environment.json"
+                )
+                if project_definition.exists() or project_definition.is_symlink():
+                    if project_definition.is_symlink() or not project_definition.is_file():
+                        raise ControlError(
+                            "ENVIRONMENT_WORKSPACE_ESCAPE",
+                            "project Environment definition must be a regular file",
+                        )
+                    try:
+                        resolved_definition = project_definition.resolve(strict=True)
+                    except OSError as error:
+                        raise ControlError(
+                            "ENVIRONMENT_WORKSPACE_MISSING",
+                            "project Environment definition is unavailable",
+                        ) from error
+                    if (resolved_definition != record.host_root
+                            and record.host_root not in resolved_definition.parents):
+                        raise ControlError(
+                            "ENVIRONMENT_WORKSPACE_ESCAPE",
+                            "project Environment definition exceeds the execution grant",
+                        )
+                    translated.extend(["--definition", str(resolved_definition)])
             if not has_workspace:
                 definition_path = next(
                     (

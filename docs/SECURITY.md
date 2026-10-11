@@ -132,6 +132,14 @@ Environment's recipient-bound accept operation.
 `env_enter` accepts an explicit campaign identity so a new process can ask
 Environment to reuse that durable campaign without relying on its consumer
 label.
+For a project grant, an `enter` request without `--definition` uses the
+project's `.mncs/project-environment.json` when present. That definition must
+select exactly the granted repository and leave `workspace_root` at its
+default; Control passes the configured host workspace root to Environment,
+which then applies the definition's one-repository selection. Explicit
+definitions remain caller-selected and receive the same grant checks. This
+lets a protected project process resume its recorded Environment identity
+without granting the sandbox access to sibling repositories.
 
 After successful project-scoped CLI entry, Control also attaches a
 `control_project_continuation` projection to the Environment JSON response.

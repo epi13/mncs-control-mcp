@@ -221,6 +221,91 @@ def test_project_campaign_entry_maps_only_the_granted_repository_workspace(
     ]
 
 
+def test_project_entry_selects_project_default_definition(tmp_path: Path) -> None:
+    workspace = tmp_path / "projects"
+    project = workspace / "mncs-environment"
+    config = project / ".mncs"
+    config.mkdir(parents=True)
+    (config / "environment.json").write_text(json.dumps({
+        "workspace_root": "../..",
+        "workspace_scope": {
+            "kind": "workspace",
+            "repositories": ["mncs-environment", "mncs-language"],
+        },
+    }), encoding="utf-8")
+    project_definition = config / "project-environment.json"
+    project_definition.write_text(json.dumps({
+        "workspace_scope": {"repositories": ["mncs-environment"]},
+    }), encoding="utf-8")
+    server = EnvironmentRPCServer(
+        ControlConfig(
+            workspace_root=workspace,
+            sandbox_home=tmp_path / "home",
+            environment_rpc_socket=tmp_path / "rpc" / "environment.sock",
+        ),
+        environment_service=SimpleNamespace(state_dir=tmp_path / "state"),
+        policy=object(),
+    )
+    grant = _GrantRecord(
+        grant_id="project-default-entry-grant",
+        principal_id="principal-test",
+        host_root=project,
+        sandbox_root="/workspace/mncs-environment",
+        scope="project",
+        uid=0,
+        expires_at=time.monotonic() + 60,
+        token_file=tmp_path / "grant",
+    )
+
+    translated = server._translate_argv(
+        ["enter", "--campaign-id", "cmp_test"], project, grant,
+    )
+
+    assert translated == [
+        "enter", "--campaign-id", "cmp_test",
+        "--definition", str(project_definition),
+        "--workspace", str(workspace),
+    ]
+
+
+def test_project_default_environment_definition_rejects_symlink(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "projects"
+    project = workspace / "mncs-environment"
+    config = project / ".mncs"
+    config.mkdir(parents=True)
+    outside_definition = tmp_path / "outside.json"
+    outside_definition.write_text(json.dumps({
+        "workspace_scope": {"repositories": ["mncs-environment"]},
+    }), encoding="utf-8")
+    (config / "project-environment.json").symlink_to(outside_definition)
+    server = EnvironmentRPCServer(
+        ControlConfig(
+            workspace_root=workspace,
+            sandbox_home=tmp_path / "home",
+            environment_rpc_socket=tmp_path / "rpc" / "environment.sock",
+        ),
+        environment_service=SimpleNamespace(state_dir=tmp_path / "state"),
+        policy=object(),
+    )
+    grant = _GrantRecord(
+        grant_id="project-default-entry-symlink-grant",
+        principal_id="principal-test",
+        host_root=project,
+        sandbox_root="/workspace/mncs-environment",
+        scope="project",
+        uid=0,
+        expires_at=time.monotonic() + 60,
+        token_file=tmp_path / "grant",
+    )
+
+    with pytest.raises(ControlError, match="must be a regular file") as raised:
+        server._translate_argv(["enter"], project, grant)
+
+    assert raised.value.code == "ENVIRONMENT_WORKSPACE_ESCAPE"
+
+
 def test_project_campaign_entry_rejects_definition_scope_widening(
     tmp_path: Path,
 ) -> None:
