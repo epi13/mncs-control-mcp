@@ -363,6 +363,134 @@ def test_project_entry_returns_campaign_capsule_without_changing_entry_authority
     assert calls == [("mncs-environment", "cmp_test")]
 
 
+def test_ambiguous_project_entry_returns_bounded_campaign_choices(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    workspace = tmp_path / "projects"
+    project = workspace / "mncs-environment"
+    project.mkdir(parents=True)
+    (project / "entry.json").write_text(json.dumps({
+        "workspace_scope": {"repositories": ["mncs-environment"]},
+    }), encoding="utf-8")
+    calls: list[tuple[str, str | None]] = []
+
+    class Environment:
+        state_dir = tmp_path / "state"
+        environment_path = tmp_path / "environment"
+        authenticated_principal_id = "principal-test"
+
+        def campaign_continuation(self, repository: str, campaign_id: str | None = None):
+            calls.append((repository, campaign_id))
+            return {
+                "schema_version": "mncs.control.campaign-continuation/1",
+                "repository": repository,
+                "status": "ambiguous-campaigns",
+                "campaigns_count": 2,
+                "campaigns": [
+                    {
+                        "campaign_id": "cmp_alpha",
+                        "status": "ready",
+                        "continuations": [{
+                            "session_id": "ses_alpha",
+                            "lifecycle": "active",
+                            "definition_id": "env_alpha",
+                            "workspace_root": "/projects",
+                            "project_reference": {"status": "linked"},
+                            "claim_ids": ["claim-alpha"],
+                            "checkpoint_ids": ["chk-alpha"],
+                            "repositories": [{
+                                "repository": repository,
+                                "branch": "campaign/alpha",
+                                "head": "a" * 40,
+                            }],
+                        }],
+                    },
+                    {
+                        "campaign_id": "cmp_beta",
+                        "status": "context-conflict",
+                        "continuations": [{
+                            "session_id": "ses_beta",
+                            "lifecycle": "active",
+                            "definition_id": "env_beta",
+                            "workspace_root": "/projects",
+                            "project_reference": {"status": "linked"},
+                            "claim_ids": [],
+                            "checkpoint_ids": [],
+                            "repositories": [],
+                        }],
+                    },
+                ],
+                "next": "select a campaign identity",
+            }
+
+    server = EnvironmentRPCServer(
+        ControlConfig(
+            workspace_root=workspace,
+            sandbox_home=tmp_path / "home",
+            environment_rpc_socket=tmp_path / "rpc" / "environment.sock",
+        ),
+        environment_service=Environment(),
+        policy=object(),
+    )
+    token = "project-entry-ambiguity"
+    server._grants[hashlib.sha256(token.encode()).hexdigest()] = _GrantRecord(
+        grant_id="project-entry-grant",
+        principal_id="principal-test",
+        host_root=project,
+        sandbox_root="/workspace/mncs-environment",
+        scope="project",
+        uid=0,
+        expires_at=time.monotonic() + 60,
+        token_file=tmp_path / "grant",
+    )
+
+    def run(_argv, **_kwargs):
+        return SimpleNamespace(
+            returncode=2,
+            stdout=json.dumps({
+                "error": "multiple durable campaigns match this environment",
+                "diagnostics": {
+                    "code": "campaign-continuation-ambiguous",
+                    "campaigns": ["cmp_alpha", "cmp_beta"],
+                    "sessions": ["ses_alpha", "ses_beta"],
+                    "next": "select the intended campaign identity",
+                },
+            }) + "\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr("mncs_control_mcp.environment_rpc.subprocess.run", run)
+    request = {
+        "grant": token,
+        "request_id": "req_entry_ambiguity_capsule",
+        "argv": ["enter", "--definition", "entry.json"],
+        "cwd": "/workspace/mncs-environment",
+    }
+
+    response = server.dispatch(request, peer_uid=0)
+    retry = server.dispatch(request, peer_uid=0)
+
+    assert response == retry
+    assert response["ok"] is True
+    result = response["result"]
+    assert result["exit_code"] == 2
+    diagnostic = json.loads(result["stdout"])["diagnostics"]
+    assert diagnostic["code"] == "campaign-continuation-ambiguous"
+    assert diagnostic["campaigns"] == ["cmp_alpha", "cmp_beta"]
+    capsule = diagnostic["continuation"]
+    assert capsule["schema_version"] == "mncs.control.project-entry-continuation/1"
+    assert capsule["status"] == "ambiguous-campaigns"
+    assert capsule["campaigns_count"] == 2
+    assert [item["campaign_id"] for item in capsule["campaign_statuses"]] == [
+        "cmp_alpha", "cmp_beta",
+    ]
+    assert [item["session_id"] for item in capsule["continuations"]] == [
+        "ses_alpha", "ses_beta",
+    ]
+    assert capsule["continuations"][0]["project_reference"] == {"status": "linked"}
+    assert calls == [("mncs-environment", None)]
+
+
 def test_campaign_capsule_rejects_wider_or_unbound_requests(tmp_path: Path) -> None:
     workspace = tmp_path / "projects"
     project = workspace / "mncs-environment"

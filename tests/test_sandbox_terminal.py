@@ -307,6 +307,137 @@ def test_project_bwrap_campaign_entry_reuses_session_without_session_id(config) 
 
 
 @pytest.mark.requires_bwrap_namespace
+def test_project_bwrap_ambiguous_entry_surfaces_campaign_capsules(config) -> None:
+    project = config.workspace_root / "mncs-environment"
+    project.mkdir()
+    subprocess.run(["git", "init", "--quiet", str(project)], check=True)
+    environment_root = Path(__file__).resolve().parents[2] / "mncs-environment"
+    fixture_source = environment_root / "tests" / "fixtures" / "control-rpc-entry.json"
+    manifest_source = environment_root / ".mncs" / "project.json"
+    if not (environment_root / "mncs_env" / "cli.py").is_file():
+        pytest.skip("sibling mncs-environment checkout is unavailable")
+    if not fixture_source.is_file() or not manifest_source.is_file():
+        pytest.skip("Environment campaign entry fixtures are unavailable")
+    definition_path = project / "tests" / "fixtures" / "control-rpc-entry.json"
+    definition_path.parent.mkdir(parents=True)
+    shutil.copyfile(fixture_source, definition_path)
+    manifest = project / ".mncs" / "project.json"
+    manifest.parent.mkdir(parents=True)
+    shutil.copyfile(manifest_source, manifest)
+
+    private_root = Path(tempfile.mkdtemp(prefix="mce-ambiguous-entry-", dir="/tmp"))
+    endpoint_config = replace(
+        config,
+        environment_rpc_socket=private_root / "environment.sock",
+    )
+    environment = SimpleNamespace(
+        state_dir=private_root / "environment-state",
+        environment_path=environment_root,
+        authenticated_principal_id=None,
+    )
+    calls: list[tuple[str, str | None]] = []
+
+    def campaign_continuation(repository: str, campaign_id: str | None = None):
+        calls.append((repository, campaign_id))
+        selected = [campaign_id] if campaign_id is not None else ["cmp_alpha", "cmp_beta"]
+        rows = []
+        for identity in selected:
+            rows.append({
+                "campaign_id": identity,
+                "status": "ready" if campaign_id is not None else "context-conflict",
+                "continuations": [{
+                    "session_id": f"ses_{identity.removeprefix('cmp_')}",
+                    "lifecycle": "active",
+                    "definition_id": f"env_{identity.removeprefix('cmp_')}",
+                    "workspace_root": str(config.workspace_root),
+                    "project_reference": {"status": "linked"},
+                    "claim_ids": [],
+                    "checkpoint_ids": [],
+                    "repositories": [{"repository": repository}],
+                }],
+            })
+        if campaign_id is not None:
+            return {
+                "schema_version": "mncs.control.campaign-continuation/1",
+                "campaign_id": campaign_id,
+                "repository": repository,
+                "status": "ready",
+                "continuations": rows[0]["continuations"],
+            }
+        return {
+            "schema_version": "mncs.control.campaign-continuation/1",
+            "repository": repository,
+            "status": "ambiguous-campaigns",
+            "campaigns_count": len(rows),
+            "campaigns": rows,
+            "next": "select the intended campaign identity",
+        }
+
+    environment.campaign_continuation = campaign_continuation
+    policy = WorkspacePolicy(config)
+    rpc = EnvironmentRPCServer(endpoint_config, environment, policy)
+    rpc.start()
+    environment.authenticated_principal_id = rpc.principal_id
+    sandbox = Sandbox(config, policy)
+    sandbox.environment_rpc = rpc
+    resolution = policy.resolve_scope(
+        scope="project", project="mncs-environment", cwd=".",
+    )
+    grant = rpc.issue_grant(resolution)
+
+    def enter(request_id: str, campaign_id: str | None = None):
+        selector = f" --campaign-id {campaign_id}" if campaign_id else ""
+        command = (
+            f"MNCS_ENV_RPC_REQUEST_ID={request_id} python3 -B -m mncs_env.cli enter "
+            "--definition tests/fixtures/control-rpc-entry.json "
+            f"--consumer campaign-agent{selector}"
+        )
+        argv, _enabled = sandbox.command_argv(
+            command,
+            resolution,
+            network=False,
+            environment_rpc_grant=grant,
+        )
+        return subprocess.run(
+            argv, capture_output=True, text=True, timeout=60, check=False, env={},
+        )
+
+    try:
+        first = enter("req_bwrap_entry_alpha", "cmp_alpha")
+        second = enter("req_bwrap_entry_beta", "cmp_beta")
+        assert first.returncode == 0, first.stdout + first.stderr
+        assert second.returncode == 0, second.stdout + second.stderr
+
+        ambiguous = enter("req_bwrap_entry_ambiguous")
+
+        assert ambiguous.returncode == 2
+        response = json.loads(ambiguous.stdout)
+        diagnostics = response["diagnostics"]
+        assert diagnostics["cause_code"] == "campaign-continuation-ambiguous"
+        details = diagnostics["domain_details"]
+        assert details["campaigns"] == ["cmp_alpha", "cmp_beta"]
+        capsule = details["continuation"]
+        assert capsule["status"] == "ambiguous-campaigns"
+        assert [item["campaign_id"] for item in capsule["campaign_statuses"]] == [
+            "cmp_alpha", "cmp_beta",
+        ]
+        assert {item["session_id"] for item in capsule["continuations"]} == {
+            "ses_alpha", "ses_beta",
+        }
+        assert all(item["project_reference"]["status"] == "linked"
+                   for item in capsule["continuations"])
+        assert calls == [
+            ("mncs-environment", "cmp_alpha"),
+            ("mncs-environment", "cmp_beta"),
+            ("mncs-environment", None),
+        ]
+    finally:
+        rpc.revoke_grant(grant)
+        rpc.close()
+        shutil.rmtree(private_root, ignore_errors=True)
+
+
+@pytest.mark.requires_bwrap_namespace
 def test_workspace_scope_can_mutate_siblings_but_not_real_home(config) -> None:
     (config.workspace_root / "alpha").mkdir()
     (config.workspace_root / "beta").mkdir()

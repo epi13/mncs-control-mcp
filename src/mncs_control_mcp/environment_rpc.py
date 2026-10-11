@@ -822,6 +822,13 @@ class EnvironmentRPCServer:
                 record, stdout, original_stdout_bytes=len(completed.stdout.encode("utf-8")),
                 output_limit=output_limit,
             )
+        elif command == "enter":
+            stdout, stderr = self._attach_project_entry_diagnostic(
+                record, stdout, stderr,
+                original_stdout_bytes=len(completed.stdout.encode("utf-8")),
+                original_stderr_bytes=len(completed.stderr.encode("utf-8")),
+                output_limit=output_limit,
+            )
         return {"ok": True, "result": {
             "exit_code": completed.returncode,
             "stdout": stdout,
@@ -959,6 +966,145 @@ class EnvironmentRPCServer:
         }
         rendered = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
         return rendered if len(rendered.encode("utf-8")) <= output_limit else stdout
+
+    def _attach_project_entry_diagnostic(
+        self, record: _GrantRecord, stdout: str, stderr: str, *,
+        original_stdout_bytes: int, original_stderr_bytes: int,
+        output_limit: int,
+    ) -> tuple[str, str]:
+        """Add bounded project choices to authenticated campaign-entry errors."""
+        if (record.scope != "project"
+                or original_stdout_bytes > output_limit
+                or original_stderr_bytes > output_limit
+                or getattr(self.environment_service, "authenticated_principal_id", None)
+                != record.principal_id):
+            return stdout, stderr
+
+        for stream_name, stream_value in (("stderr", stderr), ("stdout", stdout)):
+            try:
+                payload = json.loads(stream_value)
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if not isinstance(payload, dict) or not isinstance(payload.get("error"), str):
+                continue
+            diagnostics = payload.get("diagnostics")
+            if not isinstance(diagnostics, dict):
+                continue
+            if diagnostics.get("code") not in {
+                "campaign-continuation-ambiguous",
+                "campaign-context-mismatch",
+                "campaign-session-active",
+            }:
+                continue
+
+            try:
+                repository = self._project_repository(record)
+                campaign_id = diagnostics.get("campaign_id")
+                capsule = self.environment_service.campaign_continuation(
+                    repository,
+                    campaign_id if isinstance(campaign_id, str) else None,
+                )
+                if not isinstance(capsule, dict):
+                    raise TypeError("Environment returned a non-object continuation capsule")
+                projected = self._compact_entry_continuation(capsule)
+            except ControlError as error:
+                next_step = error.details.get("next") if isinstance(error.details, dict) else None
+                projected = {
+                    "schema_version": "mncs.control.project-entry-continuation/1",
+                    "repository": Path(record.host_root).name,
+                    "status": "unknown",
+                    "code": error.code,
+                    "next": next_step if isinstance(next_step, str) else (
+                        "run the project-scoped Environment continuation lookup"
+                    ),
+                }
+            except Exception:
+                projected = {
+                    "schema_version": "mncs.control.project-entry-continuation/1",
+                    "repository": Path(record.host_root).name,
+                    "status": "unknown",
+                    "code": "campaign-lookup-failed",
+                    "next": "run the project-scoped Environment continuation lookup",
+                }
+
+            if "continuation" not in diagnostics:
+                diagnostics["continuation"] = projected
+            else:
+                prior = diagnostics.get("continuations")
+                prior = prior if isinstance(prior, list) else []
+                diagnostics["continuations"] = [projected, *prior]
+            rendered = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+            if len(rendered.encode("utf-8")) > output_limit:
+                diagnostics["continuation"] = {
+                    "schema_version": "mncs.control.project-entry-continuation/1",
+                    "repository": Path(record.host_root).name,
+                    "campaign_id": diagnostics.get("campaign_id"),
+                    "status": "unknown",
+                    "code": "campaign-capsule-response-limit",
+                    "next": "run the project-scoped Environment continuation lookup",
+                }
+                diagnostics.pop("continuations", None)
+                rendered = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+            if len(rendered.encode("utf-8")) > output_limit:
+                return stdout, stderr
+            return (rendered, stderr) if stream_name == "stdout" else (stdout, rendered)
+        return stdout, stderr
+
+    @staticmethod
+    def _compact_entry_continuation(capsule: dict[str, Any]) -> dict[str, Any]:
+        """Flatten selection capsules so the bounded CLI diagnostic retains identities."""
+        session_fields = (
+            "session_id", "snapshot_version", "lifecycle", "consumer_id",
+            "consumer_kind", "current_campaign_consumer", "definition_id",
+            "workspace_root", "project_reference", "work_intent", "repositories",
+            "repository_facts_source", "claim_ids", "claims", "checkpoint_ids",
+            "latest_checkpoint", "delivery", "unresolved_pressures", "evidence_count",
+            "evidence_truncated", "campaign_charter",
+        )
+        campaign_rows = capsule.get("campaigns")
+        campaign_rows = campaign_rows if isinstance(campaign_rows, list) else [capsule]
+        campaign_statuses: list[dict[str, Any]] = []
+        continuations: list[dict[str, Any]] = []
+        for campaign in campaign_rows[:8]:
+            if not isinstance(campaign, dict):
+                continue
+            campaign_identity = campaign.get("campaign_id")
+            campaign_statuses.append({
+                key: campaign[key] for key in
+                ("campaign_id", "status", "contexts_count", "continuations_count",
+                 "contexts_truncated", "continuations_truncated")
+                if key in campaign
+            })
+            rows = campaign.get("continuations")
+            if not isinstance(rows, list):
+                continue
+            for session in rows[:16]:
+                if not isinstance(session, dict):
+                    continue
+                continuations.append({
+                    **({"campaign_id": campaign_identity}
+                       if isinstance(campaign_identity, str) else {}),
+                    **{key: session[key] for key in session_fields if key in session},
+                })
+                if len(continuations) >= 16:
+                    break
+        result: dict[str, Any] = {
+            "schema_version": "mncs.control.project-entry-continuation/1",
+            "repository": capsule.get("repository"),
+            "status": capsule.get("status", "unknown"),
+            "next": capsule.get("next"),
+            "campaign_statuses": campaign_statuses,
+            "continuations": continuations,
+            "campaigns_count": capsule.get("campaigns_count", len(campaign_rows)),
+            "continuations_count": capsule.get(
+                "continuations_count", len(continuations)
+            ),
+        }
+        for key in ("campaign_id", "contexts", "contexts_count", "contexts_truncated",
+                    "campaigns_truncated", "continuations_truncated"):
+            if key in capsule:
+                result[key] = capsule[key]
+        return result
 
     def _campaign_continuation(
         self, record: _GrantRecord, argv: list[str], request_id: str,
