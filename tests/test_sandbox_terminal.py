@@ -208,6 +208,79 @@ def test_project_bwrap_reads_campaign_capsule_through_environment_rpc(config) ->
 
 
 @pytest.mark.requires_bwrap_namespace
+def test_project_bwrap_campaign_entry_reuses_session_without_session_id(config) -> None:
+    project = config.workspace_root / "mncs-environment"
+    project.mkdir()
+    subprocess.run(["git", "init", "--quiet", str(project)], check=True)
+    environment_root = Path(__file__).resolve().parents[2] / "mncs-environment"
+    fixture_source = environment_root / "tests" / "fixtures" / "control-rpc-entry.json"
+    manifest_source = environment_root / ".mncs" / "project.json"
+    if not (environment_root / "mncs_env" / "cli.py").is_file():
+        pytest.skip("sibling mncs-environment checkout is unavailable")
+    if not fixture_source.is_file() or not manifest_source.is_file():
+        pytest.skip("Environment campaign entry fixtures are unavailable")
+    definition_path = project / "tests" / "fixtures" / "control-rpc-entry.json"
+    definition_path.parent.mkdir(parents=True)
+    shutil.copyfile(fixture_source, definition_path)
+    manifest = project / ".mncs" / "project.json"
+    manifest.parent.mkdir()
+    shutil.copyfile(manifest_source, manifest)
+
+    private_root = Path(tempfile.mkdtemp(prefix="mce-entry-", dir="/tmp"))
+    endpoint_config = replace(
+        config,
+        environment_rpc_socket=private_root / "environment.sock",
+    )
+    environment = SimpleNamespace(
+        state_dir=private_root / "environment-state",
+        environment_path=environment_root,
+        authenticated_principal_id=None,
+    )
+    policy = WorkspacePolicy(config)
+    rpc = EnvironmentRPCServer(endpoint_config, environment, policy)
+    rpc.start()
+    environment.authenticated_principal_id = rpc.principal_id
+    sandbox = Sandbox(config, policy)
+    sandbox.environment_rpc = rpc
+    resolution = policy.resolve_scope(
+        scope="project", project="mncs-environment", cwd=".",
+    )
+    grant = rpc.issue_grant(resolution)
+
+    def enter(consumer: str, request_id: str) -> dict[str, object]:
+        command = (
+            f"MNCS_ENV_RPC_REQUEST_ID={request_id} python3 -B -m mncs_env.cli enter "
+            "--definition tests/fixtures/control-rpc-entry.json "
+            f"--consumer {consumer} --campaign-id cmp_bwrap_entry"
+        )
+        argv, _enabled = sandbox.command_argv(
+            command,
+            resolution,
+            network=False,
+            environment_rpc_grant=grant,
+        )
+        result = subprocess.run(
+            argv, capture_output=True, text=True, timeout=60, check=False, env={},
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        return json.loads(result.stdout)
+
+    try:
+        first = enter("campaign-agent-before-restart", "req_bwrap_campaign_entry_first")
+        second = enter("campaign-agent-after-restart", "req_bwrap_campaign_entry_second")
+
+        assert first["entry"]["reused"] is False
+        assert second["entry"]["reused"] is True
+        assert second["session_id"] == first["session_id"]
+        assert second["consumer_id"] == "campaign-agent-after-restart"
+        assert second["configuration"]["definition_id"] == first["configuration"]["definition_id"]
+    finally:
+        rpc.revoke_grant(grant)
+        rpc.close()
+        shutil.rmtree(private_root, ignore_errors=True)
+
+
+@pytest.mark.requires_bwrap_namespace
 def test_workspace_scope_can_mutate_siblings_but_not_real_home(config) -> None:
     (config.workspace_root / "alpha").mkdir()
     (config.workspace_root / "beta").mkdir()

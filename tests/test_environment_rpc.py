@@ -54,6 +54,89 @@ def test_path_options_are_mapped_in_split_and_equals_forms(tmp_path: Path) -> No
     assert equals == ["enter", "--workspace=" + str(host_root / "nested")]
 
 
+def test_project_campaign_entry_maps_only_the_granted_repository_workspace(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "projects"
+    project = workspace / "mncs-environment"
+    definition_path = project / "tests" / "fixtures" / "entry.json"
+    definition_path.parent.mkdir(parents=True)
+    definition_path.write_text(json.dumps({
+        "workspace_scope": {"repositories": ["mncs-environment"]},
+    }), encoding="utf-8")
+    server = EnvironmentRPCServer(
+        ControlConfig(
+            workspace_root=workspace,
+            sandbox_home=tmp_path / "home",
+            environment_rpc_socket=tmp_path / "rpc" / "environment.sock",
+        ),
+        environment_service=SimpleNamespace(state_dir=tmp_path / "state"),
+        policy=object(),
+    )
+    grant = _GrantRecord(
+        grant_id="project-campaign-entry-grant",
+        principal_id="principal-test",
+        host_root=project,
+        sandbox_root="/workspace/mncs-environment",
+        scope="project",
+        uid=0,
+        expires_at=time.monotonic() + 60,
+        token_file=tmp_path / "grant",
+    )
+
+    translated = server._translate_argv(
+        ["enter", "--definition", "tests/fixtures/entry.json",
+         "--campaign-id", "cmp_test"],
+        project,
+        grant,
+    )
+
+    assert translated == [
+        "enter", "--definition", str(definition_path), "--campaign-id", "cmp_test",
+        "--workspace", str(workspace),
+    ]
+
+
+def test_project_campaign_entry_rejects_definition_scope_widening(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "projects"
+    project = workspace / "mncs-environment"
+    definition_path = project / "entry.json"
+    project.mkdir(parents=True)
+    definition_path.write_text(json.dumps({
+        "workspace_scope": {"repositories": ["mncs-environment", "mncs-language"]},
+    }), encoding="utf-8")
+    server = EnvironmentRPCServer(
+        ControlConfig(
+            workspace_root=workspace,
+            sandbox_home=tmp_path / "home",
+            environment_rpc_socket=tmp_path / "rpc" / "environment.sock",
+        ),
+        environment_service=SimpleNamespace(state_dir=tmp_path / "state"),
+        policy=object(),
+    )
+    grant = _GrantRecord(
+        grant_id="project-campaign-entry-grant",
+        principal_id="principal-test",
+        host_root=project,
+        sandbox_root="/workspace/mncs-environment",
+        scope="project",
+        uid=0,
+        expires_at=time.monotonic() + 60,
+        token_file=tmp_path / "grant",
+    )
+
+    with pytest.raises(ControlError, match="must declare only its granted repository") as raised:
+        server._translate_argv(
+            ["enter", "--definition", "entry.json", "--campaign-id", "cmp_test"],
+            project,
+            grant,
+        )
+
+    assert raised.value.code == "ENVIRONMENT_AUTHORITY_DENIED"
+
+
 def test_project_grant_returns_authenticated_campaign_capsule(tmp_path: Path) -> None:
     workspace = tmp_path / "projects"
     project = workspace / "mncs-environment"

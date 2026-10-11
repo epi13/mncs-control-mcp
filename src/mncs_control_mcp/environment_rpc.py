@@ -398,9 +398,17 @@ class EnvironmentRPCServer:
         if command == "enter":
             for option in ("--definition", "--workspace"):
                 map_path_option(option)
-            if "--workspace" not in translated and not any(
-                item.startswith("--workspace=") for item in translated
-            ):
+            has_campaign_id = False
+            for index, item in enumerate(translated):
+                if item == "--campaign-id" and index + 1 < len(translated):
+                    has_campaign_id = bool(translated[index + 1].strip())
+                    break
+                if item.startswith("--campaign-id="):
+                    has_campaign_id = bool(item.partition("=")[2].strip())
+                    break
+            has_workspace = any(item == "--workspace" or item.startswith("--workspace=")
+                                for item in translated)
+            if not has_workspace:
                 definition_path = next(
                     (
                         Path(translated[index + 1])
@@ -468,6 +476,38 @@ class EnvironmentRPCServer:
                                     "next": "use an authorized workspace-scoped execution or select a definition inside this project"
                                 },
                             )
+                    if has_campaign_id and record.scope == "project":
+                        # A project sandbox cannot name its host workspace
+                        # parent. For a campaign entry, Control may supply
+                        # that path only when the selected Environment
+                        # definition itself names exactly this granted
+                        # project. Environment still performs the durable
+                        # principal/campaign/definition/workspace selection.
+                        repositories = (
+                            scope.get("repositories")
+                            if isinstance(scope, dict)
+                            else None
+                        )
+                        if repositories != [record.host_root.name]:
+                            raise ControlError(
+                                "ENVIRONMENT_AUTHORITY_DENIED",
+                                "project-scoped campaign entry must declare only its granted repository",
+                                details={"repository": record.host_root.name},
+                            )
+                        if definition.get("workspace_root", ".") not in (None, "", "."):
+                            raise ControlError(
+                                "ENVIRONMENT_AUTHORITY_DENIED",
+                                "project-scoped campaign entry cannot override the owner-mapped workspace root",
+                                details={"repository": record.host_root.name},
+                            )
+                        configured_root = Path(self.config.workspace_root).expanduser().resolve()
+                        project_root = record.host_root.expanduser().resolve(strict=True)
+                        if project_root.parent != configured_root:
+                            raise ControlError(
+                                "ENVIRONMENT_WORKSPACE_ESCAPE",
+                                "project grant is not an immediate child of the configured workspace",
+                            )
+                        translated.extend(["--workspace", str(configured_root)])
         elif command == "claims":
             for option in ("--worktree",):
                 map_path_option(option)
