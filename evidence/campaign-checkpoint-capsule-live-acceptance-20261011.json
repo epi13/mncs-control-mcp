@@ -1,0 +1,117 @@
+{
+  "schema_version": "mncs.control.campaign-checkpoint-capsule-acceptance/1",
+  "identity": "ev_control_campaign_checkpoint_capsule_live_20261011",
+  "recorded_at": "2026-10-11T09:37:23Z",
+  "campaign_identity": "cmp_mncs_continuity_20261010",
+  "implementation": {
+    "repository": "mncs-control-mcp",
+    "branch": "main",
+    "commit": "1c7f2fcf66f8c6738979cd08bc1e8a981facec89",
+    "remote_ref": "origin/main",
+    "remote_head": "1c7f2fcf66f8c6738979cd08bc1e8a981facec89",
+    "files": {
+      "src/mncs_control_mcp/environment_sessions.py": "5847d15427388f88e78d99386af4891e6f5c181d323c2b67555d33fac430887f",
+      "tests/test_environment_sessions.py": "b03e692d26c073e6ef99bc7fc5d92df9e7427a94a8a81b07ca935d53d2ab5677"
+    }
+  },
+  "environment_charter": {
+    "repository": "mncs-environment",
+    "commit": "8fc6052c794c223a686d87fab7b794fbf934a120",
+    "path": "evidence/campaign-charter-continuity-20261011.json",
+    "identity": "ev_env_campaign_charter_20261011",
+    "sha256": "1b67657c87cdc3c49c93149ec839eb7f67e5b049c3ec5f2c410cfbd072641a26"
+  },
+  "protected_execution": {
+    "control_service_unit": "mncs-control-tunnel.service",
+    "update_unit_restarted_after_main_delivery": "mncs-control-update.service",
+    "execution_tool": "MNCS Control terminal_exec",
+    "sandbox_backend": "bwrap",
+    "scope": "project",
+    "project": "mncs-environment",
+    "network": false,
+    "canonical_store_transport": "authenticated per-execution Environment RPC through Control",
+    "canonical_store_direct_filesystem_io_by_agent": "not used"
+  },
+  "continuation_entry": {
+    "command": "./scripts/mncs-env enter --definition tests/fixtures/control-rpc-entry.json --consumer codex-process-1 --consumer-kind agent --campaign-id cmp_mncs_continuity_20261010",
+    "exit_code": 0,
+    "session_id": "ses_7226fbcfe65820f7",
+    "lifecycle": "active",
+    "campaign_id": "cmp_mncs_continuity_20261010",
+    "interpretation": "The authenticated project-scoped entry returned the existing campaign session identity; no session ID was supplied to entry."
+  },
+  "canonical_checkpoint": {
+    "command": "./scripts/mncs-env checkpoint ses_7226fbcfe65820f7 with campaign evidence and delivery metadata",
+    "exit_code": 0,
+    "session_id": "ses_7226fbcfe65820f7",
+    "checkpoint_id": "chk_6badb7e78cf9fcab",
+    "sequence": 66,
+    "request_id": "req_c7df25118b6ed18b1a1d7d99b7152e699fe41c74",
+    "campaign_state_base": "chk_22e823ef2e3fcac0",
+    "campaign_evidence_count": 38,
+    "campaign_delivery_status": "partial"
+  },
+  "fresh_protected_readback": {
+    "continuation_command": "python3 -B -m mncs_env.cli continuation --campaign-id cmp_mncs_continuity_20261010",
+    "context_command": "python3 -B -m mncs_env.cli context ses_7226fbcfe65820f7",
+    "exit_code": 0,
+    "result_status": "context-conflict",
+    "sandbox_backend": "bwrap",
+    "scope": "project",
+    "session_id": "ses_7226fbcfe65820f7",
+    "campaign_state_checkpoint_id": "chk_6badb7e78cf9fcab",
+    "latest_checkpoint_id": "chk_6badb7e78cf9fcab",
+    "latest_checkpoint_sequence": 66,
+    "progress_truncated": false,
+    "remaining_count": 5,
+    "campaign_evidence_count": 38,
+    "campaign_evidence_truncated": false,
+    "visible_evidence_identities": [
+      "ev_env_campaign_charter_20261011",
+      "ev_control_checkpoint_capsule_source_20261011",
+      "ev_control_checkpoint_capsule_tests_20261011",
+      "ev_control_checkpoint_capsule_docs_20261011"
+    ]
+  },
+  "preserved_ownership": {
+    "same_campaign_duplicate": {
+      "session_id": "ses_b4b2d283542220b0",
+      "lifecycle": "active",
+      "checkpoint_count": 0,
+      "claim_count": 0,
+      "disposition": "still returned separately; not selected, adopted, or mutated because termination is unproven"
+    },
+    "foreign_exclusive_claims": "Compiler, Forge, and reference-studies claims remain bound to their recorded owner sessions; see the linked Environment campaign charter.",
+    "authority": "The capsule projects bounded Environment and Git facts. It grants no claim transfer, session termination, repository access, or worktree retirement."
+  },
+  "verification": {
+    "result": "PASS",
+    "tests": {
+      "command": ".venv/bin/python -m pytest -q tests/test_environment_sessions.py::test_campaign_continuation_returns_project_scoped_duplicate_capsules tests/test_environment_sessions.py::test_campaign_continuation_surfaces_bounded_context_conflict_capsules tests/test_environment_sessions.py::test_campaign_continuation_hides_foreign_session_identity tests/test_environment_sessions.py::test_campaign_continuation_requires_authenticated_principal_and_project_scope",
+      "passed": 4,
+      "failed": 0,
+      "sandbox_backend": "bwrap",
+      "scope": "project",
+      "network": false,
+      "cases": [
+        "test_campaign_continuation_returns_project_scoped_duplicate_capsules",
+        "test_campaign_continuation_surfaces_bounded_context_conflict_capsules",
+        "test_campaign_continuation_hides_foreign_session_identity",
+        "test_campaign_continuation_requires_authenticated_principal_and_project_scope"
+      ]
+    },
+    "diff_check": "PASS"
+  },
+  "readiness": {
+    "canonical_store_fresh_process_readback": "PASS; mediated Control RPC in project bwrap",
+    "project_scoped_campaign_entry": "PASS; exact campaign session identity returned",
+    "latest_checkpoint_projection": "PASS; bounded progress, pending items, evidence count, and evidence pointers survive a fresh protected process",
+    "campaign_context_selection": "UNRESOLVED; two active Environment definitions remain visible and require exact-context reconciliation",
+    "campaign_overall": "PARTIAL; compiler succession and resource-feedback acceptance remain incomplete"
+  },
+  "limitations": [
+    "The live continuation status remains context-conflict because the same campaign identity has two active definition contexts.",
+    "This acceptance does not prove termination of the empty duplicate session or authorize resolving it.",
+    "Compiler and Forge candidate claims remain foreign and protected; no candidate was modified by this change."
+  ]
+}
