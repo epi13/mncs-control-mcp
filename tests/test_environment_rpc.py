@@ -282,7 +282,7 @@ def test_campaign_capsule_rejects_wider_or_unbound_requests(tmp_path: Path) -> N
     assert environment.calls == 0
 
 
-def test_project_rpc_exposes_session_authorized_health_and_reports_unknown_operations(
+def test_project_rpc_exposes_session_authorized_read_operations_and_reports_unknown_operations(
     tmp_path: Path, monkeypatch,
 ) -> None:
     token = "project-health-capability"
@@ -330,9 +330,14 @@ def test_project_rpc_exposes_session_authorized_health_and_reports_unknown_opera
 
     def run(argv, **kwargs):
         calls.append((argv, kwargs))
+        stdout = (
+            '{"providers":[{"provider_id":"forge","status":"unknown"}]}\n'
+            if "capabilities" in argv else
+            '{"overall":"unknown","providers":{"forge":"unknown"}}\n'
+        )
         return SimpleNamespace(
             returncode=0,
-            stdout='{"overall":"unknown","providers":{"forge":"unknown"}}\n',
+            stdout=stdout,
             stderr="",
         )
 
@@ -355,13 +360,24 @@ def test_project_rpc_exposes_session_authorized_health_and_reports_unknown_opera
     assert calls[0][1]["env"]["MNCS_ENV_AUTH_PRINCIPAL_ID"] == "principal-agent"
     assert calls[0][1]["env"]["MNCS_ENV_RPC_REQUEST_ID"] == "req_project_health"
 
+    capabilities = server.dispatch({
+        **request,
+        "request_id": "req_project_capabilities",
+        "argv": ["capabilities", "ses_health"],
+    }, peer_uid=0)
+    assert capabilities["ok"] is True
+    assert json.loads(capabilities["result"]["stdout"])["providers"][0]["status"] == "unknown"
+    assert calls[1][0][-2:] == ["capabilities", "ses_health"]
+    assert calls[1][1]["env"]["MNCS_ENV_AUTH_PRINCIPAL_ID"] == "principal-agent"
+    assert calls[1][1]["env"]["MNCS_ENV_RPC_REQUEST_ID"] == "req_project_capabilities"
+
     snapshot["authenticated_principal_id"] = "different-principal"
     foreign = server.dispatch({
         **request,
         "request_id": "req_project_health_foreign",
     }, peer_uid=0)
     assert foreign["error"]["code"] == "ENVIRONMENT_AUTHORITY_DENIED"
-    assert len(calls) == 1
+    assert len(calls) == 2
 
     unsupported = server.dispatch({
         **request,
@@ -371,7 +387,7 @@ def test_project_rpc_exposes_session_authorized_health_and_reports_unknown_opera
     assert unsupported["error"]["code"] == "ENVIRONMENT_OPERATION_UNAVAILABLE"
     assert unsupported["error"]["details"]["status"] == "unknown"
     assert unsupported["error"]["details"]["operation"] == "doctor"
-    assert len(calls) == 1
+    assert len(calls) == 2
 
 
 def test_retire_rpc_exposes_only_scoped_read_only_inventory(tmp_path: Path) -> None:
