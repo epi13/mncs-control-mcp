@@ -8,6 +8,7 @@ reports unavailable instead of inventing state.
 from __future__ import annotations
 
 import hashlib
+import importlib
 import json
 import os
 import subprocess
@@ -735,6 +736,53 @@ def test_projection_evidence_requires_control_principal(tmp_path: Path) -> None:
         service.projection_evidence("ses_projection_test")
 
     assert raised.value.code == "ENVIRONMENT_AUTHORITY_DENIED"
+
+
+@needs_environment
+def test_projection_evidence_reads_owner_record_from_isolated_store(tmp_path: Path) -> None:
+    service = EnvironmentService(_config(tmp_path))
+    service.authenticated_principal_id = "principal-test"
+    entered = service.enter(
+        {"name": "projection-evidence-probe", "intent": {"goal": "read evidence"}},
+        "projection-evidence-probe",
+    )
+    session_id = entered["session_id"]
+    pkg = service._pkg()
+    store = service._store(pkg)
+    try:
+        session = pkg.sessions.Session.open(
+            state_dir=service.state_dir, session_id=session_id,
+            backend="store", store=store,
+        )
+        projections = importlib.import_module("mncs_env.projections")
+        evidence = {
+            "schema_version": "mncs.projection-evidence/1",
+            "identity": "ev_projection_read_test",
+            "results": [{"projection": "workspace", "outcome": "current"}],
+        }
+        evidence_ref = projections.evidence_store.publish(
+            session, "projections", evidence,
+        )
+        session.snapshot["projection_epoch"] = {
+            "epoch": "epoch-test",
+            "at": "2026-10-11T12:00:00+00:00",
+            "evidence_ref": evidence_ref,
+        }
+        session.snapshot["projection_history"] = [{
+            "at": "2026-10-11T12:00:00+00:00",
+            "mode": "ambient",
+            "evidence_ref": evidence_ref,
+        }]
+        session._save()
+    finally:
+        store.close()
+
+    result = service.projection_evidence(session_id)
+
+    assert result["session_id"] == session_id
+    assert result["projection_epoch"]["evidence_ref"] == evidence_ref
+    assert result["evidence"] == evidence
+    assert result["history"] == session.snapshot["projection_history"]
 
 
 @needs_environment
