@@ -334,6 +334,35 @@ class EnvironmentRPCServer:
             os.environ.pop(variable, None)
         return successful_checkpoint
 
+    @staticmethod
+    def _test_terminate_checkpoint_service_after_commit(
+        request: dict[str, Any], response: dict[str, Any],
+    ) -> bool:
+        """Match and consume one owner-armed post-commit service termination.
+
+        This fault is only enabled by the host service owner for a specific
+        request identity. Protected callers cannot arm it. It is deliberately
+        limited to a successful checkpoint response, after Environment has
+        durably returned, so acceptance can exercise lost-response recovery
+        across an actual Control process restart.
+        """
+        variable = "MNCS_CONTROL_TEST_TERMINATE_CHECKPOINT_SERVICE_REQUEST_ID"
+        request_id = os.environ.get(variable, "")
+        if not request_id or request.get("request_id") != request_id:
+            return False
+        argv = request.get("argv")
+        if not isinstance(argv, list) or not argv or argv[0] != "checkpoint":
+            return False
+        result = response.get("result")
+        successful_checkpoint = (
+            response.get("ok") is True
+            and isinstance(result, dict)
+            and result.get("exit_code") == 0
+        )
+        if successful_checkpoint:
+            os.environ.pop(variable, None)
+        return successful_checkpoint
+
     def _serve_connection(self, connection: socket.socket) -> None:
         request: dict[str, Any] | None = None
         with connection:
@@ -355,6 +384,17 @@ class EnvironmentRPCServer:
                     "code": "ENVIRONMENT_RPC_INVALID_REQUEST",
                     "message": str(error),
                 }}
+            if request is not None and self._test_terminate_checkpoint_service_after_commit(
+                request, response,
+            ):
+                LOGGER.critical(
+                    "owner-armed Control termination after committed checkpoint request_id=%s",
+                    request.get("request_id"),
+                )
+                # os._exit models loss of the service process before the
+                # caller receives a receipt. systemd restarts the owner
+                # service, and a fresh authorized caller reconciles by ID.
+                os._exit(86)
             if request is not None and self._test_drop_checkpoint_response_after_commit(
                 request, response,
             ):
