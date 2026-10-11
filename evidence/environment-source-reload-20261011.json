@@ -1,0 +1,89 @@
+{
+  "schema_version": "mncs.control.environment-source-reload-proof/1",
+  "identity": "ev_control_environment_source_reload_20261011",
+  "recorded_at": "2026-10-11T23:08:00Z",
+  "owner": "mncs-control-mcp",
+  "campaign_identity": "cmp_mncs_continuity_20261010",
+  "source": {
+    "repository": "mncs-control-mcp",
+    "implementation_commit": "55e66a955b5333433384d930e286842ebedaa808",
+    "files": {
+      "deploy/systemd/mncs-control-update.path": "eb66c2db84704f252f59ce2511252b51cbea210de7248716fafe9a05838c5d8c",
+      "src/mncs_control_mcp/deployment.py": "cda983ed96270561ab2ebecdac115d57a4a90134cc6c4a5a6c07f1c897f4e5c1",
+      "tests/test_operations.py": "980709c95810ba22a2fda1f6b3bb7bf51626d292462f70711c3100f5686e07a8"
+    }
+  },
+  "implementation": {
+    "owner_boundary": "Control owns the long-lived MCP process and its source reload. Environment continues to own session, campaign, claim, and checkpoint semantics.",
+    "cause": "Control loads the sibling mncs-environment package into the server process. The installed path unit watched only Control Git refs, so Environment updates could leave imported Environment code stale until Control restarted.",
+    "change": "The Control update path now watches HEAD, refs/heads/main, and packed-refs in both the Control and Environment checkouts. The renderer supports an explicit Environment checkout and defaults to the sibling mncs-environment repository.",
+    "security_boundary": "The change reloads the existing user-scoped service. It adds no Store filesystem access for Bwrap consumers and changes no service write paths or confinement settings."
+  },
+  "validation": {
+    "sandbox_backend": "bwrap",
+    "scope": "project",
+    "network": false,
+    "command": "python3 -m pytest -q tests/test_operations.py::test_deployment_paths_and_unit_rendering tests/test_operations.py::test_update_watcher_units_reload_tunnel_for_control_and_environment_changes tests/test_operations.py::test_update_service_can_reach_user_bus_for_restart && python3 -m ruff check src/mncs_control_mcp/deployment.py tests/test_operations.py && python3 -m compileall -q src/mncs_control_mcp/deployment.py && git diff --check",
+    "exit_code": 0,
+    "pytest": "3 passed",
+    "ruff": "passed",
+    "compileall": "passed",
+    "git_diff_check": "passed"
+  },
+  "protected_execution_proof": {
+    "environment_repository_revision": {
+      "repository": "mncs-environment",
+      "commit": "85b0e2ba2f8192797f36713fcac55d2c37bb1b08",
+      "committed_at": "2026-10-11T14:51:03-08:00",
+      "campaign_evidence_limit": 128
+    },
+    "stale_process_observation": {
+      "control_service_started_at": "2026-10-11T13:46:50-08:00",
+      "operation": "python3 -m mncs_env.cli continuation --campaign-id cmp_mncs_continuity_20261010",
+      "sandbox_backend": "bwrap",
+      "exit_code": 3,
+      "diagnostic_code": "publication-rejected",
+      "diagnostic": "campaign state checkpoint is invalid: campaign evidence must be a list of at most 96 references",
+      "publication_completed": false,
+      "completed_at": "2026-10-11T22:55:00Z"
+    },
+    "recovery": {
+      "operation": "systemctl --user restart mncs-control-tunnel.service",
+      "service_started_at": "2026-10-11T15:02:29-08:00",
+      "service_state": "active/running",
+      "process_id": 1940471
+    },
+    "fresh_protected_continuation": {
+      "operation": "python3 -m mncs_env.cli continuation --campaign-id cmp_mncs_continuity_20261010",
+      "control_job_id": "term-a4e4021d76126469adabea1f",
+      "sandbox_backend": "bwrap",
+      "network": false,
+      "started_at": "2026-10-11T23:05:40.609230Z",
+      "completed_at": "2026-10-11T23:05:48.588742Z",
+      "exit_code": 0,
+      "capsule_schema": "mncs.control.campaign-continuation/2",
+      "status": "ready",
+      "selected_session_id": "ses_7226fbcfe65820f7",
+      "selection_basis": "authenticated-project-environment-definition",
+      "contexts_count": 2,
+      "unselected_contexts_count": 1,
+      "campaign_evidence_count": 104,
+      "campaign_evidence_truncated": false,
+      "bounded_evidence_refs_truncated": true,
+      "claim_ids": [
+        "claim:mncs-environment"
+      ],
+      "ownership_transition": "none"
+    },
+    "installed_path_unit": {
+      "path": "/home/epi13/.config/systemd/user/mncs-control-update.path",
+      "tracks_control_and_environment_refs": true,
+      "state": "active/waiting",
+      "activated_at": "2026-10-11T15:07:42-08:00"
+    }
+  },
+  "limitations": [
+    "Two Environment definitions remain associated with the campaign. Control selected the exact project-linked session and kept the other context visible; it did not adopt, transfer, or mutate either session.",
+    "The protected retry confirms the current Environment implementation is live after the service restart. The installed path unit now tracks later Environment Git ref changes; no synthetic Environment commit was created to force a second reload."
+  ]
+}
