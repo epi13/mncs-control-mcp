@@ -34,6 +34,7 @@ _CAMPAIGN_ID_MAX = 160
 _CAMPAIGN_REPOSITORY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _CAMPAIGN_CHARTER_SCHEMA = "mncs.environment.campaign-charter/1"
 _CAMPAIGN_CHARTER_MAX_BYTES = 64 * 1024
+_CAMPAIGN_CAPSULE_EVIDENCE_MAX = 32
 _GIT_OBJECT_ID = re.compile(r"^(?:[a-f0-9]{40}|[a-f0-9]{64})$")
 _SHA256 = re.compile(r"^[a-f0-9]{64}$")
 _CONTINUABLE_LIFECYCLES = frozenset({
@@ -717,9 +718,12 @@ class EnvironmentService:
         campaign_evidence = continuation.get("evidence", [])
         if not isinstance(campaign_evidence, list):
             campaign_evidence = []
-        evidence_limit = getattr(pkg.sessions, "CAMPAIGN_EVIDENCE_MAX", 32)
-        if type(evidence_limit) is not int or evidence_limit < 1 or evidence_limit > 32:
-            evidence_limit = 32
+        evidence_limit = getattr(
+            pkg.sessions, "CAMPAIGN_EVIDENCE_MAX", _CAMPAIGN_CAPSULE_EVIDENCE_MAX
+        )
+        if (type(evidence_limit) is not int or evidence_limit < 1
+                or evidence_limit > _CAMPAIGN_CAPSULE_EVIDENCE_MAX):
+            evidence_limit = _CAMPAIGN_CAPSULE_EVIDENCE_MAX
         capsule = {
             "session_id": session_id,
             "snapshot_version": int(snapshot.get("snapshot_sequence", 0)),
@@ -766,7 +770,7 @@ class EnvironmentService:
         campaign_identity = campaign.get("identity")
         verified_charter = self._verified_campaign_charter(
             campaign_identity if isinstance(campaign_identity, str) else None,
-            campaign_evidence,
+            campaign_evidence, evidence_limit=evidence_limit,
         )
         if verified_charter is not None:
             capsule["campaign_charter"] = verified_charter
@@ -785,6 +789,7 @@ class EnvironmentService:
 
     def _verified_campaign_charter(
         self, campaign_identity: str | None, evidence: Any,
+        *, evidence_limit: int = _CAMPAIGN_CAPSULE_EVIDENCE_MAX,
     ) -> dict[str, Any] | None:
         """Project a charter only when its Environment evidence link verifies.
 
@@ -804,8 +809,11 @@ class EnvironmentService:
         )).name
         if not _CAMPAIGN_REPOSITORY.fullmatch(configured_name):
             return None
+        if (type(evidence_limit) is not int or evidence_limit < 1
+                or evidence_limit > _CAMPAIGN_CAPSULE_EVIDENCE_MAX):
+            evidence_limit = _CAMPAIGN_CAPSULE_EVIDENCE_MAX
         candidates = [
-            item for item in evidence[:32]
+            item for item in evidence[-evidence_limit:]
             if isinstance(item, dict)
             and item.get("repository") == configured_name
             and isinstance(item.get("identity"), str)

@@ -50,7 +50,7 @@ def _config(tmp_path: Path, **overrides) -> ControlConfig:
 
 def _campaign_charter_result(
     tmp_path: Path, *, referenced_digest: str | None = None,
-    charter_campaign: str = "campaign-1",
+    charter_campaign: str = "campaign-1", evidence_prefix: int = 0,
 ) -> dict:
     workspace = tmp_path / "projects"
     control_project = workspace / "mncs-control-mcp"
@@ -79,6 +79,12 @@ def _campaign_charter_result(
     ).stdout.strip()
     digest = hashlib.sha256(raw_charter).hexdigest()
     evidence = [{
+        "identity": f"ev_test_prior_{index:02d}",
+        "repository": "mncs-environment",
+        "commit": commit,
+        "path": f"evidence/prior-{index:02d}.json",
+        "sha256": digest,
+    } for index in range(evidence_prefix)] + [{
         "identity": "ev_env_campaign_charter_test",
         "repository": "mncs-environment",
         "commit": commit,
@@ -433,6 +439,20 @@ def test_campaign_continuation_projects_exact_git_verified_charter(tmp_path: Pat
             "sha256": capsule["campaign_charter"]["source"]["sha256"],
         },
     }
+
+
+def test_campaign_continuation_verifies_charter_in_presented_evidence_window(
+    tmp_path: Path,
+) -> None:
+    result = _campaign_charter_result(tmp_path, evidence_prefix=34)
+
+    assert result["status"] == "ready"
+    capsule = result["continuations"][0]
+    assert capsule["evidence_count"] == 35
+    assert len(capsule["evidence"]) == 32
+    assert capsule["evidence"][-1]["identity"] == "ev_env_campaign_charter_test"
+    assert capsule["campaign_charter"]["status"] == "verified"
+    assert capsule["campaign_charter"]["evidence_identity"] == "ev_env_campaign_charter_test"
 
 
 @pytest.mark.parametrize("failure", ["digest", "campaign"])
