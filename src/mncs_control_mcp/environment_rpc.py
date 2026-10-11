@@ -28,6 +28,7 @@ from .errors import ControlError
 
 MAX_REQUEST_BYTES = 256 * 1024
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
+MAX_ARGUMENT_BYTES = 32 * 1024
 ALLOWED_COMMANDS = frozenset({
     "enter", "inspect", "context", "resume", "health", "capabilities", "checkpoint", "handoff", "accept", "claims",
     "retire", "continuation",
@@ -358,7 +359,9 @@ class EnvironmentRPCServer:
 
     def _translate_argv(self, argv: Any, cwd: Path, record: _GrantRecord) -> list[str]:
         if (not isinstance(argv, list) or len(argv) > 256
-                or not all(isinstance(item, str) and len(item) <= 8192 and "\x00" not in item
+                or not all(isinstance(item, str)
+                           and len(item.encode("utf-8")) <= MAX_ARGUMENT_BYTES
+                           and "\x00" not in item
                            for item in argv)):
             raise ControlError("ENVIRONMENT_RPC_INVALID_REQUEST", "Environment argv is invalid")
         if any(item == "--state-dir" or item.startswith("--state-dir=")

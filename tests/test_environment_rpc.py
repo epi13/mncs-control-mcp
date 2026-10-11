@@ -14,7 +14,11 @@ from types import SimpleNamespace
 import pytest
 
 from mncs_control_mcp.config import ControlConfig
-from mncs_control_mcp.environment_rpc import EnvironmentRPCServer, _GrantRecord
+from mncs_control_mcp.environment_rpc import (
+    MAX_ARGUMENT_BYTES,
+    EnvironmentRPCServer,
+    _GrantRecord,
+)
 from mncs_control_mcp.errors import ControlError
 
 
@@ -52,6 +56,64 @@ def test_path_options_are_mapped_in_split_and_equals_forms(tmp_path: Path) -> No
     )
     assert split == ["enter", "--workspace", str(host_root / "nested")]
     assert equals == ["enter", "--workspace=" + str(host_root / "nested")]
+
+
+def test_rpc_accepts_bounded_campaign_metadata_and_rejects_oversized_arguments(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "project"
+    root.mkdir()
+    server = EnvironmentRPCServer(
+        ControlConfig(
+            sandbox_home=tmp_path / "home",
+            environment_rpc_socket=tmp_path / "rpc" / "environment.sock",
+        ),
+        environment_service=SimpleNamespace(state_dir=tmp_path / "state"),
+        policy=object(),
+    )
+    grant = _GrantRecord(
+        grant_id="campaign-metadata-bound",
+        principal_id="principal-test",
+        host_root=root,
+        sandbox_root="/workspace/project",
+        scope="project",
+        uid=0,
+        expires_at=time.monotonic() + 60,
+        token_file=tmp_path / "grant",
+    )
+    evidence = json.dumps(
+        [
+            {
+                "identity": f"ev_rpc_{index:02d}",
+                "repository": "mncs-environment",
+                "commit": f"{index + 1:040x}",
+                "path": f"tests/{'x' * 80}_evidence_{index:02d}.json",
+                "sha256": f"{index + 1:064x}",
+            }
+            for index in range(64)
+        ],
+        separators=(",", ":"),
+    )
+    assert 8192 < len(evidence.encode("utf-8")) <= MAX_ARGUMENT_BYTES
+
+    translated = server._translate_argv(
+        ["checkpoint", "ses_test", "--campaign-evidence-json", evidence],
+        root,
+        grant,
+    )
+
+    assert translated[-1] == evidence
+    with pytest.raises(ControlError, match="Environment argv is invalid"):
+        server._translate_argv(
+            [
+                "checkpoint",
+                "ses_test",
+                "--campaign-evidence-json",
+                "x" * (MAX_ARGUMENT_BYTES + 1),
+            ],
+            root,
+            grant,
+        )
 
 
 def test_project_campaign_entry_maps_only_the_granted_repository_workspace(
