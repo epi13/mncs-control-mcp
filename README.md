@@ -247,6 +247,13 @@ Every Git command runs inside the same project sandbox, including repository hoo
 - `env_status`, `env_enter`, `env_campaign_continuation`, `env_inspect`, `env_resume`, `env_claim_acquire`, `env_claim_release`, `env_claims`
 - `control_job_status`, `control_job_result`, `control_job_stop`
 
+`env_campaign_continuation` derives its repository selector from the caller's
+single-project grant and the authenticated Control principal. Its bounded
+capsule includes the latest Environment checkpoint's progress and pending
+items alongside durable campaign evidence and claims. Multiple sessions or
+conflicting Environment contexts remain explicit for selection; Control does
+not choose a session or adopt its work.
+
 The Journal Context surface consists of `journal_context_status`,
 `journal_context_collect`, and `journal_context_get`. It creates an immutable,
 paginated local MNCS evidence bundle for an explicit interval, including

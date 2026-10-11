@@ -713,7 +713,7 @@ class EnvironmentService:
         evidence_limit = getattr(pkg.sessions, "CAMPAIGN_EVIDENCE_MAX", 32)
         if type(evidence_limit) is not int or evidence_limit < 1 or evidence_limit > 32:
             evidence_limit = 32
-        return {
+        capsule = {
             "session_id": session_id,
             "snapshot_version": int(snapshot.get("snapshot_sequence", 0)),
             "lifecycle": snapshot.get("lifecycle"),
@@ -756,6 +756,18 @@ class EnvironmentService:
                 if isinstance(continuation.get("unresolved_pressures", []), list) else []
             ),
         }
+        latest_checkpoint = continuation.get("latest_checkpoint")
+        if isinstance(latest_checkpoint, dict):
+            capsule["latest_checkpoint"] = EnvironmentService._bounded_capsule_value({
+                key: latest_checkpoint[key]
+                for key in (
+                    "identity", "sequence", "created_at", "progress",
+                    "progress_truncated", "remaining", "remaining_count",
+                    "remaining_truncated",
+                )
+                if key in latest_checkpoint
+            })
+        return capsule
 
     @staticmethod
     def _bounded_capsule_value(

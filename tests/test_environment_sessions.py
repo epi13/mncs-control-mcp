@@ -257,6 +257,17 @@ def test_campaign_continuation_returns_project_scoped_duplicate_capsules(tmp_pat
                 "evidence_truncated": False,
                 "delivery": {"status": "pending"},
                 "unresolved_pressures": [{"identity": "pressure-1"}],
+                "latest_checkpoint": {
+                    "identity": "chk_campaign_latest",
+                    "sequence": 19,
+                    "created_at": "2026-10-11T09:00:00+00:00",
+                    "progress": "Continuing the durable MNCS compiler campaign",
+                    "progress_truncated": False,
+                    "remaining": ["resume compiler execution work"],
+                    "remaining_count": 1,
+                    "remaining_truncated": False,
+                    "private_store_path": "/home/private/store",
+                },
             }}
 
     store = Store()
@@ -281,6 +292,17 @@ def test_campaign_continuation_returns_project_scoped_duplicate_capsules(tmp_pat
     assert len(result["continuations"][0]["evidence"]) == 12
     assert result["continuations"][0]["evidence_count"] == 12
     assert result["continuations"][0]["evidence_truncated"] is False
+    assert result["continuations"][0]["latest_checkpoint"] == {
+        "identity": "chk_campaign_latest",
+        "sequence": 19,
+        "created_at": "2026-10-11T09:00:00+00:00",
+        "progress": "Continuing the durable MNCS compiler campaign",
+        "progress_truncated": False,
+        "remaining": ["resume compiler execution work"],
+        "remaining_count": 1,
+        "remaining_truncated": False,
+    }
+    assert "private_store_path" not in repr(result["continuations"][0])
     assert result["continuations"][0]["claims"][0]["scope"]["exclusive"] is True
     assert result["continuations"][0]["repositories"] == [{
         "repository": "mncs-control-mcp",
