@@ -817,6 +817,11 @@ class EnvironmentRPCServer:
         output_limit = MAX_RESPONSE_BYTES // 2
         stdout = completed.stdout[:output_limit]
         stderr = completed.stderr[:output_limit]
+        if command == "enter" and completed.returncode == 0:
+            stdout = self._attach_project_continuation(
+                record, stdout, original_stdout_bytes=len(completed.stdout.encode("utf-8")),
+                output_limit=output_limit,
+            )
         return {"ok": True, "result": {
             "exit_code": completed.returncode,
             "stdout": stdout,
@@ -824,6 +829,136 @@ class EnvironmentRPCServer:
             "request_id": request_id,
             "principal_id": record.principal_id,
         }}
+
+    def _project_repository(self, record: _GrantRecord) -> str:
+        """Resolve the one immediate project named by an execution grant."""
+        if record.scope != "project":
+            raise ControlError(
+                "ENVIRONMENT_AUTHORITY_DENIED",
+                "project continuation requires a project-scoped execution grant",
+            )
+        configured_root = Path(self.config.workspace_root).expanduser().resolve()
+        try:
+            project_root = record.host_root.expanduser().resolve(strict=True)
+        except OSError as error:
+            raise ControlError(
+                "ENVIRONMENT_PROJECT_UNKNOWN",
+                "project-scoped continuation checkout is unavailable",
+            ) from error
+        if project_root.parent != configured_root or not project_root.is_dir():
+            raise ControlError(
+                "ENVIRONMENT_WORKSPACE_ESCAPE",
+                "project-scoped continuation grant does not identify an immediate configured project",
+            )
+        return project_root.name
+
+    def _attach_project_continuation(
+        self, record: _GrantRecord, stdout: str, *,
+        original_stdout_bytes: int, output_limit: int,
+    ) -> str:
+        """Add a read-only project capsule to successful project-scoped entry.
+
+        The Environment entry remains the authority for session selection and
+        mutation. Control adds its already-scoped continuation projection so
+        entry immediately shows same-campaign sessions that belong to other
+        Environment contexts. The projection cannot transfer or adopt them.
+        """
+        if (record.scope != "project"
+                or original_stdout_bytes > output_limit):
+            return stdout
+        try:
+            payload = json.loads(stdout)
+        except (TypeError, json.JSONDecodeError):
+            return stdout
+        if not isinstance(payload, dict):
+            return stdout
+        project: str | None = None
+        project_error: ControlError | None = None
+        try:
+            project = self._project_repository(record)
+        except ControlError as error:
+            project_error = error
+        continuation = payload.get("continuation")
+        campaign_id = continuation.get("identity") if isinstance(continuation, dict) else None
+        if project_error is not None:
+            payload["control_project_continuation"] = {
+                "schema_version": "mncs.control.project-entry-continuation/1",
+                "campaign_id": campaign_id if isinstance(campaign_id, str) else None,
+                "status": "unknown",
+                "code": project_error.code,
+                "next": (
+                    project_error.details.get("next")
+                    if isinstance(project_error.details, dict)
+                    and isinstance(project_error.details.get("next"), str)
+                    else "verify that the grant identifies one configured project"
+                ),
+            }
+        elif (getattr(self.environment_service, "authenticated_principal_id", None)
+              != record.principal_id):
+            payload["control_project_continuation"] = {
+                "schema_version": "mncs.control.project-entry-continuation/1",
+                "campaign_id": campaign_id if isinstance(campaign_id, str) else None,
+                "repository": project,
+                "status": "unknown",
+                "code": "ENVIRONMENT_AUTHORITY_DENIED",
+                "next": "verify the authenticated Control principal binding",
+            }
+        elif (not isinstance(campaign_id, str) or not campaign_id.strip()
+                or len(campaign_id) > 160 or "\x00" in campaign_id):
+            payload["control_project_continuation"] = {
+                "schema_version": "mncs.control.project-entry-continuation/1",
+                "repository": project,
+                "status": "unknown",
+                "code": "campaign-identity-unavailable",
+                "next": "inspect the Environment entry continuation identity",
+            }
+        else:
+            try:
+                capsule = self.environment_service.campaign_continuation(
+                    project, campaign_id,
+                )
+                if not isinstance(capsule, dict):
+                    raise TypeError("Environment returned a non-object continuation capsule")
+                payload["control_project_continuation"] = capsule
+            except ControlError as error:
+                next_step = error.details.get("next") if isinstance(error.details, dict) else None
+                payload["control_project_continuation"] = {
+                    "schema_version": "mncs.control.project-entry-continuation/1",
+                    "campaign_id": campaign_id,
+                    "repository": project,
+                    "status": "unknown",
+                    "code": error.code,
+                    "next": next_step if isinstance(next_step, str) else (
+                        "run the project-scoped Environment continuation lookup"
+                    ),
+                }
+            except Exception:
+                # A successful Environment entry is durable already. A
+                # supplementary read must not turn it into a failed or
+                # ambiguous publication result.
+                payload["control_project_continuation"] = {
+                    "schema_version": "mncs.control.project-entry-continuation/1",
+                    "campaign_id": campaign_id,
+                    "repository": project,
+                    "status": "unknown",
+                    "code": "campaign-lookup-failed",
+                    "next": "run the project-scoped Environment continuation lookup",
+                }
+
+        rendered = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+        if len(rendered.encode("utf-8")) <= output_limit:
+            return rendered
+
+        payload["control_project_continuation"] = {
+            "schema_version": "mncs.control.project-entry-continuation/1",
+            "campaign_id": campaign_id if isinstance(campaign_id, str) else None,
+            "repository": project,
+            "status": "unknown",
+            "code": "campaign-capsule-response-limit",
+            "next": "run the project-scoped Environment continuation lookup",
+        }
+        rendered = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+        return rendered if len(rendered.encode("utf-8")) <= output_limit else stdout
 
     def _campaign_continuation(
         self, record: _GrantRecord, argv: list[str], request_id: str,
@@ -835,11 +970,7 @@ class EnvironmentRPCServer:
         argument, and the existing Environment adapter still performs
         authenticated Store lookup and domain filtering.
         """
-        if record.scope != "project":
-            raise ControlError(
-                "ENVIRONMENT_AUTHORITY_DENIED",
-                "campaign continuation requires a project-scoped execution grant",
-            )
+        project = self._project_repository(record)
         campaign_id: str | None = None
         index = 1
         while index < len(argv):
@@ -879,26 +1010,13 @@ class EnvironmentRPCServer:
                 "campaign identity must be bounded nonempty text when supplied",
             )
 
-        configured_root = Path(self.config.workspace_root).expanduser().resolve()
-        try:
-            project_root = record.host_root.expanduser().resolve(strict=True)
-        except OSError as error:
-            raise ControlError(
-                "ENVIRONMENT_PROJECT_UNKNOWN",
-                "project-scoped continuation checkout is unavailable",
-            ) from error
-        if project_root.parent != configured_root or not project_root.is_dir():
-            raise ControlError(
-                "ENVIRONMENT_WORKSPACE_ESCAPE",
-                "project-scoped continuation grant does not identify an immediate configured project",
-            )
         if getattr(self.environment_service, "authenticated_principal_id", None) != record.principal_id:
             raise ControlError(
                 "ENVIRONMENT_AUTHORITY_DENIED",
                 "campaign continuation is not bound to the Control-authenticated principal",
             )
         capsule = self.environment_service.campaign_continuation(
-            project_root.name, campaign_id,
+            project, campaign_id,
         )
         return {"ok": True, "result": {
             "exit_code": 0,

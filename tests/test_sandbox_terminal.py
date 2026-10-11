@@ -236,6 +236,22 @@ def test_project_bwrap_campaign_entry_reuses_session_without_session_id(config) 
         environment_path=environment_root,
         authenticated_principal_id=None,
     )
+    continuation_calls: list[tuple[str, str | None]] = []
+
+    def campaign_continuation(repository: str, campaign_id: str | None = None):
+        continuation_calls.append((repository, campaign_id))
+        return {
+            "schema_version": "mncs.control.campaign-continuation/1",
+            "campaign_id": campaign_id,
+            "repository": repository,
+            "status": "context-conflict",
+            "continuations": [
+                {"session_id": "ses_selected", "project_reference": {"status": "linked"}},
+                {"session_id": "ses_other_context", "project_reference": {"status": "same_campaign_only"}},
+            ],
+        }
+
+    environment.campaign_continuation = campaign_continuation
     policy = WorkspacePolicy(config)
     rpc = EnvironmentRPCServer(endpoint_config, environment, policy)
     rpc.start()
@@ -274,6 +290,16 @@ def test_project_bwrap_campaign_entry_reuses_session_without_session_id(config) 
         assert second["session_id"] == first["session_id"]
         assert second["consumer_id"] == "campaign-agent-after-restart"
         assert second["configuration"]["definition_id"] == first["configuration"]["definition_id"]
+        assert first["control_project_continuation"]["status"] == "context-conflict"
+        assert second["control_project_continuation"]["campaign_id"] == "cmp_bwrap_entry"
+        assert [item["session_id"] for item in
+                second["control_project_continuation"]["continuations"]] == [
+                    "ses_selected", "ses_other_context",
+                ]
+        assert continuation_calls == [
+            ("mncs-environment", "cmp_bwrap_entry"),
+            ("mncs-environment", "cmp_bwrap_entry"),
+        ]
     finally:
         rpc.revoke_grant(grant)
         rpc.close()

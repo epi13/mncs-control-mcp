@@ -272,6 +272,97 @@ def test_project_grant_returns_authenticated_campaign_capsule(tmp_path: Path) ->
     assert calls == [("mncs-environment", None), ("mncs-environment", "cmp_test")]
 
 
+def test_project_entry_returns_campaign_capsule_without_changing_entry_authority(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    workspace = tmp_path / "projects"
+    project = workspace / "mncs-environment"
+    project.mkdir(parents=True)
+    (project / "entry.json").write_text(json.dumps({
+        "workspace_scope": {"repositories": ["mncs-environment"]},
+    }), encoding="utf-8")
+    entry_result = {
+        "session_id": "ses_selected",
+        "lifecycle": "active",
+        "continuation": {"identity": "cmp_test"},
+        "readiness": {"status": "ready"},
+    }
+    capsule = {
+        "schema_version": "mncs.control.campaign-continuation/1",
+        "campaign_id": "cmp_test",
+        "repository": "mncs-environment",
+        "status": "context-conflict",
+        "continuations": [
+            {"session_id": "ses_selected", "project_reference": {"status": "linked"}},
+            {"session_id": "ses_other_context", "project_reference": {"status": "same_campaign_only"}},
+        ],
+        "next": "select the exact recorded Environment context",
+    }
+    calls: list[tuple[str, str | None]] = []
+
+    class Environment:
+        state_dir = tmp_path / "state"
+        environment_path = tmp_path / "environment"
+        authenticated_principal_id = "principal-test"
+
+        def campaign_continuation(self, repository: str, campaign_id: str | None = None):
+            calls.append((repository, campaign_id))
+            return capsule
+
+    server = EnvironmentRPCServer(
+        ControlConfig(
+            workspace_root=workspace,
+            sandbox_home=tmp_path / "home",
+            environment_rpc_socket=tmp_path / "rpc" / "environment.sock",
+        ),
+        environment_service=Environment(),
+        policy=object(),
+    )
+    token = "project-entry-continuation"
+    server._grants[hashlib.sha256(token.encode()).hexdigest()] = _GrantRecord(
+        grant_id="project-entry-grant",
+        principal_id="principal-test",
+        host_root=project,
+        sandbox_root="/workspace/mncs-environment",
+        scope="project",
+        uid=0,
+        expires_at=time.monotonic() + 60,
+        token_file=tmp_path / "grant",
+    )
+
+    def run(argv, **_kwargs):
+        assert argv[-2:] == ["--workspace", str(workspace)]
+        return SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps(entry_result) + "\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr("mncs_control_mcp.environment_rpc.subprocess.run", run)
+    request = {
+        "grant": token,
+        "request_id": "req_project_entry_continuation",
+        "argv": ["enter", "--definition", "entry.json", "--campaign-id", "cmp_test"],
+        "cwd": "/workspace/mncs-environment",
+    }
+
+    response = server.dispatch(request, peer_uid=0)
+    replay = server.dispatch(request, peer_uid=0)
+
+    assert response["ok"] is True
+    assert response == replay
+    assert response["result"]["exit_code"] == 0
+    result = json.loads(response["result"]["stdout"])
+    assert result["session_id"] == "ses_selected"
+    assert result["continuation"] == {"identity": "cmp_test"}
+    assert result["control_project_continuation"] == capsule
+    assert [item["session_id"] for item in
+            result["control_project_continuation"]["continuations"]] == [
+                "ses_selected", "ses_other_context",
+            ]
+    assert calls == [("mncs-environment", "cmp_test")]
+
+
 def test_campaign_capsule_rejects_wider_or_unbound_requests(tmp_path: Path) -> None:
     workspace = tmp_path / "projects"
     project = workspace / "mncs-environment"

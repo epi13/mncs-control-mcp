@@ -129,6 +129,14 @@ Environment's recipient-bound accept operation.
 Environment to reuse that durable campaign without relying on its consumer
 label.
 
+After successful project-scoped CLI entry, Control also attaches a
+`control_project_continuation` projection to the Environment JSON response.
+It uses the grant's immediate project and the authenticated Control principal
+to expose same-campaign sessions from other Environment contexts. The
+projection is read-only and does not select another session or change claims.
+If the lookup fails after Environment entry succeeds, the response retains the
+successful entry and marks the supplementary projection `unknown`.
+
 ## Audit
 
 Audit JSONL lives outside the workspace, mode 0600 under a 0700 directory. It contains bounded/redacted metadata, not full file contents or environment data. Generic workspace tools cannot address it.
