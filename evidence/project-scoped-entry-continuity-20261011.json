@@ -1,0 +1,109 @@
+{
+  "schema_version": "mncs.control.project-entry-continuity/1",
+  "identity": "ev_control_project_entry_continuity_20261011",
+  "recorded_at": "2026-10-11 10:24:58 UTC",
+  "campaign_identity": "cmp_mncs_continuity_20261010",
+  "source": {
+    "repository": "mncs-control-mcp",
+    "branch": "main",
+    "commit": "c6e89e88c899f645043f244157f502fe69051882",
+    "remote_ref": "origin/main",
+    "source_path": "src/mncs_control_mcp/environment_rpc.py",
+    "source_sha256": "ff55fdc2fbab6d6435b6a97bfca349d54af7a56b795bda463a80ed7e9dcc8c5a",
+    "test_path": "tests/test_environment_rpc.py",
+    "test_sha256": "e91c1f60957c42cf41aa05ea7fb424e05f49fd17e1ec9d904ea9c70f93ce5cbb",
+    "focused_tests": {
+      "command": "python3 -B -m pytest -q tests/test_environment_rpc.py",
+      "result": "18 tests passed in project-scoped bwrap",
+      "targeted_cases": [
+        "test_entry_preserves_and_bounds_configured_workspace_root",
+        "test_project_entry_maps_workspace_without_campaign_id"
+      ],
+      "lint": {
+        "command": "ruff check src/mncs_control_mcp/environment_rpc.py tests/test_environment_rpc.py",
+        "result": "passed"
+      }
+    }
+  },
+  "implementation": {
+    "owner": "MNCS Control",
+    "behavior": "project-scoped enter maps the configured host workspace parent when its Environment definition scopes exactly the granted repository; campaign identity discovery remains Environment-owned",
+    "constraints": [
+      "project bwrap remains enabled",
+      "definition workspace_scope must list only the granted project",
+      "definition cannot override the owner-mapped workspace root",
+      "network disabled for protected execution proof",
+      "canonical Store path remains unavailable to the protected caller"
+    ],
+    "service_reload": {
+      "mechanism": "existing mncs-control-update.path source watcher",
+      "prior_main_pid": 1306517,
+      "reloaded_main_pid": 1311218,
+      "active_after_reload": true
+    }
+  },
+  "protected_execution": {
+    "sandbox_backend": "bwrap",
+    "scope": "project",
+    "project": "mncs-environment",
+    "network": false,
+    "configured_workspace_root": "/home/epi13/Documents/Projects",
+    "granted_repository": "mncs-environment",
+    "store_transport": "authenticated Environment persistence RPC through MNCS Control",
+    "direct_canonical_store_path_visible": false,
+    "store_path_policy_evidence": "ev_canonical_store_path_grant_20261011"
+  },
+  "campaign_discovery": {
+    "command_without_campaign_id": "python3 -B -m mncs_env.cli enter --definition tests/fixtures/control-rpc-entry.json --consumer codex-process-1",
+    "exit_code": 2,
+    "diagnostic_code": "campaign-continuation-ambiguous",
+    "publication_completed": false,
+    "candidate_campaigns": [
+      "cmp_mncs_continuity_20261010",
+      "cmp_store-rpc-acceptance-20261010"
+    ],
+    "disposition": "Environment safely refused to choose between two campaigns matching the authenticated principal, definition, and workspace; the readback showed no new session."
+  },
+  "selected_continuation": {
+    "discovery_command": "python3 -B -m mncs_env.cli continuation --campaign-id cmp_mncs_continuity_20261010",
+    "discovery_status": "context-conflict",
+    "contexts": [
+      {
+        "definition_id": "env_1ea3af15c7464177",
+        "workspace_root": "/home/epi13/Documents/Projects"
+      },
+      {
+        "definition_id": "env_f31ee034e8e1fdcb",
+        "workspace_root": "/home/epi13/Documents/Projects"
+      }
+    ],
+    "protected_entry_command": "python3 -B -m mncs_env.cli enter --definition tests/fixtures/control-rpc-entry.json --consumer codex-process-1 --campaign-id cmp_mncs_continuity_20261010",
+    "exit_code": 0,
+    "reused_existing_session": true,
+    "session_id": "ses_7226fbcfe65820f7",
+    "lifecycle": "active",
+    "session_id_argument_supplied": false,
+    "fresh_process_readback": {
+      "command": "python3 -B -m mncs_env.cli continuation --campaign-id cmp_mncs_continuity_20261010",
+      "campaign_identity": "cmp_mncs_continuity_20261010",
+      "selected_session_id": "ses_7226fbcfe65820f7",
+      "latest_checkpoint_id": "chk_43a95c430428d812",
+      "latest_checkpoint_sequence": 74,
+      "evidence_count": 41,
+      "environment_delivery_head": "d72bcefca870b9849925e52d397722552d5fbcda",
+      "second_context_session": {
+        "session_id": "ses_b4b2d283542220b0",
+        "lifecycle": "active",
+        "checkpoint_count": 0,
+        "claim_count": 0,
+        "auto_selected": false
+      }
+    }
+  },
+  "result": "PASS_FOR_PROJECT_WORKSPACE_MAPPING_AND_AUTHENTICATED_EXACT_CONTEXT_RESUME",
+  "limits": [
+    "When multiple campaigns match the same Environment definition and workspace, the caller must select the intended campaign identity from the continuation capsule.",
+    "The selected campaign still has two recorded Environment definitions; entry resumed only the exact selected definition and left the other session unchanged.",
+    "This proof does not establish compiler Stage-1 or Stage-2, compiler claim recovery, or the compiler resource-feedback vertical slice."
+  ]
+}
