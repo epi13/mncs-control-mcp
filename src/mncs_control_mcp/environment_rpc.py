@@ -409,14 +409,6 @@ class EnvironmentRPCServer:
         if command == "enter":
             for option in ("--definition", "--workspace"):
                 map_path_option(option)
-            has_campaign_id = False
-            for index, item in enumerate(translated):
-                if item == "--campaign-id" and index + 1 < len(translated):
-                    has_campaign_id = bool(translated[index + 1].strip())
-                    break
-                if item.startswith("--campaign-id="):
-                    has_campaign_id = bool(item.partition("=")[2].strip())
-                    break
             has_workspace = any(item == "--workspace" or item.startswith("--workspace=")
                                 for item in translated)
             if not has_workspace:
@@ -487,13 +479,13 @@ class EnvironmentRPCServer:
                                     "next": "use an authorized workspace-scoped execution or select a definition inside this project"
                                 },
                             )
-                    if has_campaign_id and record.scope == "project":
+                    if record.scope == "project":
                         # A project sandbox cannot name its host workspace
-                        # parent. For a campaign entry, Control may supply
-                        # that path only when the selected Environment
-                        # definition itself names exactly this granted
-                        # project. Environment still performs the durable
-                        # principal/campaign/definition/workspace selection.
+                        # parent. Control supplies that path only when the
+                        # selected Environment definition itself names exactly
+                        # this granted project. Environment then performs its
+                        # normal durable principal/campaign/context selection,
+                        # whether or not the caller already knows campaign_id.
                         repositories = (
                             scope.get("repositories")
                             if isinstance(scope, dict)
@@ -502,13 +494,13 @@ class EnvironmentRPCServer:
                         if repositories != [record.host_root.name]:
                             raise ControlError(
                                 "ENVIRONMENT_AUTHORITY_DENIED",
-                                "project-scoped campaign entry must declare only its granted repository",
+                                "project-scoped Environment entry must declare only its granted repository",
                                 details={"repository": record.host_root.name},
                             )
                         if definition.get("workspace_root", ".") not in (None, "", "."):
                             raise ControlError(
                                 "ENVIRONMENT_AUTHORITY_DENIED",
-                                "project-scoped campaign entry cannot override the owner-mapped workspace root",
+                                "project-scoped Environment entry cannot override the owner-mapped workspace root",
                                 details={"repository": record.host_root.name},
                             )
                         configured_root = Path(self.config.workspace_root).expanduser().resolve()

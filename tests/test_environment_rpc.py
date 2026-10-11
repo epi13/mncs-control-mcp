@@ -553,6 +553,60 @@ def test_entry_preserves_and_bounds_configured_workspace_root(tmp_path: Path) ->
     assert raised.value.code == "ENVIRONMENT_WORKSPACE_ESCAPE"
 
 
+def test_project_entry_maps_workspace_without_campaign_id(tmp_path: Path) -> None:
+    projects = tmp_path / "projects"
+    project = projects / "mncs-environment"
+    project.mkdir(parents=True)
+    definition = project / "environment.json"
+    definition.write_text(
+        json.dumps({"workspace_scope": {"repositories": ["mncs-environment"]}}),
+        encoding="utf-8",
+    )
+    server = EnvironmentRPCServer(
+        ControlConfig(
+            workspace_root=projects,
+            sandbox_home=tmp_path / "home",
+            environment_rpc_socket=tmp_path / "rpc" / "environment.sock",
+        ),
+        environment_service=SimpleNamespace(state_dir=tmp_path / "state"),
+        policy=object(),
+    )
+    grant = _GrantRecord(
+        grant_id="project-entry-no-campaign",
+        principal_id="principal-test",
+        host_root=project,
+        sandbox_root="/workspace/mncs-environment",
+        scope="project",
+        uid=0,
+        expires_at=time.monotonic() + 60,
+        token_file=tmp_path / "grant",
+    )
+
+    translated = server._translate_argv(
+        ["enter", "--definition", "/workspace/mncs-environment/environment.json"],
+        project,
+        grant,
+    )
+
+    assert translated == [
+        "enter", "--definition", str(definition), "--workspace", str(projects),
+    ]
+
+    definition.write_text(
+        json.dumps({"workspace_scope": {"repositories": [
+            "mncs-environment", "mncs-compiler",
+        ]}}),
+        encoding="utf-8",
+    )
+    with pytest.raises(ControlError) as raised:
+        server._translate_argv(
+            ["enter", "--definition", "/workspace/mncs-environment/environment.json"],
+            project,
+            grant,
+        )
+    assert raised.value.code == "ENVIRONMENT_AUTHORITY_DENIED"
+
+
 def test_retry_identity_replays_across_fresh_execution_grants(tmp_path: Path) -> None:
     server = EnvironmentRPCServer(
         ControlConfig(
