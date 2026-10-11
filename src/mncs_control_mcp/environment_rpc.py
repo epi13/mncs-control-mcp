@@ -10,6 +10,7 @@ from __future__ import annotations
 import errno
 import hashlib
 import json
+import logging
 import os
 import secrets
 import socket
@@ -35,6 +36,7 @@ ALLOWED_COMMANDS = frozenset({
     "retire", "continuation",
 })
 RPC_SANDBOX_SOCKET = "/run/mncs-environment-rpc/environment.sock"
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -305,7 +307,35 @@ class EnvironmentRPCServer:
             }).encode()
         connection.sendall(struct.pack("!I", len(payload)) + payload)
 
+    @staticmethod
+    def _test_drop_checkpoint_response_after_commit(
+        request: dict[str, Any], response: dict[str, Any],
+    ) -> bool:
+        """Match and consume one owner-armed post-commit response drop.
+
+        The one-shot environment variable is set only by an owner-controlled
+        acceptance run. A protected RPC caller cannot enable it, and normal
+        service operation has no response-loss path when it is absent.
+        """
+        variable = "MNCS_CONTROL_TEST_DROP_CHECKPOINT_RESPONSE_REQUEST_ID"
+        request_id = os.environ.get(variable, "")
+        if not request_id or request.get("request_id") != request_id:
+            return False
+        argv = request.get("argv")
+        if not isinstance(argv, list) or not argv or argv[0] != "checkpoint":
+            return False
+        result = response.get("result")
+        successful_checkpoint = (
+            response.get("ok") is True
+            and isinstance(result, dict)
+            and result.get("exit_code") == 0
+        )
+        if successful_checkpoint:
+            os.environ.pop(variable, None)
+        return successful_checkpoint
+
     def _serve_connection(self, connection: socket.socket) -> None:
+        request: dict[str, Any] | None = None
         with connection:
             try:
                 connection.settimeout(300.0)
@@ -325,6 +355,17 @@ class EnvironmentRPCServer:
                     "code": "ENVIRONMENT_RPC_INVALID_REQUEST",
                     "message": str(error),
                 }}
+            if request is not None and self._test_drop_checkpoint_response_after_commit(
+                request, response,
+            ):
+                # Close before sending the committed response. The protected
+                # client retries the same request ID and reconciles the cached
+                # result without a second authoritative publication.
+                LOGGER.info(
+                    "owner-armed checkpoint response drop after commit request_id=%s",
+                    request.get("request_id"),
+                )
+                return
             try:
                 self._send_frame(connection, response)
             except OSError:

@@ -24,6 +24,36 @@ from mncs_control_mcp.environment_rpc import (
 from mncs_control_mcp.errors import ControlError
 
 
+def test_post_commit_response_drop_requires_exact_successful_checkpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request_id = "req_post_commit_crash_test"
+    request = {"request_id": request_id, "argv": ["checkpoint", "ses_test"]}
+    response = {"ok": True, "result": {"exit_code": 0}}
+    variable = "MNCS_CONTROL_TEST_DROP_CHECKPOINT_RESPONSE_REQUEST_ID"
+    monkeypatch.delenv(variable, raising=False)
+    assert not EnvironmentRPCServer._test_drop_checkpoint_response_after_commit(
+        request, response,
+    )
+
+    monkeypatch.setenv(variable, request_id)
+    assert EnvironmentRPCServer._test_drop_checkpoint_response_after_commit(
+        request, response,
+    )
+    assert variable not in os.environ
+
+    monkeypatch.setenv(variable, request_id)
+    assert not EnvironmentRPCServer._test_drop_checkpoint_response_after_commit(
+        {**request, "request_id": "req_other"}, response,
+    )
+    assert not EnvironmentRPCServer._test_drop_checkpoint_response_after_commit(
+        {**request, "argv": ["inspect", "ses_test"]}, response,
+    )
+    assert not EnvironmentRPCServer._test_drop_checkpoint_response_after_commit(
+        request, {"ok": True, "result": {"exit_code": 1}},
+    )
+
+
 def test_path_options_are_mapped_in_split_and_equals_forms(tmp_path: Path) -> None:
     server = EnvironmentRPCServer(
         ControlConfig(
