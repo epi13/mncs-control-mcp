@@ -1,0 +1,71 @@
+{
+  "schema_version": "mncs.control.verified-campaign-charter-capsule/1",
+  "identity": "ev_control_verified_campaign_charter_capsule_20261011",
+  "recorded_at": "2026-10-11T09:53:00Z",
+  "campaign_identity": "cmp_mncs_continuity_20261010",
+  "implementation": {
+    "repository": "mncs-control-mcp",
+    "branch": "campaign/verified-charter-capsule-20261011",
+    "commit": "0119054bd1ea1d88cba45cd202939d1c7c2116ae",
+    "base_main": "ba024b9104633aeae8bc9214eb77d75719d70903",
+    "files": {
+      "src/mncs_control_mcp/environment_sessions.py": "46146454e4f84a3b6e5455948b5a822c130fc83598611c809f298ead4fab3862",
+      "tests/test_environment_sessions.py": "88c97e9b06ea5d53f6897c44819bce3daa2343dc81adbb455758efcaf547f961",
+      "README.md": "42f02ee7efa03d4d5571cebb899a4d4c5b897726abae2c56efe622bcd3197f6b"
+    }
+  },
+  "behavior": {
+    "source_of_charter_pointer": "authenticated Environment continuation evidence",
+    "read_boundary": "configured Environment project as an immediate nonsymlink child of workspace root",
+    "git_access": "exact full commit and normalized relative path via bounded git cat-file calls; no shell and no host path from evidence",
+    "verification": [
+      "bounded JSON blob size",
+      "SHA-256 equals the immutable Environment evidence reference",
+      "schema is mncs.environment.campaign-charter/1",
+      "charter campaign_identity equals the selected Environment campaign"
+    ],
+    "selection": "ambiguous charter references are omitted; Control still never auto-selects a campaign or session",
+    "projection": "bounded objective text and exact source identity are added to the authenticated continuation capsule only after verification"
+  },
+  "production_charter_reference": {
+    "repository": "mncs-environment",
+    "commit": "8fc6052c794c223a686d87fab7b794fbf934a120",
+    "path": "evidence/campaign-charter-continuity-20261011.json",
+    "evidence_identity": "ev_env_campaign_charter_20261011",
+    "sha256": "1b67657c87cdc3c49c93149ec839eb7f67e5b049c3ec5f2c410cfbd072641a26",
+    "verification_result": "PASS; implementation returned the exact charter objective for cmp_mncs_continuity_20261010"
+  },
+  "verification": {
+    "sandbox_backend": "bwrap",
+    "scope": "project",
+    "network": false,
+    "focused_pytest": {
+      "result": "PASS",
+      "passed": 7,
+      "failed": 0,
+      "cases": [
+        "test_campaign_continuation_projects_exact_git_verified_charter",
+        "test_campaign_continuation_omits_unverified_charter[digest]",
+        "test_campaign_continuation_omits_unverified_charter[campaign]",
+        "test_campaign_continuation_returns_project_scoped_duplicate_capsules",
+        "test_campaign_continuation_surfaces_bounded_context_conflict_capsules",
+        "test_campaign_continuation_hides_foreign_session_identity",
+        "test_campaign_continuation_requires_authenticated_principal_and_project_scope"
+      ]
+    },
+    "ruff": "PASS",
+    "git_diff_check": "PASS",
+    "supplementary_existing_isolated_store_test": {
+      "result": "UNAVAILABLE",
+      "diagnostic": "The protected Control project does not expose the mncs_store Python package to test_campaign_continuation_reads_real_isolated_store; failure occurs while importing the package before this capsule implementation runs."
+    }
+  },
+  "readiness": {
+    "exact_git_and_digest_verified_charter_projection": "PASS",
+    "digest_mismatch_rejected": "PASS",
+    "campaign_identity_mismatch_rejected": "PASS",
+    "protected_live_control_service_capsule_readback": "PENDING; requires delivery and service restart before end-to-end confirmation",
+    "overall_campaign": "PARTIAL; this change closes only objective discovery within campaign continuation"
+  },
+  "authority": "The projection grants no session selection, session adoption, claim transfer, repository write, or worktree retirement authority."
+}
