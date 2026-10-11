@@ -96,6 +96,10 @@ process still needs an authorized Store persistence transport. The endpoint
 never exposes Store paths or file descriptors to the sandbox.
 `env_status` and `system_status` report its live availability; a missing
 endpoint does not trigger file persistence or direct Store writes.
+The project-scoped CLI bridge permits `complete` only for a session owned by
+the grant's authenticated principal. Environment records completion intent
+before lifecycle transition and claim release; `--retry-pending` reconciles
+that intent after a caller or service interruption.
 The bridge additionally exposes Environment's retirement inventory only in
 `--inventory --dry-run` mode. It requires the authenticated session principal,
 maps the repository through the current execution grant, rejects branch,

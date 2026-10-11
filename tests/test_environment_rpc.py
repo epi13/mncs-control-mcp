@@ -614,6 +614,8 @@ def test_project_rpc_exposes_session_authorized_read_operations_and_reports_unkn
         stdout = (
             '{"providers":[{"provider_id":"forge","status":"unknown"}]}\n'
             if "capabilities" in argv else
+            '{"outcome":"done","claims_released":[]}\n'
+            if "complete" in argv else
             '{"overall":"unknown","providers":{"forge":"unknown"}}\n'
         )
         return SimpleNamespace(
@@ -652,13 +654,28 @@ def test_project_rpc_exposes_session_authorized_read_operations_and_reports_unkn
     assert calls[1][1]["env"]["MNCS_ENV_AUTH_PRINCIPAL_ID"] == "principal-agent"
     assert calls[1][1]["env"]["MNCS_ENV_RPC_REQUEST_ID"] == "req_project_capabilities"
 
+    completion = server.dispatch({
+        **request,
+        "request_id": "req_project_complete",
+        "argv": ["complete", "ses_health", "--outcome", "done",
+                 "--summary", "campaign closed"],
+    }, peer_uid=0)
+    assert completion["ok"] is True
+    assert json.loads(completion["result"]["stdout"])["outcome"] == "done"
+    assert calls[2][0][-6:] == [
+        "complete", "ses_health", "--outcome", "done", "--summary", "campaign closed",
+    ]
+    assert calls[2][1]["env"]["MNCS_ENV_AUTH_PRINCIPAL_ID"] == "principal-agent"
+    assert calls[2][1]["env"]["MNCS_ENV_RPC_REQUEST_ID"] == "req_project_complete"
+
     snapshot["authenticated_principal_id"] = "different-principal"
     foreign = server.dispatch({
         **request,
         "request_id": "req_project_health_foreign",
+        "argv": ["complete", "ses_health", "--outcome", "done"],
     }, peer_uid=0)
     assert foreign["error"]["code"] == "ENVIRONMENT_AUTHORITY_DENIED"
-    assert len(calls) == 2
+    assert len(calls) == 3
 
     unsupported = server.dispatch({
         **request,
@@ -668,7 +685,7 @@ def test_project_rpc_exposes_session_authorized_read_operations_and_reports_unkn
     assert unsupported["error"]["code"] == "ENVIRONMENT_OPERATION_UNAVAILABLE"
     assert unsupported["error"]["details"]["status"] == "unknown"
     assert unsupported["error"]["details"]["operation"] == "doctor"
-    assert len(calls) == 2
+    assert len(calls) == 3
 
 
 def test_retire_rpc_exposes_only_scoped_read_only_inventory(tmp_path: Path) -> None:

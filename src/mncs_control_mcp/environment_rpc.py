@@ -31,6 +31,7 @@ MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 MAX_ARGUMENT_BYTES = 32 * 1024
 ALLOWED_COMMANDS = frozenset({
     "enter", "inspect", "context", "resume", "health", "capabilities", "checkpoint", "handoff", "accept", "claims",
+    "complete",
     "retire", "continuation",
 })
 RPC_SANDBOX_SOCKET = "/run/mncs-environment-rpc/environment.sock"
@@ -752,7 +753,7 @@ class EnvironmentRPCServer:
             # The client cannot choose this root. Environment must not probe a
             # registered checkout outside the execution grant's namespace.
             argv.extend(["--execution-root", str(record.host_root)])
-        if command in {"inspect", "context", "resume", "health", "capabilities", "checkpoint", "handoff", "accept", "claims", "retire"}:
+        if command in {"inspect", "context", "resume", "health", "capabilities", "checkpoint", "handoff", "accept", "claims", "complete", "retire"}:
             try:
                 command_index = argv.index(command)
                 positional = (
