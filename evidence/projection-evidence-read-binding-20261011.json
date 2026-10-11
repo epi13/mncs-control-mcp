@@ -1,0 +1,143 @@
+{
+  "schema_version": "mncs.control.campaign-delivery-checkpoint/1",
+  "identity": "ev_control_projection_evidence_read_binding_20261011",
+  "recorded_at": "2026-10-11T16:27:25Z",
+  "campaign_identity": "cmp_mncs_continuity_20261010",
+  "source": {
+    "repository": "mncs-control-mcp",
+    "base_commit": "b3138c837bc082a6d4cc5501490b8101f631e815",
+    "implementation_commit": "04660e9a0b9e4987779308378c07e2abeb76f9d6",
+    "test_commit": "e2aa4391771812cf02045d634941d56e62592118",
+    "branch": "campaign/env-projection-evidence-read-20261011",
+    "working_tree_clean_before_artifact": true
+  },
+  "change": {
+    "owner": "MNCS Control",
+    "operation": "env_projection_evidence",
+    "effect": "read-only",
+    "behavior": "Reads the latest projection evidence and bounded history through Environment's existing Store reader for one session authenticated to the Control principal.",
+    "does_not": [
+      "run a projection pass",
+      "accept a caller-selected evidence reference",
+      "expose Store paths or file descriptors",
+      "open generic Environment invocation"
+    ],
+    "authorization": "User authorized mncs-control-mcp scope for this campaign. Environment session principal and session ownership are checked before Store read."
+  },
+  "verification": {
+    "protected_execution": {
+      "sandbox_backend": "bwrap",
+      "scope": "project",
+      "project": "mncs-control-mcp",
+      "network": false,
+      "canonical_store_directly_visible": false,
+      "canonical_store_directly_writable": false,
+      "persistence_transport": "authenticated Environment RPC through MNCS Control"
+    },
+    "tests": [
+      {
+        "command": "python3 -B -m pytest -q tests/test_environment_sessions.py -k projection_evidence",
+        "result": "PASS; 4 tests, including authenticated isolated Store evidence readback, foreign-session rejection, unauthenticated rejection, and read-only behavior"
+      },
+      {
+        "command": "python3 -B -m pytest -q tests/test_mcp_server.py -k persistent_fabric_without_admin_surface",
+        "result": "PASS; tool registration, required session argument, read-only annotation, and tool-surface status"
+      },
+      {
+        "command": "python3 -B -m pytest -q tests/test_environment_sessions.py",
+        "result": "PASS before the final isolated-Store test was added; the new test passed separately in host and protected Bwrap runs"
+      },
+      {
+        "command": "python3 -B -m compileall -q src/mncs_control_mcp/environment_sessions.py src/mncs_control_mcp/server.py src/mncs_control_mcp/manifest.py",
+        "result": "PASS"
+      },
+      {
+        "command": "git diff --check",
+        "result": "PASS"
+      }
+    ],
+    "live_campaign_continuation": {
+      "command": "python3 -B -m mncs_env.cli continuation --campaign-id cmp_mncs_continuity_20261010",
+      "observed_at": "2026-10-11T16:18:57Z",
+      "result": "PASS; read through authenticated RPC from project Bwrap",
+      "status": "context-conflict",
+      "same_campaign_sessions": [
+        "ses_7226fbcfe65820f7",
+        "ses_b4b2d283542220b0"
+      ],
+      "selected_project_reference": {
+        "session_id": "ses_7226fbcfe65820f7",
+        "status": "linked",
+        "basis": [
+          "campaign.repository_refs",
+          "active_claim.repository"
+        ],
+        "recorded_path": "mncs-control-mcp",
+        "live_path": "/home/epi13/Documents/Projects/mncs-control-mcp",
+        "recorded_head": "b3138c837bc082a6d4cc5501490b8101f631e815",
+        "live_head": "b3138c837bc082a6d4cc5501490b8101f631e815",
+        "checkout_comparison": "same_checkout"
+      },
+      "mutation_performed": false
+    },
+    "nested_bwrap_test_attempt": {
+      "result": "UNAVAILABLE",
+      "diagnostic": "Nested namespace creation failed with ENOSPC (namespace nesting/resource limit). Direct project Bwrap RPC and changed tests succeeded."
+    }
+  },
+  "readiness": {
+    "binding_source_and_tests": "PASS",
+    "isolated_store_readback": "PASS",
+    "canonical_binding_readback": "NOT_YET_RUN",
+    "running_control_service": "still serves origin/main; branch code requires authorized merge and service restart before live MCP invocation",
+    "campaign_context": "two active same-campaign Environment contexts remain explicit; neither was adopted or changed",
+    "control_claim": {
+      "claim_id": "claim:mncs-control-mcp",
+      "version": 3,
+      "session_id": "ses_7226fbcfe65820f7",
+      "recorded_consumer_id": "codex-process-2",
+      "verdict": "live",
+      "expires_at": "2026-10-12T19:38:55+00:00"
+    }
+  },
+  "delivery": {
+    "status": "committed_on_campaign_branch",
+    "implementation_commit": "04660e9a0b9e4987779308378c07e2abeb76f9d6",
+    "test_commit": "e2aa4391771812cf02045d634941d56e62592118",
+    "merged_to_main": false,
+    "pushed": false,
+    "reason": "Environment reports merge and publish as escalation-required; no escalation was issued in this checkpoint."
+  },
+  "candidate_delivery": [
+    {
+      "repository": "mncs-language",
+      "candidate": "fc49c0c",
+      "status": "patch already represented on main; candidate worktree unavailable in current namespace and retained"
+    },
+    {
+      "repository": "mncs-forge",
+      "candidate": "608334b",
+      "status": "unmerged; claim v28 remains live under ses_95c3aa35b8544042; no tests or retirement"
+    },
+    {
+      "repository": "mncs-compiler",
+      "candidate": "2b6f381",
+      "status": "evidence-only, 14 behind and 1 ahead; claim v63 remains live under ses_d2537acde8b8a875; no tests or retirement"
+    }
+  ],
+  "unresolved_pressures": [
+    "CP-0011",
+    "CP-0023",
+    "CP-0024",
+    "CP-0025",
+    "Compiler Stage-1 and Stage-2 remain unproven",
+    "Automation and System Monitor writable scope is pending"
+  ],
+  "next": [
+    "After merge and Control service restart authorization, call env_projection_evidence against a real authenticated campaign session and verify the returned Store reference.",
+    "Keep both Environment contexts intact until an authenticated exact-context handoff or selection resolves the conflict.",
+    "Continue canonical Store service-interruption acceptance and finish bounded claim acquisition/release and stale-CAS proofs.",
+    "Revalidate protected Forge and Compiler candidate claims before tests or delivery.",
+    "Resume compiler and resource-feedback work after Automation and System Monitor project scope is available."
+  ]
+}
