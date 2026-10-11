@@ -1,0 +1,78 @@
+{
+  "schema_version": "mncs.control.project-reference-capsule-proof/1",
+  "identity": "ev_control_project_reference_capsule_20261011",
+  "observed_at": "2026-10-11T11:10:07Z",
+  "source": {
+    "repository": "mncs-control-mcp",
+    "commit": "fec937d7edc41c4e70045cc18eab5c4ae9e75c42",
+    "branch": "main",
+    "artifacts": {
+      "src/mncs_control_mcp/environment_sessions.py": "e3c38de0a5fddf9c70c3f1f4986753bd682e709ab87de6557a49ef4c44186f81",
+      "tests/test_environment_sessions.py": "0959ffca95fad51ec3b1014f915652d42fbbb8955ed65b50e0be9d008c5643f6",
+      "README.md": "74f37c8c9a03f3caf0859d33b006d0848416559461da6187103c8a271dc424d8"
+    }
+  },
+  "validation": {
+    "sandbox_backend": "bwrap",
+    "scope": "project",
+    "project": "mncs-control-mcp",
+    "tests": [
+      {
+        "command": "python3 -B -m pytest -q tests/test_environment_sessions.py",
+        "status": "passed",
+        "passed": 14,
+        "skipped": 1
+      },
+      {
+        "command": "python3 -B -m pytest -q tests/test_environment_sessions.py -k 'campaign_continuation_returns_project_scoped_duplicate_capsules or campaign_continuation_surfaces_bounded_context_conflict_capsules'",
+        "status": "passed",
+        "passed": 2
+      },
+      {
+        "command": "ruff check src/mncs_control_mcp/environment_sessions.py tests/test_environment_sessions.py",
+        "status": "passed"
+      }
+    ]
+  },
+  "live_project_lookup": {
+    "command": "python3 -m mncs_env.cli continuation",
+    "campaign_id_supplied": false,
+    "session_id_supplied": false,
+    "sandbox_backend": "bwrap",
+    "scope": "project",
+    "project": "mncs-control-mcp",
+    "persistence_path": "authenticated Control Environment RPC to canonical Store",
+    "direct_store_filesystem_access": false,
+    "mutating": false,
+    "status": "context-conflict",
+    "campaign_id_discovered": "cmp_mncs_continuity_20261010",
+    "continuations": [
+      {
+        "session_id": "ses_7226fbcfe65820f7",
+        "definition_id": "env_f31ee034e8e1fdcb",
+        "lifecycle": "active",
+        "project_reference": {
+          "status": "linked",
+          "basis": [
+            "campaign.repository_refs",
+            "active_claim.repository"
+          ]
+        }
+      },
+      {
+        "session_id": "ses_b4b2d283542220b0",
+        "definition_id": "env_1ea3af15c7464177",
+        "lifecycle": "active",
+        "project_reference": {
+          "status": "same_campaign_only",
+          "basis": []
+        }
+      }
+    ],
+    "ownership_mutation": "none; neither session was resumed, transferred, or adopted"
+  },
+  "limitations": [
+    "The continuation capsule identifies repository linkage and exact Environment definitions but intentionally leaves selection and any ownership transition explicit.",
+    "This proof does not establish claim transfer or claim recovery for either session."
+  ]
+}
