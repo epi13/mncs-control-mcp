@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -135,6 +136,72 @@ def test_environment_grant_is_mounted_only_in_its_execution(config) -> None:
         except subprocess.TimeoutExpired:
             process.kill()
             process.wait(timeout=3)
+        rpc.revoke_grant(grant)
+        rpc.close()
+        shutil.rmtree(private_root)
+
+
+@pytest.mark.requires_bwrap_namespace
+def test_project_bwrap_reads_campaign_capsule_through_environment_rpc(config) -> None:
+    project = config.workspace_root / "mncs-environment"
+    project.mkdir()
+    environment_root = Path(__file__).resolve().parents[2] / "mncs-environment"
+    if not (environment_root / "mncs_env" / "cli.py").is_file():
+        pytest.skip("sibling mncs-environment checkout is unavailable")
+
+    class Environment:
+        def __init__(self) -> None:
+            self.state_dir = config.job_state_path.parent / "environment-state"
+            self.environment_path = environment_root
+            self.authenticated_principal_id: str | None = None
+
+        def campaign_continuation(self, repository: str, campaign_id: str | None = None):
+            assert repository == "mncs-environment"
+            assert campaign_id is None
+            return {
+                "schema_version": "mncs.control.campaign-continuation/1",
+                "repository": repository,
+                "status": "ambiguous",
+                "continuations": [
+                    {"session_id": "ses_one", "campaign_id": "cmp_test"},
+                    {"session_id": "ses_two", "campaign_id": "cmp_test"},
+                ],
+            }
+
+    policy = WorkspacePolicy(config)
+    private_root = Path(tempfile.mkdtemp(prefix="mce-", dir="/tmp"))
+    endpoint_config = replace(
+        config,
+        environment_rpc_socket=private_root / "environment.sock",
+    )
+    environment = Environment()
+    rpc = EnvironmentRPCServer(endpoint_config, environment, policy)
+    rpc.start()
+    environment.authenticated_principal_id = rpc.principal_id
+    sandbox = Sandbox(config, policy)
+    sandbox.environment_rpc = rpc
+    resolution = policy.resolve_scope(
+        scope="project", project="mncs-environment", cwd=".",
+    )
+    grant = rpc.issue_grant(resolution)
+    try:
+        argv, _enabled = sandbox.command_argv(
+            "test ! -e /home/developer/.local/share/mncs-environment/store "
+            "&& python3 -B -m mncs_env.cli continuation",
+            resolution,
+            network=False,
+            environment_rpc_grant=grant,
+        )
+        result = subprocess.run(
+            argv, capture_output=True, text=True, timeout=30, check=False, env={},
+        )
+        assert result.returncode == 0, result.stderr
+        capsule = json.loads(result.stdout)
+        assert capsule["status"] == "ambiguous"
+        assert [item["session_id"] for item in capsule["continuations"]] == [
+            "ses_one", "ses_two",
+        ]
+    finally:
         rpc.revoke_grant(grant)
         rpc.close()
         shutil.rmtree(private_root)

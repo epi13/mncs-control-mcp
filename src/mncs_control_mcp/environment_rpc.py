@@ -30,7 +30,7 @@ MAX_REQUEST_BYTES = 256 * 1024
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 ALLOWED_COMMANDS = frozenset({
     "enter", "inspect", "context", "resume", "checkpoint", "handoff", "accept", "claims",
-    "retire",
+    "retire", "continuation",
 })
 RPC_SANDBOX_SOCKET = "/run/mncs-environment-rpc/environment.sock"
 
@@ -700,6 +700,11 @@ class EnvironmentRPCServer:
             raise ControlError("ENVIRONMENT_WORKSPACE_MISSING", "client cwd is unavailable in the host namespace")
         argv = self._translate_argv(request.get("argv"), cwd, record)
         command = argv[0]
+        request_id = request.get("request_id")
+        if not isinstance(request_id, str) or not request_id.startswith("req_") or len(request_id) > 80:
+            raise ControlError("ENVIRONMENT_RPC_INVALID_REQUEST", "stable request identity is invalid")
+        if command == "continuation":
+            return self._campaign_continuation(record, argv, request_id)
         if command == "retire":
             # The client cannot choose this root. Environment must not probe a
             # registered checkout outside the execution grant's namespace.
@@ -746,9 +751,6 @@ class EnvironmentRPCServer:
                     raise ControlError("ENVIRONMENT_RPC_INVALID_REQUEST",
                                        "claim transfer needs a target session") from error
                 self._authorize_session(target, record.principal_id)
-        request_id = request.get("request_id")
-        if not isinstance(request_id, str) or not request_id.startswith("req_") or len(request_id) > 80:
-            raise ControlError("ENVIRONMENT_RPC_INVALID_REQUEST", "stable request identity is invalid")
         cli_source = self.environment_service.environment_path
         program = "from mncs_env.cli import main; raise SystemExit(main())"
         process_env = {
@@ -776,6 +778,89 @@ class EnvironmentRPCServer:
             "exit_code": completed.returncode,
             "stdout": stdout,
             "stderr": stderr,
+            "request_id": request_id,
+            "principal_id": record.principal_id,
+        }}
+
+    def _campaign_continuation(
+        self, record: _GrantRecord, argv: list[str], request_id: str,
+    ) -> dict[str, Any]:
+        """Return the existing Control-owned capsule for one project grant.
+
+        A project-scoped grant identifies its one immediate checkout. The
+        caller cannot widen that identity with a repository or principal
+        argument, and the existing Environment adapter still performs
+        authenticated Store lookup and domain filtering.
+        """
+        if record.scope != "project":
+            raise ControlError(
+                "ENVIRONMENT_AUTHORITY_DENIED",
+                "campaign continuation requires a project-scoped execution grant",
+            )
+        campaign_id: str | None = None
+        index = 1
+        while index < len(argv):
+            item = argv[index]
+            if item == "--campaign-id":
+                if campaign_id is not None or index + 1 >= len(argv):
+                    raise ControlError(
+                        "ENVIRONMENT_RPC_INVALID_REQUEST",
+                        "continuation accepts at most one nonempty --campaign-id",
+                    )
+                campaign_id = argv[index + 1]
+                if campaign_id.startswith("--"):
+                    raise ControlError(
+                        "ENVIRONMENT_RPC_INVALID_REQUEST",
+                        "--campaign-id needs a value, not another option",
+                    )
+                index += 2
+            elif item.startswith("--campaign-id="):
+                if campaign_id is not None:
+                    raise ControlError(
+                        "ENVIRONMENT_RPC_INVALID_REQUEST",
+                        "continuation accepts at most one --campaign-id",
+                    )
+                campaign_id = item.partition("=")[2]
+                index += 1
+            else:
+                raise ControlError(
+                    "ENVIRONMENT_RPC_INVALID_REQUEST",
+                    "continuation accepts only an optional --campaign-id",
+                )
+        if campaign_id is not None and (
+            not campaign_id.strip() or campaign_id.startswith("--")
+            or len(campaign_id) > 160 or "\x00" in campaign_id
+        ):
+            raise ControlError(
+                "ENVIRONMENT_CAMPAIGN_ID_INVALID",
+                "campaign identity must be bounded nonempty text when supplied",
+            )
+
+        configured_root = Path(self.config.workspace_root).expanduser().resolve()
+        try:
+            project_root = record.host_root.expanduser().resolve(strict=True)
+        except OSError as error:
+            raise ControlError(
+                "ENVIRONMENT_PROJECT_UNKNOWN",
+                "project-scoped continuation checkout is unavailable",
+            ) from error
+        if project_root.parent != configured_root or not project_root.is_dir():
+            raise ControlError(
+                "ENVIRONMENT_WORKSPACE_ESCAPE",
+                "project-scoped continuation grant does not identify an immediate configured project",
+            )
+        if getattr(self.environment_service, "authenticated_principal_id", None) != record.principal_id:
+            raise ControlError(
+                "ENVIRONMENT_AUTHORITY_DENIED",
+                "campaign continuation is not bound to the Control-authenticated principal",
+            )
+        capsule = self.environment_service.campaign_continuation(
+            project_root.name, campaign_id,
+        )
+        return {"ok": True, "result": {
+            "exit_code": 0,
+            "stdout": json.dumps(capsule, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            "stderr": "",
             "request_id": request_id,
             "principal_id": record.principal_id,
         }}

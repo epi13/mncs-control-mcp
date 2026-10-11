@@ -54,6 +54,151 @@ def test_path_options_are_mapped_in_split_and_equals_forms(tmp_path: Path) -> No
     assert equals == ["enter", "--workspace=" + str(host_root / "nested")]
 
 
+def test_project_grant_returns_authenticated_campaign_capsule(tmp_path: Path) -> None:
+    workspace = tmp_path / "projects"
+    project = workspace / "mncs-environment"
+    project.mkdir(parents=True)
+    calls: list[tuple[str, str | None]] = []
+
+    class Environment:
+        state_dir = tmp_path / "state"
+        environment_path = tmp_path / "environment"
+        authenticated_principal_id = "principal-test"
+
+        def campaign_continuation(self, repository: str, campaign_id: str | None = None):
+            calls.append((repository, campaign_id))
+            return {
+                "schema_version": "mncs.control.campaign-continuation/1",
+                "repository": repository,
+                "campaign_id": campaign_id,
+                "status": "ambiguous",
+                "continuations": [
+                    {"session_id": "ses_one", "campaign_id": "cmp_test"},
+                    {"session_id": "ses_two", "campaign_id": "cmp_test"},
+                ],
+            }
+
+    server = EnvironmentRPCServer(
+        ControlConfig(
+            workspace_root=workspace,
+            sandbox_home=tmp_path / "home",
+            environment_rpc_socket=tmp_path / "rpc" / "environment.sock",
+        ),
+        environment_service=Environment(),
+        policy=object(),
+    )
+    token = "project-continuation-capability"
+    server._grants[hashlib.sha256(token.encode()).hexdigest()] = _GrantRecord(
+        grant_id="project-continuation-grant",
+        principal_id="principal-test",
+        host_root=project,
+        sandbox_root="/workspace/mncs-environment",
+        scope="project",
+        uid=0,
+        expires_at=time.monotonic() + 60,
+        token_file=tmp_path / "grant",
+    )
+    request = {
+        "grant": token,
+        "request_id": "req_project_campaign_capsule",
+        "argv": ["continuation"],
+        "cwd": "/workspace/mncs-environment",
+    }
+
+    response = server.dispatch(request, peer_uid=0)
+    replay = server.dispatch(request, peer_uid=0)
+
+    assert response["ok"] is True
+    assert response == replay
+    assert response["result"]["exit_code"] == 0
+    capsule = json.loads(response["result"]["stdout"])
+    assert capsule["status"] == "ambiguous"
+    assert [item["session_id"] for item in capsule["continuations"]] == [
+        "ses_one", "ses_two",
+    ]
+    assert calls == [("mncs-environment", None)]
+
+    selected = server.dispatch({
+        **request,
+        "request_id": "req_project_campaign_selected",
+        "argv": ["continuation", "--campaign-id=cmp_test"],
+    }, peer_uid=0)
+    assert json.loads(selected["result"]["stdout"])["campaign_id"] == "cmp_test"
+    assert calls == [("mncs-environment", None), ("mncs-environment", "cmp_test")]
+
+
+def test_campaign_capsule_rejects_wider_or_unbound_requests(tmp_path: Path) -> None:
+    workspace = tmp_path / "projects"
+    project = workspace / "mncs-environment"
+    project.mkdir(parents=True)
+
+    class Environment:
+        state_dir = tmp_path / "state"
+        environment_path = tmp_path / "environment"
+        authenticated_principal_id = "principal-test"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def campaign_continuation(self, _repository: str, _campaign_id: str | None = None):
+            self.calls += 1
+            return {"status": "not-found", "continuations": []}
+
+    environment = Environment()
+    server = EnvironmentRPCServer(
+        ControlConfig(
+            workspace_root=workspace,
+            sandbox_home=tmp_path / "home",
+            environment_rpc_socket=tmp_path / "rpc" / "environment.sock",
+        ),
+        environment_service=environment,
+        policy=object(),
+    )
+    token = "project-continuation-boundary"
+    server._grants[hashlib.sha256(token.encode()).hexdigest()] = _GrantRecord(
+        grant_id="project-continuation-grant",
+        principal_id="principal-test",
+        host_root=project,
+        sandbox_root="/workspace/mncs-environment",
+        scope="project",
+        uid=0,
+        expires_at=time.monotonic() + 60,
+        token_file=tmp_path / "grant",
+    )
+
+    def request(identity: str, argv: list[str]):
+        return server.dispatch({
+            "grant": token,
+            "request_id": identity,
+            "argv": argv,
+            "cwd": "/workspace/mncs-environment",
+        }, peer_uid=0)
+
+    wider = request("req_continuation_wider", ["continuation", "--repository", "another-project"])
+    assert wider["error"]["code"] == "ENVIRONMENT_RPC_INVALID_REQUEST"
+    assert environment.calls == 0
+
+    environment.authenticated_principal_id = "different-principal"
+    unbound = request("req_continuation_unbound", ["continuation"])
+    assert unbound["error"]["code"] == "ENVIRONMENT_AUTHORITY_DENIED"
+    assert environment.calls == 0
+
+    environment.authenticated_principal_id = "principal-test"
+    server._grants[hashlib.sha256(token.encode()).hexdigest()] = _GrantRecord(
+        grant_id="workspace-continuation-grant",
+        principal_id="principal-test",
+        host_root=workspace,
+        sandbox_root="/workspace",
+        scope="workspace",
+        uid=0,
+        expires_at=time.monotonic() + 60,
+        token_file=tmp_path / "grant",
+    )
+    broad_scope = request("req_continuation_workspace_scope", ["continuation"])
+    assert broad_scope["error"]["code"] == "ENVIRONMENT_AUTHORITY_DENIED"
+    assert environment.calls == 0
+
+
 def test_retire_rpc_exposes_only_scoped_read_only_inventory(tmp_path: Path) -> None:
     server = EnvironmentRPCServer(
         ControlConfig(
