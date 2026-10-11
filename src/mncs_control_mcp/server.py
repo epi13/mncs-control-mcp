@@ -613,6 +613,15 @@ def build_server(config: ControlConfig | None = None) -> Any:
     def env_inspect(session_id: str) -> dict[str, object]:
         return invoke("env_inspect", environment_sessions.inspect, session_id, audit_metadata={"session_id": session_id})  # type: ignore[return-value]
 
+    @server.tool(name="env_projection_evidence", description="Read retained Environment projection evidence for one authenticated session. This reads the latest immutable evidence and history; it does not run a projection pass.", annotations=ro, structured_output=True)
+    def env_projection_evidence(session_id: str) -> dict[str, object]:
+        return invoke(
+            "env_projection_evidence",
+            environment_sessions.projection_evidence,
+            session_id,
+            audit_metadata={"session_id": session_id},
+        )  # type: ignore[return-value]
+
     @server.tool(name="env_resume", description="Resume participation in one environment session without changing its lifecycle state.", annotations=mutate, structured_output=True)
     def env_resume(session_id: str) -> dict[str, object]:
         return invoke("env_resume", environment_sessions.resume, session_id, audit_metadata={"session_id": session_id})  # type: ignore[return-value]

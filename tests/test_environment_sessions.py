@@ -624,6 +624,119 @@ def test_enter_forwards_explicit_campaign_identity(tmp_path: Path) -> None:
     assert captured["campaign_id"] == "campaign-1"
 
 
+def test_projection_evidence_reads_authenticated_session_without_mutating_it(
+    tmp_path: Path,
+) -> None:
+    snapshot = {
+        "session_id": "ses_projection_test",
+        "authenticated_principal_id": "principal-test",
+        "snapshot_sequence": 17,
+        "projection_epoch": {
+            "epoch": "epoch-17",
+            "at": "2026-10-11T12:00:00+00:00",
+            "evidence_ref": "store:sha256:abc123",
+            "private_field": "not part of the public capsule",
+        },
+    }
+    before = json.dumps(snapshot, sort_keys=True)
+    evidence = {"schema_version": "mncs.projection-evidence/1", "results": []}
+    history = [{"at": "2026-10-11T12:00:00+00:00", "mode": "ambient"}]
+    opened: list[str] = []
+    reads: list[str] = []
+
+    class Store:
+        closed = False
+
+        def load_snapshot(self, session_id: str):
+            return snapshot if session_id == "ses_projection_test" else None
+
+        def close(self):
+            self.closed = True
+
+    store = Store()
+
+    class Session:
+        @staticmethod
+        def open(**kwargs):
+            opened.append(kwargs["session_id"])
+            return SimpleNamespace(snapshot=snapshot)
+
+    def read_evidence(session):
+        reads.append(session.snapshot["session_id"])
+        return {"evidence": evidence, "history": history}
+
+    service = EnvironmentService(_config(tmp_path))
+    service.authenticated_principal_id = "principal-test"
+    service._pkg = lambda: SimpleNamespace(
+        sessions=SimpleNamespace(Session=Session),
+        projections=SimpleNamespace(read_evidence=read_evidence),
+    )
+    service._store = lambda _pkg: store
+
+    result = service.projection_evidence("ses_projection_test")
+
+    assert result == {
+        "schema_version": "mncs.control.environment-projection-evidence/1",
+        "session_id": "ses_projection_test",
+        "snapshot_version": 17,
+        "projection_epoch": {
+            "epoch": "epoch-17",
+            "at": "2026-10-11T12:00:00+00:00",
+            "evidence_ref": "store:sha256:abc123",
+        },
+        "evidence": evidence,
+        "history": history,
+    }
+    assert opened == ["ses_projection_test"]
+    assert reads == ["ses_projection_test"]
+    assert store.closed is True
+    assert json.dumps(snapshot, sort_keys=True) == before
+
+
+def test_projection_evidence_rejects_foreign_session_before_read(tmp_path: Path) -> None:
+    snapshot = {
+        "session_id": "ses_foreign",
+        "authenticated_principal_id": "principal-owner",
+    }
+    reads: list[str] = []
+
+    class Store:
+        def load_snapshot(self, _session_id: str):
+            return snapshot
+
+        def close(self):
+            pass
+
+    class Session:
+        @staticmethod
+        def open(**_kwargs):
+            raise AssertionError("foreign session must be rejected before open")
+
+    service = EnvironmentService(_config(tmp_path))
+    service.authenticated_principal_id = "principal-caller"
+    service._pkg = lambda: SimpleNamespace(
+        sessions=SimpleNamespace(Session=Session),
+        projections=SimpleNamespace(read_evidence=lambda _session: reads.append("read")),
+    )
+    service._store = lambda _pkg: Store()
+
+    with pytest.raises(ControlError) as raised:
+        service.projection_evidence("ses_foreign")
+
+    assert raised.value.code == "ENVIRONMENT_AUTHORITY_DENIED"
+    assert reads == []
+
+
+def test_projection_evidence_requires_control_principal(tmp_path: Path) -> None:
+    service = EnvironmentService(_config(tmp_path))
+    service._pkg = lambda: pytest.fail("unauthenticated reads must fail before Store access")
+
+    with pytest.raises(ControlError) as raised:
+        service.projection_evidence("ses_projection_test")
+
+    assert raised.value.code == "ENVIRONMENT_AUTHORITY_DENIED"
+
+
 @needs_environment
 def test_campaign_continuation_reads_real_isolated_store(tmp_path: Path) -> None:
     repository = "mncs-control-mcp"

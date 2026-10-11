@@ -32,6 +32,10 @@ _ENVIRONMENT_CONTINUATION_TOOLS = {
     "env_resume",
 }
 
+_ENVIRONMENT_PROJECTION_EVIDENCE_TOOLS = {
+    "env_projection_evidence",
+}
+
 
 def tool_surface_manifest(names: Iterable[str]) -> dict[str, Any]:
     """Return a stable non-secret identity for the advertised MCP tool-name surface."""
@@ -45,4 +49,7 @@ def tool_surface_manifest(names: Iterable[str]) -> dict[str, Any]:
         "experiment_tools_present": _EXPERIMENT_TOOLS <= set(ordered),
         "journal_context_tools_present": _JOURNAL_CONTEXT_TOOLS <= set(ordered),
         "environment_continuation_tools_present": _ENVIRONMENT_CONTINUATION_TOOLS <= set(ordered),
+        "environment_projection_evidence_tools_present": (
+            _ENVIRONMENT_PROJECTION_EVIDENCE_TOOLS <= set(ordered)
+        ),
     }

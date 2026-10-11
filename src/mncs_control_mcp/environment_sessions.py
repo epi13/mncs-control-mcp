@@ -1016,6 +1016,66 @@ class EnvironmentService:
             if callable(close):
                 close()
 
+    def projection_evidence(self, session_id: str) -> dict[str, Any]:
+        """Read stored projection evidence for one authenticated session.
+
+        Environment owns projection meaning and Store admission. Control only
+        exposes the owner's read operation for a session whose authenticated
+        principal matches this connection; it does not run a projection pass
+        or accept an evidence reference supplied by the caller.
+        """
+        if (not isinstance(session_id, str) or not session_id.strip()
+                or len(session_id) > 160 or "\x00" in session_id):
+            raise ControlError(
+                "ENVIRONMENT_SESSION_INVALID",
+                "session identity must be bounded nonempty text",
+            )
+        if self.authenticated_principal_id is None:
+            raise ControlError(
+                "ENVIRONMENT_AUTHORITY_DENIED",
+                "projection evidence requires a Control-authenticated principal",
+            )
+        pkg = self._pkg()
+        store = self._store(pkg)
+        try:
+            snapshot = self._authorize_session(store, session_id)
+            session = pkg.sessions.Session.open(
+                state_dir=self.state_dir, session_id=session_id,
+                backend="store", store=store,
+            )
+            projection_store = getattr(pkg, "projections", None)
+            if projection_store is None:
+                projection_store = importlib.import_module(f"{PACKAGE}.projections")
+            result = projection_store.read_evidence(session)
+            epoch = snapshot.get("projection_epoch")
+            epoch = epoch if isinstance(epoch, dict) else {}
+            return {
+                "schema_version": "mncs.control.environment-projection-evidence/1",
+                "session_id": session_id,
+                "snapshot_version": int(snapshot.get("snapshot_sequence", 0)),
+                "projection_epoch": {
+                    key: epoch.get(key)
+                    for key in ("epoch", "at", "evidence_ref")
+                    if key in epoch
+                },
+                "evidence": result.get("evidence"),
+                "history": result.get("history", []),
+            }
+        except ControlError:
+            raise
+        except Exception as exc:
+            if type(exc).__name__ in {"StoreIntegrityFailure", "StoreCorruption"}:
+                raise ControlError("ENVIRONMENT_STORE_CORRUPTION", str(exc)) from exc
+            if type(exc).__name__ == "StoreUnavailable":
+                raise ControlError("ENVIRONMENT_PERSISTENCE_UNAVAILABLE", str(exc)) from exc
+            raise ControlError(
+                "ENVIRONMENT_PROJECTION_EVIDENCE_FAILED", str(exc)
+            ) from exc
+        finally:
+            close = getattr(store, "close", None)
+            if callable(close):
+                close()
+
     def resume(self, session_id: str) -> dict[str, Any]:
         sessions = self._sessions()
         store = self._store(self._pkg())
