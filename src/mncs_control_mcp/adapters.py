@@ -1712,6 +1712,8 @@ class ModelAdapter:
 
 
 class ForgeAdapter:
+    _probe_timeout_seconds = 30.0
+
     def __init__(self, config: ControlConfig, policy: WorkspacePolicy | None = None) -> None:
         self.config = config
         self.policy = policy
@@ -1796,7 +1798,7 @@ class ForgeAdapter:
                 "reachable": False,
                 "diagnostic": redact_text(str(exc)),
             }
-        except BaseException as exc:
+        except Exception as exc:
             return {
                 "health_status": "mcp_initialization_failed",
                 "reachable": False,
@@ -1804,25 +1806,44 @@ class ForgeAdapter:
             }
 
     def _probe(self, executable: Path, config: Path) -> dict[str, object]:
+        async def run_bounded_probe() -> dict[str, object]:
+            return await asyncio.wait_for(
+                self._mcp_probe(executable, config),
+                timeout=self._probe_timeout_seconds,
+            )
+
+        def timed_out() -> dict[str, object]:
+            return {
+                "health_status": "probe_timed_out",
+                "reachable": None,
+                "available": None,
+                "diagnostic": (
+                    "Forge MCP health probe timed out after "
+                    f"{self._probe_timeout_seconds:g} seconds"
+                ),
+            }
+
         try:
             asyncio.get_running_loop()
         except RuntimeError:
-            return asyncio.run(self._mcp_probe(executable, config))
+            try:
+                return asyncio.run(run_bounded_probe())
+            except TimeoutError:
+                return timed_out()
 
         result: list[dict[str, object]] = []
 
         def run_probe() -> None:
-            result.append(asyncio.run(self._mcp_probe(executable, config)))
+            try:
+                result.append(asyncio.run(run_bounded_probe()))
+            except TimeoutError:
+                result.append(timed_out())
 
         worker = threading.Thread(target=run_probe, name="forge-mcp-health", daemon=True)
         worker.start()
-        worker.join(timeout=30)
+        worker.join(timeout=self._probe_timeout_seconds + 1)
         if not result:
-            return {
-                "health_status": "mcp_initialization_failed",
-                "reachable": False,
-                "diagnostic": "Forge MCP health probe timed out after 30 seconds",
-            }
+            return timed_out()
         return result[0]
 
     def status(self) -> dict[str, object]:
@@ -1853,7 +1874,8 @@ class ForgeAdapter:
         probe = self._probe(executable, forge_config)
         base.update(probe)
         if probe.get("health_status") != "healthy":
-            base.update(available=False, status=str(probe["health_status"]))
+            base.setdefault("available", False)
+            base.update(status=str(probe["health_status"]))
             return base
         try:
             _load_sibling_package("mncs_forge", self.config.forge_path)

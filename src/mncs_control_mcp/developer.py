@@ -264,8 +264,10 @@ def collect_developer_checks(
             DeveloperCheck(
                 "forge.evaluate",
                 "available"
-                if forge.get("available")
-                else str(forge.get("health_status") or "unavailable"),
+                if forge.get("available") is True
+                else "unknown"
+                if forge.get("available") is None and "available" in forge
+                else _state(str(forge.get("health_status") or "unavailable")),
                 str(forge.get("status") or forge.get("diagnostic") or "Forge probe completed"),
                 capability="forge.evaluate",
                 required=False,

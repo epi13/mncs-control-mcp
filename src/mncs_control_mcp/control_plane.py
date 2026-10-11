@@ -315,11 +315,12 @@ class ControlPlaneService:
         *,
         authority: str | None = None,
     ) -> dict[str, object]:
+        available = status.get("available", False)
         result: dict[str, object] = {
-            "configured": status.get("configured", bool(status.get("available"))),
+            "configured": status.get("configured", bool(available)),
             "reachable": status.get("reachable", status.get("controller_connected", False)),
-            "supported": bool(status.get("available")),
-            "available": bool(status.get("available")),
+            "supported": status.get("supported", available),
+            "available": available,
             "version": status.get("version") or status.get("package_version"),
             "supported_operations": operations,
             "limitations": [limitation]

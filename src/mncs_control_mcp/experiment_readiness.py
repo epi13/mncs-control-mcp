@@ -122,7 +122,11 @@ def evaluate_experiment_readiness(
         "callable": forge_status.get("available") is True and forge_callable,
         "status": READY
         if forge_callable and forge_status.get("available")
-        else DEGRADED if forge_status else UNKNOWN,
+        else UNKNOWN
+        if forge_status.get("available") is None
+        else DEGRADED
+        if forge_status
+        else UNKNOWN,
     }
     # Control probes only its own experiment store: the directory the
     # coordinator persists terminal experiment state under. Sibling
