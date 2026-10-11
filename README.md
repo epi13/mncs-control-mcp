@@ -262,6 +262,12 @@ recorded Git commit in the configured Environment project, verifies its SHA-256
 and campaign identity, and then projects the charter's objective. Invalid or
 ambiguous charter references are omitted from the capsule.
 
+The protected CLI command `mncs-env continuation` uses a compact first-use
+projection: it keeps duplicate session identities, project-link facts, claims,
+the latest checkpoint, current checkout observation, and the six newest
+evidence references. Use the typed `env_campaign_continuation` capability when
+the complete bounded evidence-reference list is needed.
+
 The Journal Context surface consists of `journal_context_status`,
 `journal_context_collect`, and `journal_context_get`. It creates an immutable,
 paginated local MNCS evidence bundle for an explicit interval, including

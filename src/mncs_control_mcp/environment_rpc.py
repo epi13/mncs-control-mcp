@@ -1058,9 +1058,11 @@ class EnvironmentRPCServer:
             "session_id", "snapshot_version", "lifecycle", "consumer_id",
             "consumer_kind", "current_campaign_consumer", "definition_id",
             "workspace_root", "project_reference", "work_intent", "repositories",
+            "authorized_consumers", "campaign_session_ids",
             "repository_facts_source", "claim_ids", "claims", "checkpoint_ids",
             "latest_checkpoint", "delivery", "unresolved_pressures", "evidence_count",
-            "evidence_truncated", "campaign_charter",
+            "evidence_truncated", "campaign_charter", "live_repository_observation",
+            "recorded_checkout_comparisons",
         )
         campaign_rows = capsule.get("campaigns")
         campaign_rows = campaign_rows if isinstance(campaign_rows, list) else [capsule]
@@ -1082,11 +1084,18 @@ class EnvironmentRPCServer:
             for session in rows[:16]:
                 if not isinstance(session, dict):
                     continue
-                continuations.append({
+                compact = {
                     **({"campaign_id": campaign_identity}
                        if isinstance(campaign_identity, str) else {}),
                     **{key: session[key] for key in session_fields if key in session},
-                })
+                }
+                evidence = session.get("evidence")
+                if isinstance(evidence, list):
+                    compact["evidence_refs"] = evidence[-6:]
+                    compact["evidence_refs_truncated"] = (
+                        bool(session.get("evidence_truncated")) or len(evidence) > 6
+                    )
+                continuations.append(compact)
                 if len(continuations) >= 16:
                     break
         result: dict[str, Any] = {
@@ -1115,7 +1124,9 @@ class EnvironmentRPCServer:
         A project-scoped grant identifies its one immediate checkout. The
         caller cannot widen that identity with a repository or principal
         argument, and the existing Environment adapter still performs
-        authenticated Store lookup and domain filtering.
+        authenticated Store lookup and domain filtering. The default CLI
+        capsule is compact; callers needing every bounded evidence reference
+        can use Control's typed environment.campaign-continuation capability.
         """
         project = self._project_repository(record)
         campaign_id: str | None = None
@@ -1165,6 +1176,8 @@ class EnvironmentRPCServer:
         capsule = self.environment_service.campaign_continuation(
             project, campaign_id,
         )
+        capsule = self._compact_entry_continuation(capsule)
+        capsule["schema_version"] = "mncs.control.campaign-continuation/2"
         return {"ok": True, "result": {
             "exit_code": 0,
             "stdout": json.dumps(capsule, ensure_ascii=False, indent=2, sort_keys=True) + "\n",

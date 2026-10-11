@@ -563,6 +563,162 @@ def test_campaign_capsule_rejects_wider_or_unbound_requests(tmp_path: Path) -> N
     assert environment.calls == 0
 
 
+def test_project_continuation_cli_returns_compact_duplicate_session_capsule(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "projects"
+    project = workspace / "mncs-environment"
+    project.mkdir(parents=True)
+    evidence = [
+        {
+            "identity": f"ev_{index:02d}",
+            "repository": "mncs-environment",
+            "commit": f"{index + 1:040x}",
+            "path": f"evidence/{index:02d}.json",
+            "sha256": f"{index + 1:064x}",
+        }
+        for index in range(64)
+    ]
+    observation = {
+        "status": "current",
+        "observed_at": "2026-10-11T14:00:00Z",
+        "source": "mncs-environment.workspace.discover_workspace",
+        "workspace_root": str(workspace),
+        "repository": "mncs-environment",
+        "scan_status": "complete",
+        "checkout": {
+            "path": str(project),
+            "branch": "main",
+            "head": "a" * 40,
+            "clean": True,
+        },
+        "worktree_registrations": [{
+            "registered_path": str(project),
+            "branch": "main",
+            "head": "a" * 40,
+            "detached": False,
+            "physical_checkout_status": "not_checked; Git registration only",
+        }],
+        "worktree_registrations_count": 1,
+        "worktree_registrations_truncated": False,
+    }
+    capsule = {
+        "schema_version": "mncs.control.campaign-continuation/1",
+        "campaign_id": "cmp_continuation_fixture",
+        "repository": "mncs-environment",
+        "status": "context-conflict",
+        "contexts_count": 2,
+        "continuations_count": 2,
+        "continuations": [
+            {
+                "session_id": "ses_linked",
+                "lifecycle": "active",
+                "consumer_id": "consumer-a",
+                "definition_id": "env-exact",
+                "workspace_root": str(workspace),
+                "project_reference": {"status": "linked", "basis": ["active_claim.repository"]},
+                "claim_ids": ["claim:mncs-environment"],
+                "claims": [{"claim_id": "claim:mncs-environment", "version": 4}],
+                "checkpoint_ids": ["chk_1", "chk_2"],
+                "latest_checkpoint": {"identity": "chk_2", "sequence": 2},
+                "evidence": evidence,
+                "evidence_count": 64,
+                "evidence_truncated": False,
+                "delivery": {"status": "partial"},
+                "unresolved_pressures": [{"identity": "CP-0011"}],
+                "repositories": [{"repository": "mncs-environment", "head": "a" * 40}],
+                "live_repository_observation": observation,
+                "recorded_checkout_comparisons": [{"status": "checkout_head_changed"}],
+            },
+            {
+                "session_id": "ses_other_context",
+                "lifecycle": "active",
+                "consumer_id": "consumer-b",
+                "definition_id": "env-other",
+                "workspace_root": str(workspace),
+                "project_reference": {"status": "same_campaign_only", "basis": []},
+                "claim_ids": [],
+                "claims": [],
+                "checkpoint_ids": [],
+                "evidence": [],
+                "evidence_count": 0,
+                "evidence_truncated": False,
+            },
+        ],
+        "next": "review the project-linked session and select its exact Environment context",
+    }
+
+    class Environment:
+        state_dir = tmp_path / "state"
+        environment_path = tmp_path / "environment"
+        authenticated_principal_id = "principal-test"
+
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, str | None]] = []
+
+        def campaign_continuation(self, repository: str, campaign_id: str | None = None):
+            self.calls.append((repository, campaign_id))
+            return capsule
+
+    environment = Environment()
+    server = EnvironmentRPCServer(
+        ControlConfig(
+            workspace_root=workspace,
+            sandbox_home=tmp_path / "home",
+            environment_rpc_socket=tmp_path / "rpc" / "environment.sock",
+        ),
+        environment_service=environment,
+        policy=object(),
+    )
+    token = "compact-project-continuation"
+    server._grants[hashlib.sha256(token.encode()).hexdigest()] = _GrantRecord(
+        grant_id="compact-project-continuation-grant",
+        principal_id="principal-test",
+        host_root=project,
+        sandbox_root="/workspace/mncs-environment",
+        scope="project",
+        uid=0,
+        expires_at=time.monotonic() + 60,
+        token_file=tmp_path / "grant",
+    )
+
+    response = server.dispatch({
+        "grant": token,
+        "request_id": "req_compact_project_continuation",
+        "argv": ["continuation", "--campaign-id", "cmp_continuation_fixture"],
+        "cwd": "/workspace/mncs-environment",
+    }, peer_uid=0)
+
+    assert response["ok"] is True
+    result = json.loads(response["result"]["stdout"])
+    assert result["schema_version"] == "mncs.control.campaign-continuation/2"
+    assert result["status"] == "context-conflict"
+    assert result["campaign_id"] == "cmp_continuation_fixture"
+    assert [item["session_id"] for item in result["continuations"]] == [
+        "ses_linked", "ses_other_context",
+    ]
+    linked, other = result["continuations"]
+    assert linked["project_reference"]["basis"] == ["active_claim.repository"]
+    assert linked["claim_ids"] == ["claim:mncs-environment"]
+    assert linked["latest_checkpoint"]["identity"] == "chk_2"
+    assert linked["evidence_count"] == 64
+    assert [item["identity"] for item in linked["evidence_refs"]] == [
+        f"ev_{index:02d}" for index in range(58, 64)
+    ]
+    assert linked["evidence_refs_truncated"] is True
+    assert "evidence" not in linked
+    assert other["project_reference"]["status"] == "same_campaign_only"
+    assert linked["live_repository_observation"]["checkout"]["path"] == str(project)
+    assert linked["live_repository_observation"]["workspace_root"] == str(workspace)
+    assert linked["recorded_checkout_comparisons"] == [
+        {"status": "checkout_head_changed"},
+    ]
+    assert len(response["result"]["stdout"].encode()) < len(
+        json.dumps(capsule).encode()
+    )
+    assert environment.calls == [("mncs-environment", "cmp_continuation_fixture")]
+
+
 def test_project_rpc_exposes_session_authorized_read_operations_and_reports_unknown_operations(
     tmp_path: Path, monkeypatch,
 ) -> None:
