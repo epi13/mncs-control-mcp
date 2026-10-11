@@ -1182,6 +1182,113 @@ def test_project_rpc_exposes_session_authorized_read_operations_and_reports_unkn
     assert len(calls) == 3
 
 
+def test_store_verify_rpc_is_session_bound_and_read_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    token = "store-verify-capability"
+    root = tmp_path / "project"
+    root.mkdir()
+    snapshot = {"authenticated_principal_id": "principal-agent"}
+
+    class Store:
+        def load_snapshot(self, session_id: str):
+            assert session_id in {"ses_store_verify", "ses_foreign"}
+            return snapshot
+
+        def close(self) -> None:
+            pass
+
+    class Environment:
+        state_dir = tmp_path / "canonical-environment-state"
+        environment_path = tmp_path / "environment-source"
+
+        def _pkg(self):
+            return object()
+
+        def _store(self, _pkg):
+            return Store()
+
+    server = EnvironmentRPCServer(
+        ControlConfig(
+            sandbox_home=tmp_path / "home",
+            environment_rpc_socket=tmp_path / "rpc" / "environment.sock",
+        ),
+        environment_service=Environment(),
+        policy=object(),
+    )
+    server._grants[hashlib.sha256(token.encode()).hexdigest()] = _GrantRecord(
+        grant_id="grant-store-verify-test",
+        principal_id="principal-agent",
+        host_root=root,
+        sandbox_root="/workspace/project",
+        scope="project",
+        uid=0,
+        expires_at=time.monotonic() + 60,
+        token_file=tmp_path / "grant",
+    )
+    calls = []
+
+    def run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return SimpleNamespace(
+            returncode=0,
+            stdout='{"generation":7,"objects_verified":43000}\n',
+            stderr="",
+        )
+
+    monkeypatch.setattr("mncs_control_mcp.environment_rpc.subprocess.run", run)
+
+    request = {
+        "grant": token,
+        "request_id": "req_store_verify_authorized",
+        "argv": ["store", "--session", "ses_store_verify", "--verify"],
+        "cwd": "/workspace/project",
+    }
+    response = server.dispatch(request, peer_uid=0)
+
+    assert response["ok"] is True
+    assert response["result"]["exit_code"] == 0
+    assert json.loads(response["result"]["stdout"]) == {
+        "generation": 7, "objects_verified": 43000,
+    }
+    assert len(calls) == 1
+    assert calls[0][0][3:7] == [
+        "--state-dir", str(Environment.state_dir), "--persistence", "store",
+    ]
+    assert calls[0][0][-4:] == [
+        "store", "--session", "ses_store_verify", "--verify",
+    ]
+    assert calls[0][1]["cwd"] == root
+    assert calls[0][1]["env"]["MNCS_ENV_AUTH_PRINCIPAL_ID"] == "principal-agent"
+    assert calls[0][1]["env"]["MNCS_ENV_RPC_REQUEST_ID"] == "req_store_verify_authorized"
+
+    for index, argv in enumerate((
+        ["store"],
+        ["store", "--verify"],
+        ["store", "--session=ses_store_verify", "--verify"],
+        ["store", "--session", "not-a-session", "--verify"],
+        ["store", "--session", "ses_store_verify", "--verify", "--write"],
+        ["store", "--session", "ses_store_verify", "--verify",
+         "--state-dir", str(tmp_path / "other-store")],
+    )):
+        rejected = server.dispatch({
+            **request,
+            "request_id": f"req_store_verify_rejected_{index}",
+            "argv": argv,
+        }, peer_uid=0)
+        assert rejected["error"]["code"] == "ENVIRONMENT_AUTHORITY_DENIED"
+    assert len(calls) == 1
+
+    snapshot["authenticated_principal_id"] = "different-principal"
+    foreign = server.dispatch({
+        **request,
+        "request_id": "req_store_verify_foreign_session",
+        "argv": ["store", "--session", "ses_foreign", "--verify"],
+    }, peer_uid=0)
+    assert foreign["error"]["code"] == "ENVIRONMENT_AUTHORITY_DENIED"
+    assert len(calls) == 1
+
+
 def test_retire_rpc_exposes_only_scoped_read_only_inventory(tmp_path: Path) -> None:
     projects = tmp_path / "projects"
     projects.mkdir()

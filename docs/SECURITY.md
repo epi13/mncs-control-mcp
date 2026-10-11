@@ -100,6 +100,12 @@ The project-scoped CLI bridge permits `complete` only for a session owned by
 the grant's authenticated principal. Environment records completion intent
 before lifecycle transition and claim release; `--retry-pending` reconciles
 that intent after a caller or service interruption.
+The bridge also permits only the exact read-only invocation
+`store --session <session-id> --verify`. Control verifies that the session
+belongs to the grant's authenticated principal, fixes the configured state
+directory and Store persistence provider, and forwards no Store path or file
+handle. Bare Store inspection, alternate persistence roots, and other Store
+operations remain unavailable through this endpoint.
 The bridge additionally exposes Environment's retirement inventory only in
 `--inventory --dry-run` mode. It requires the authenticated session principal,
 maps the repository through the current execution grant, rejects branch,

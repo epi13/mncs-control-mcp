@@ -32,7 +32,7 @@ MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 MAX_ARGUMENT_BYTES = 32 * 1024
 ALLOWED_COMMANDS = frozenset({
     "enter", "inspect", "context", "resume", "health", "capabilities", "checkpoint", "handoff", "accept", "claims",
-    "complete",
+    "complete", "store",
     "retire", "continuation",
 })
 RPC_SANDBOX_SOCKET = "/run/mncs-environment-rpc/environment.sock"
@@ -520,6 +520,16 @@ class EnvironmentRPCServer:
                     "next": "use an exposed Environment operation or extend the Control operation contract",
                 },
             )
+        if command == "store":
+            if (len(argv) != 4 or argv[1] != "--session"
+                    or not argv[2].startswith("ses_") or argv[3] != "--verify"):
+                raise ControlError(
+                    "ENVIRONMENT_AUTHORITY_DENIED",
+                    "Control exposes only session-authorized read-only Store verification",
+                    details={"required": [
+                        "store", "--session", "<authorized-session>", "--verify",
+                    ]},
+                )
         translated = list(argv)
 
         def map_path_option(option: str) -> None:
@@ -851,7 +861,7 @@ class EnvironmentRPCServer:
             session_id = None
             if isinstance(argv, list) and argv and argv[0] in {
                 "inspect", "context", "resume", "health", "capabilities", "checkpoint", "handoff", "accept", "claims",
-                "retire",
+                "retire", "store",
             }:
                 if argv[0] == "accept":
                     if all(isinstance(item, str) for item in argv):
@@ -949,7 +959,7 @@ class EnvironmentRPCServer:
                 argv[argv.index("--repository") + 1]
             )
             argv.extend(["--execution-root", str(repository)])
-        if command in {"inspect", "context", "resume", "health", "capabilities", "checkpoint", "handoff", "accept", "claims", "complete", "retire"}:
+        if command in {"inspect", "context", "resume", "health", "capabilities", "checkpoint", "handoff", "accept", "claims", "complete", "retire", "store"}:
             try:
                 command_index = argv.index(command)
                 positional = (
