@@ -252,7 +252,11 @@ single-project grant and the authenticated Control principal. Its bounded
 capsule includes the latest Environment checkpoint's progress and pending
 items alongside durable campaign evidence and claims. Multiple sessions or
 conflicting Environment contexts remain explicit for selection; Control does
-not choose a session or adopt its work.
+not choose a session or adopt its work. When the Environment evidence includes
+a campaign-charter reference, Control reads the bounded blob from the exact
+recorded Git commit in the configured Environment project, verifies its SHA-256
+and campaign identity, and then projects the charter's objective. Invalid or
+ambiguous charter references are omitted from the capsule.
 
 The Journal Context surface consists of `journal_context_status`,
 `journal_context_collect`, and `journal_context_get`. It creates an immutable,

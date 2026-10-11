@@ -14,12 +14,15 @@ workspace paths, isolated state directories for tests).
 
 from __future__ import annotations
 
+import hashlib
 import importlib
+import json
 import os
 import re
+import subprocess
 import sys
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from .config import ControlConfig
@@ -29,6 +32,10 @@ PACKAGE = "mncs_env"
 ENVIRONMENT_UNAVAILABLE = "ENVIRONMENT_UNAVAILABLE"
 _CAMPAIGN_ID_MAX = 160
 _CAMPAIGN_REPOSITORY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_CAMPAIGN_CHARTER_SCHEMA = "mncs.environment.campaign-charter/1"
+_CAMPAIGN_CHARTER_MAX_BYTES = 64 * 1024
+_GIT_OBJECT_ID = re.compile(r"^(?:[a-f0-9]{40}|[a-f0-9]{64})$")
+_SHA256 = re.compile(r"^[a-f0-9]{64}$")
 _CONTINUABLE_LIFECYCLES = frozenset({
     "active", "blocked", "waiting", "checkpointed", "abandoned",
 })
@@ -619,8 +626,8 @@ class EnvironmentService:
             })
         return output
 
-    @staticmethod
     def _continuation_capsule(
+        self,
         pkg: Any, store: Any, session_id: str, snapshot: dict[str, Any],
         repository: str, claims: list[dict[str, Any]],
         live_observation: dict[str, Any],
@@ -756,6 +763,13 @@ class EnvironmentService:
                 if isinstance(continuation.get("unresolved_pressures", []), list) else []
             ),
         }
+        campaign_identity = campaign.get("identity")
+        verified_charter = self._verified_campaign_charter(
+            campaign_identity if isinstance(campaign_identity, str) else None,
+            campaign_evidence,
+        )
+        if verified_charter is not None:
+            capsule["campaign_charter"] = verified_charter
         latest_checkpoint = continuation.get("latest_checkpoint")
         if isinstance(latest_checkpoint, dict):
             capsule["latest_checkpoint"] = EnvironmentService._bounded_capsule_value({
@@ -768,6 +782,134 @@ class EnvironmentService:
                 if key in latest_checkpoint
             })
         return capsule
+
+    def _verified_campaign_charter(
+        self, campaign_identity: str | None, evidence: Any,
+    ) -> dict[str, Any] | None:
+        """Project a charter only when its Environment evidence link verifies.
+
+        The evidence reference chooses a Git object and relative path, never a
+        host path. Reads are confined to the configured Environment project,
+        an immediate nonsymlink child of the workspace, and to small blobs in
+        the exact recorded commit. The digest and charter campaign identity
+        must both match before any objective text reaches the capsule.
+        """
+        if not isinstance(campaign_identity, str) or not campaign_identity:
+            return None
+        if not isinstance(evidence, list):
+            return None
+
+        configured_name = Path(str(
+            self._config.repositories.get("environment", "mncs-environment")
+        )).name
+        if not _CAMPAIGN_REPOSITORY.fullmatch(configured_name):
+            return None
+        candidates = [
+            item for item in evidence[:32]
+            if isinstance(item, dict)
+            and item.get("repository") == configured_name
+            and isinstance(item.get("identity"), str)
+            and "campaign_charter" in item["identity"]
+        ]
+        # Old and new charters can both be legitimate evidence. Do not select
+        # one based on list order when the campaign projection is ambiguous.
+        if len(candidates) != 1:
+            return None
+
+        reference = candidates[0]
+        path_value = reference.get("path")
+        commit = reference.get("commit")
+        digest = reference.get("sha256")
+        evidence_identity = reference.get("identity")
+        if (not isinstance(path_value, str) or not path_value or len(path_value) > 512
+                or "\\" in path_value or "\x00" in path_value
+                or path_value.startswith("/")
+                or not isinstance(commit, str) or not _GIT_OBJECT_ID.fullmatch(commit)
+                or not isinstance(digest, str) or not _SHA256.fullmatch(digest)
+                or not isinstance(evidence_identity, str) or len(evidence_identity) > 160):
+            return None
+        path_parts = path_value.split("/")
+        if any(part in {"", ".", ".."} for part in path_parts):
+            return None
+        relative_path = PurePosixPath(path_value)
+        if relative_path.is_absolute():
+            return None
+
+        try:
+            workspace_root = self._config.workspace_root.expanduser().resolve(strict=True)
+            project = workspace_root / configured_name
+            project_root = project.resolve(strict=True)
+        except OSError:
+            return None
+        if (project.is_symlink() or not project_root.is_dir()
+                or project_root.parent != workspace_root):
+            return None
+
+        object_spec = f"{commit}:{relative_path.as_posix()}"
+        git_environment = {
+            "PATH": os.environ.get("PATH", os.defpath),
+            "HOME": str(workspace_root),
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_OPTIONAL_LOCKS": "0",
+            "GIT_NO_REPLACE_OBJECTS": "1",
+            "LC_ALL": "C",
+        }
+        try:
+            size_result = subprocess.run(
+                ["git", "cat-file", "-s", object_spec],
+                cwd=project_root,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                env=git_environment,
+                timeout=3.0,
+                check=False,
+            )
+            if size_result.returncode != 0 or len(size_result.stdout) > 32:
+                return None
+            blob_size = int(size_result.stdout.strip())
+            if blob_size < 1 or blob_size > _CAMPAIGN_CHARTER_MAX_BYTES:
+                return None
+            blob_result = subprocess.run(
+                ["git", "cat-file", "blob", object_spec],
+                cwd=project_root,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                env=git_environment,
+                timeout=3.0,
+                check=False,
+            )
+            if (blob_result.returncode != 0
+                    or len(blob_result.stdout) != blob_size
+                    or hashlib.sha256(blob_result.stdout).hexdigest() != digest):
+                return None
+            charter = json.loads(blob_result.stdout.decode("utf-8"))
+        except (OSError, subprocess.SubprocessError, ValueError, UnicodeError):
+            return None
+
+        if (not isinstance(charter, dict)
+                or charter.get("schema_version") != _CAMPAIGN_CHARTER_SCHEMA
+                or charter.get("campaign_identity") != campaign_identity):
+            return None
+        objective = charter.get("objective")
+        charter_identity = charter.get("identity")
+        if (not isinstance(objective, str) or not objective.strip()
+                or not isinstance(charter_identity, str) or not charter_identity):
+            return None
+        return {
+            "status": "verified",
+            "identity": charter_identity[:160],
+            "evidence_identity": evidence_identity,
+            "objective": objective.strip()[:1200],
+            "source": {
+                "repository": configured_name,
+                "commit": commit,
+                "path": relative_path.as_posix(),
+                "sha256": digest,
+            },
+        }
 
     @staticmethod
     def _bounded_capsule_value(

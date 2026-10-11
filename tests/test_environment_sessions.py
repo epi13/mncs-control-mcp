@@ -7,6 +7,7 @@ reports unavailable instead of inventing state.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -45,6 +46,91 @@ def _config(tmp_path: Path, **overrides) -> ControlConfig:
         environment_state_dir=tmp_path / "env-state",
         **overrides,
     )
+
+
+def _campaign_charter_result(
+    tmp_path: Path, *, referenced_digest: str | None = None,
+    charter_campaign: str = "campaign-1",
+) -> dict:
+    workspace = tmp_path / "projects"
+    control_project = workspace / "mncs-control-mcp"
+    environment_project = workspace / "mncs-environment"
+    control_project.mkdir(parents=True)
+    (environment_project / "evidence").mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(environment_project)], check=True)
+    subprocess.run(["git", "-C", str(environment_project), "config", "user.name", "Test"],
+                   check=True)
+    subprocess.run(["git", "-C", str(environment_project), "config", "user.email",
+                    "test@example.invalid"], check=True)
+    raw_charter = json.dumps({
+        "schema_version": "mncs.environment.campaign-charter/1",
+        "identity": "ev_test_campaign_charter",
+        "campaign_identity": charter_campaign,
+        "objective": "Continue the verified long-running campaign safely.",
+    }, sort_keys=True).encode("utf-8")
+    charter_path = environment_project / "evidence" / "campaign-charter-test.json"
+    charter_path.write_bytes(raw_charter)
+    subprocess.run(["git", "-C", str(environment_project), "add", "evidence"], check=True)
+    subprocess.run(["git", "-C", str(environment_project), "commit", "-q", "-m",
+                    "Add test charter"], check=True)
+    commit = subprocess.run(
+        ["git", "-C", str(environment_project), "rev-parse", "HEAD"],
+        check=True, capture_output=True, text=True,
+    ).stdout.strip()
+    digest = hashlib.sha256(raw_charter).hexdigest()
+    evidence = [{
+        "identity": "ev_env_campaign_charter_test",
+        "repository": "mncs-environment",
+        "commit": commit,
+        "path": "evidence/campaign-charter-test.json",
+        "sha256": referenced_digest or digest,
+    }]
+    snapshot = {
+        "session_id": "ses_test",
+        "snapshot_sequence": 3,
+        "lifecycle": "active",
+        "authenticated_principal_id": "principal-test",
+        "provenance": {"definition_id": "env-test"},
+        "workspace": {"root": str(workspace)},
+        "intent": {"identity": "intent-test"},
+        "campaign": {
+            "identity": "campaign-1",
+            "work_intent": {
+                "goal": "narrow fixture goal",
+                "repositories": ["mncs-control-mcp"],
+            },
+        },
+    }
+
+    class Store:
+        def list_sessions(self):
+            return ["ses_test"]
+
+        def load_snapshot(self, _session_id: str):
+            return snapshot
+
+        def read_claims(self):
+            return []
+
+        def close(self):
+            pass
+
+    class Session:
+        @staticmethod
+        def open(**_kwargs):
+            return SimpleNamespace(context=lambda: {"continuation": {"evidence": evidence}})
+
+    service = EnvironmentService(_config(tmp_path))
+    service.authenticated_principal_id = "principal-test"
+    service._pkg = lambda: SimpleNamespace(
+        claims=SimpleNamespace(active_claims=lambda _records: {}),
+        sessions=SimpleNamespace(Session=Session),
+    )
+    service._store = lambda _pkg: Store()
+    service._observe_project_checkout = lambda repository: {
+        "status": "unknown", "repository": repository,
+    }
+    return service.campaign_continuation("mncs-control-mcp", "campaign-1")
 
 
 @needs_environment
@@ -327,6 +413,39 @@ def test_campaign_continuation_returns_project_scoped_duplicate_capsules(tmp_pat
     discovered = service.campaign_continuation("mncs-control-mcp")
     assert discovered["status"] == "ambiguous"
     assert discovered["campaign_id"] == "campaign-1"
+
+
+def test_campaign_continuation_projects_exact_git_verified_charter(tmp_path: Path) -> None:
+    result = _campaign_charter_result(tmp_path)
+
+    assert result["status"] == "ready"
+    capsule = result["continuations"][0]
+    assert capsule["work_intent"]["goal"] == "narrow fixture goal"
+    assert capsule["campaign_charter"] == {
+        "status": "verified",
+        "identity": "ev_test_campaign_charter",
+        "evidence_identity": "ev_env_campaign_charter_test",
+        "objective": "Continue the verified long-running campaign safely.",
+        "source": {
+            "repository": "mncs-environment",
+            "commit": capsule["campaign_charter"]["source"]["commit"],
+            "path": "evidence/campaign-charter-test.json",
+            "sha256": capsule["campaign_charter"]["source"]["sha256"],
+        },
+    }
+
+
+@pytest.mark.parametrize("failure", ["digest", "campaign"])
+def test_campaign_continuation_omits_unverified_charter(
+    tmp_path: Path, failure: str,
+) -> None:
+    if failure == "digest":
+        result = _campaign_charter_result(tmp_path, referenced_digest="0" * 64)
+    else:
+        result = _campaign_charter_result(tmp_path, charter_campaign="another-campaign")
+
+    assert result["status"] == "ready"
+    assert "campaign_charter" not in result["continuations"][0]
 
 
 def test_campaign_continuation_surfaces_bounded_context_conflict_capsules(
