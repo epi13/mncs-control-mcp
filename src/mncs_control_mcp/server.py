@@ -595,9 +595,19 @@ def build_server(config: ControlConfig | None = None) -> Any:
             }
         return invoke("env_status", view)  # type: ignore[return-value]
 
-    @server.tool(name="env_enter", description="Resolve an environment definition and enter it as a durable session: tri-state authority, rights gate, and lifecycle to active.", annotations=mutate, structured_output=True)
-    def env_enter(definition: dict[str, object], consumer: str, workspace: str | None = None, consumer_kind: str = "agent") -> dict[str, object]:
-        return invoke("env_enter", environment_sessions.enter, definition, consumer, workspace=workspace, consumer_kind=consumer_kind, audit_metadata={"consumer": consumer})  # type: ignore[return-value]
+    @server.tool(name="env_enter", description="Resolve an environment definition and enter or continue its durable campaign: tri-state authority, rights gate, and lifecycle to active. An explicit campaign_id selects durable campaign identity.", annotations=mutate, structured_output=True)
+    def env_enter(definition: dict[str, object], consumer: str, workspace: str | None = None, consumer_kind: str = "agent", campaign_id: str | None = None) -> dict[str, object]:
+        return invoke("env_enter", environment_sessions.enter, definition, consumer, workspace=workspace, consumer_kind=consumer_kind, campaign_id=campaign_id, audit_metadata={"consumer": consumer, "campaign_id": campaign_id})  # type: ignore[return-value]
+
+    @server.tool(name="env_campaign_continuation", description="Discover authenticated campaign continuations for one project, or select one campaign identity. Returns compact session, claim, checkout, checkpoint, delivery, and pressure facts; duplicate sessions and campaigns remain explicit for selection.", annotations=ro, structured_output=True)
+    def env_campaign_continuation(repository: str, campaign_id: str | None = None) -> dict[str, object]:
+        return invoke(
+            "env_campaign_continuation",
+            environment_sessions.campaign_continuation,
+            repository,
+            campaign_id,
+            audit_metadata={"campaign_id": campaign_id, "repository": repository},
+        )  # type: ignore[return-value]
 
     @server.tool(name="env_inspect", description="Read-only inspection of one environment session: lifecycle, authority, rights, claims, bindings, recent events.", annotations=ro, structured_output=True)
     def env_inspect(session_id: str) -> dict[str, object]:

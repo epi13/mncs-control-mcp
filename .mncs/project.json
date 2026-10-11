@@ -1,10 +1,10 @@
 {
  "schema_version": "mncs-family.repository-manifest/v0alpha1",
  "repository": "mncs-control-mcp",
- "revision": 2,
+ "revision": 3,
  "manifest_location": "in-repository",
  "authority": {
-  "note": "Control-mcp owns the protected workspace MCP boundary (filesystem, terminal, Git, project-management, tooling, MNCS orchestration) and deterministic worktree preparation; it does not own the repositories it operates on or their semantic content."
+  "note": "Control-mcp owns the protected workspace MCP boundary (filesystem, terminal, Git, project-management, tooling, MNCS orchestration), deterministic worktree preparation, and the authenticated Environment campaign lookup transport; Environment owns session semantics and Store owns persistence."
  },
  "contracts": {
   "provides": [
@@ -27,6 +27,17 @@
      "src/mncs_control_mcp/server.py",
      "docs/ATLAS-JOURNAL-INTEGRATION.md"
     ]
+   },
+   {
+    "contract": "environment.campaign-continuation",
+    "version": "1",
+    "kind": "mcp-server-capability",
+    "stability": "experimental",
+    "fingerprint_sources": [
+     "src/mncs_control_mcp/environment_sessions.py",
+     "src/mncs_control_mcp/server.py",
+     "docs/SECURITY.md"
+    ]
    }
   ],
   "consumes": [],
@@ -34,7 +45,8 @@
    {
     "test": "control-mcp-tests",
     "covers": [
-     "workspace.worktree.prepare"
+     "workspace.worktree.prepare",
+     "environment.campaign-continuation"
     ],
     "obligation": "self",
     "command": {

@@ -164,8 +164,12 @@ environment_rpc_socket = {str(environment_rpc_socket)!r}
             "commons_conversation",
             "commons_evidence",
             "commons_sync",
+            "env_campaign_continuation",
         } <= names
         assert "commons_publish" not in names
+        continuation_tool = next(item for item in tools if item["name"] == "env_campaign_continuation")
+        assert "repository" in continuation_tool["inputSchema"]["required"]
+        assert "campaign_id" not in continuation_tool["inputSchema"].get("required", [])
         terminal = next(item for item in tools if item["name"] == "terminal_exec")
         assert terminal["annotations"]["destructiveHint"] is True
         assert terminal["annotations"]["openWorldHint"] is True
@@ -179,6 +183,7 @@ environment_rpc_socket = {str(environment_rpc_socket)!r}
         assert system["server"]["tool_surface"]["tool_names_sha256"].startswith("sha256:")
         assert system["server"]["tool_surface"]["experiment_tools_present"] is True
         assert system["server"]["tool_surface"]["journal_context_tools_present"] is True
+        assert system["server"]["tool_surface"]["environment_continuation_tools_present"] is True
         assert system["server"]["organization_context_configured"] is False
 
         info = client.call("workspace_info", {})

@@ -103,6 +103,23 @@ worktree, and prune mutation targets, and supplies the grant root as the
 inspection boundary. Registered checkouts outside that root are reported as
 out of scope without probing their paths.
 
+The typed `env_campaign_continuation` operation is a read-only projection over
+canonical Environment snapshots. It requires Control's authenticated
+principal and an immediate project name under the configured workspace. The
+project must appear in the campaign's recorded work intent, checkout facts,
+repository references, or live claims. Results contain only same-principal
+sessions and only the requested project's checkout and claim details; foreign
+owner session identities are not returned. Duplicate sessions remain explicit
+and must be selected by exact session identity before `env_resume`. If the
+campaign identity is omitted, Control discovers same-principal campaigns
+recorded against that project; multiple campaigns remain explicit choices.
+Nonterminal setup or handed-off lifecycles return a reconciliation result
+instead of being labeled resumable; handed-off sessions continue through
+Environment's recipient-bound accept operation.
+`env_enter` accepts an explicit campaign identity so a new process can ask
+Environment to reuse that durable campaign without relying on its consumer
+label.
+
 ## Audit
 
 Audit JSONL lives outside the workspace, mode 0600 under a 0700 directory. It contains bounded/redacted metadata, not full file contents or environment data. Generic workspace tools cannot address it.

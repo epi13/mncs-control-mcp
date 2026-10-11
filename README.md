@@ -12,6 +12,7 @@ python3 -m pytest
 Declared capabilities (declarations do not establish execution health):
 
 - `workspace.worktree.prepare/1` — mcp-server-capability (experimental)
+- `environment.campaign-continuation/1` — mcp-server-capability (experimental)
 
 Semantic sources and ownership: `.mncs/projections.json`.
 <!-- MNCS:generated:end -->
@@ -86,7 +87,7 @@ journalctl --user -u mncs-control-tunnel.service -f
 
 ### Connector manifest diagnostics
 
-`system_status.server.tool_surface` exposes a non-secret identity for the MCP tool-name surface: `tool_count`, `tool_names_sha256`, and whether the durable experiment API is present. `system_status.server.organization_context_configured` reports only whether an organization context reached the MCP child; it never returns the organization ID.
+`system_status.server.tool_surface` exposes a non-secret identity for the MCP tool-name surface: `tool_count`, `tool_names_sha256`, and whether the durable experiment, journal context, and Environment continuation APIs are present. `system_status.server.organization_context_configured` reports only whether an organization context reached the MCP child; it never returns the organization ID.
 
 If a fresh local doctor reports (for example) 86 tools while ChatGPT still exposes an older 50-tool connector manifest, the controller process is not the stale component. Refresh or re-register the ChatGPT connector and compare its visible tool surface again. Do not add an alternate experiment execution route merely to bypass a stale connector manifest.
 
@@ -243,6 +244,7 @@ Every Git command runs inside the same project sandbox, including repository hoo
 - `project_review`, `test_discover`, `test_run`, `project_check`
 - `fabric_status`, `model_status`, `run_mncs_evaluation`, `dispatch_fabric_job`
 - `commons_status`, `commons_work`, `commons_query`, `commons_get`, `commons_conversation`, `commons_evidence`, `commons_sync`
+- `env_status`, `env_enter`, `env_campaign_continuation`, `env_inspect`, `env_resume`, `env_claim_acquire`, `env_claim_release`, `env_claims`
 - `control_job_status`, `control_job_result`, `control_job_stop`
 
 The Journal Context surface consists of `journal_context_status`,

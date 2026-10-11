@@ -225,8 +225,12 @@ def test_tool_surface_manifest_is_stable_and_detects_experiment_api() -> None:
     assert expected["tool_names_sha256"].startswith("sha256:")
     assert expected["experiment_tools_present"] is True
     assert expected["journal_context_tools_present"] is False
+    assert expected["environment_continuation_tools_present"] is False
     assert tool_surface_manifest(["system_status"])["experiment_tools_present"] is False
     assert tool_surface_manifest(["system_status"])["journal_context_tools_present"] is False
+    assert tool_surface_manifest([
+        "env_enter", "env_campaign_continuation", "env_resume",
+    ])["environment_continuation_tools_present"] is True
     with_journal = tool_surface_manifest(
         [
             "journal_context_status",
