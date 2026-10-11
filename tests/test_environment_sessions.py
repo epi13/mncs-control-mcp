@@ -381,6 +381,18 @@ def test_campaign_continuation_returns_project_scoped_duplicate_capsules(tmp_pat
     ]
     assert result["continuations"][0]["snapshot_version"] == 7
     assert result["continuations"][0]["claim_ids"] == ["claim-control"]
+    assert result["continuations"][0]["project_reference"] == {
+        "status": "linked",
+        "basis": [
+            "campaign.work_intent.repositories",
+            "campaign.repository_refs",
+            "active_claim.repository",
+        ],
+    }
+    assert result["continuations"][1]["project_reference"] == {
+        "status": "same_campaign_only",
+        "basis": [],
+    }
     assert len(result["continuations"][0]["evidence"]) == 12
     assert result["continuations"][0]["evidence_count"] == 12
     assert result["continuations"][0]["evidence_truncated"] is False
@@ -537,7 +549,7 @@ def test_campaign_continuation_surfaces_bounded_context_conflict_capsules(
     assert [item["session_id"] for item in result["continuations"]] == [
         f"ses_{index:02d}" for index in range(16)
     ]
-    assert result["next"].startswith("select the exact recorded Environment")
+    assert result["next"].startswith("review each capsule's project_reference")
     assert store.closed is True
 
 

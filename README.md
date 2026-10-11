@@ -252,7 +252,11 @@ single-project grant and the authenticated Control principal. Its bounded
 capsule includes the latest Environment checkpoint's progress and pending
 items alongside durable campaign evidence and claims. Multiple sessions or
 conflicting Environment contexts remain explicit for selection; Control does
-not choose a session or adopt its work. When the Environment evidence includes
+not choose a session or adopt its work. Each session capsule reports a bounded
+`project_reference` status and the persisted facts that link it to the selected
+repository. A same-principal session shown only because it shares the campaign
+identity is labeled `same_campaign_only` and is not implicitly selected. When
+the Environment evidence includes
 a campaign-charter reference, Control reads the bounded blob from the exact
 recorded Git commit in the configured Environment project, verifies its SHA-256
 and campaign identity, and then projects the charter's objective. Invalid or

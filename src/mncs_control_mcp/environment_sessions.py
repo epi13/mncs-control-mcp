@@ -325,7 +325,8 @@ class EnvironmentService:
                         "continuations_count": len(ordered_matching),
                         "continuations_truncated": len(ordered_matching) > 16,
                         "next": (
-                            "select the exact recorded Environment definition and workspace; "
+                            "review each capsule's project_reference, then select the exact "
+                            "recorded Environment definition and workspace; "
                             "Control will not choose between conflicting campaign contexts"
                         ),
                     })
@@ -369,9 +370,9 @@ class EnvironmentService:
                     "continuations": continuations[:16],
                     "continuations_truncated": len(continuations) > 16,
                     "next": (
-                        "resume the listed session by its exact session identity"
+                        "resume the listed project-linked session by its exact session identity"
                         if len(continuations) == 1
-                        else "select the intended listed session; Control will not choose between continuations"
+                        else "review each capsule's project_reference, then select the intended listed session; Control will not choose between continuations"
                     ),
                 })
             if not results:
@@ -427,25 +428,44 @@ class EnvironmentService:
     def _snapshot_references_repository(
         snapshot: dict[str, Any], repository: str, claims: list[dict[str, Any]],
     ) -> bool:
+        return bool(EnvironmentService._snapshot_repository_reference_basis(
+            snapshot, repository, claims,
+        ))
+
+    @staticmethod
+    def _snapshot_repository_reference_basis(
+        snapshot: dict[str, Any], repository: str, claims: list[dict[str, Any]],
+    ) -> tuple[str, ...]:
+        """Name the persisted facts that link one session to a project.
+
+        Campaign identity can legitimately span duplicate Environment
+        contexts. The continuation capsule may show those same-principal
+        contexts so callers can see the conflict, while this basis makes clear
+        which individual sessions have a durable project link and which are
+        present only because they share the selected campaign identity.
+        """
         campaign = snapshot.get("campaign")
         campaign = campaign if isinstance(campaign, dict) else {}
+        basis: list[str] = []
         intent = campaign.get("work_intent")
         intent = intent if isinstance(intent, dict) else {}
         intent_repositories = intent.get("repositories")
         if isinstance(intent_repositories, list) and repository in intent_repositories:
-            return True
-        for field in ("repository_refs",):
-            values = campaign.get(field)
-            if isinstance(values, list) and any(
-                isinstance(item, dict) and item.get("repository") == repository
-                for item in values
-            ):
-                return True
-        for field in ("selected_checkouts", "repo_facts"):
+            basis.append("campaign.work_intent.repositories")
+        values = campaign.get("repository_refs")
+        if isinstance(values, list) and any(
+            isinstance(item, dict) and item.get("repository") == repository
+            for item in values
+        ):
+            basis.append("campaign.repository_refs")
+        for field, label in (("selected_checkouts", "snapshot.selected_checkouts"),
+                             ("repo_facts", "snapshot.repo_facts")):
             values = snapshot.get(field)
             if isinstance(values, dict) and repository in values:
-                return True
-        return any(claim.get("repository") == repository for claim in claims)
+                basis.append(label)
+        if any(claim.get("repository") == repository for claim in claims):
+            basis.append("active_claim.repository")
+        return tuple(basis)
 
     def _observe_project_checkout(self, repository: str) -> dict[str, Any]:
         """Add a fresh, bounded Environment-owned Git observation to the capsule.
@@ -701,6 +721,9 @@ class EnvironmentService:
              ("claim_id", "version", "repository", "scope", "basis", "status", "expires_at")}
             for claim in claims if claim.get("repository") == repository
         ]
+        project_reference_basis = self._snapshot_repository_reference_basis(
+            snapshot, repository, claims,
+        )
         intent_repositories = intent.get("repositories", [])
         intent_project_scope = (
             [repository] if isinstance(intent_repositories, list)
@@ -739,6 +762,10 @@ class EnvironmentService:
             if isinstance(campaign.get("session_ids", []), list) else [],
             "definition_id": (snapshot.get("provenance") or {}).get("definition_id"),
             "workspace_root": (snapshot.get("workspace") or {}).get("root"),
+            "project_reference": {
+                "status": "linked" if project_reference_basis else "same_campaign_only",
+                "basis": list(project_reference_basis),
+            },
             "work_intent": work_intent,
             "repositories": selected_references,
             "repository_facts_source": "persisted Environment snapshot; may be stale",
