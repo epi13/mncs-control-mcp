@@ -282,6 +282,98 @@ def test_campaign_capsule_rejects_wider_or_unbound_requests(tmp_path: Path) -> N
     assert environment.calls == 0
 
 
+def test_project_rpc_exposes_session_authorized_health_and_reports_unknown_operations(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    token = "project-health-capability"
+    root = tmp_path / "project"
+    root.mkdir()
+    snapshot = {"authenticated_principal_id": "principal-agent"}
+
+    class Store:
+        def load_snapshot(self, session_id):
+            assert session_id == "ses_health"
+            return snapshot
+
+        def close(self):
+            pass
+
+    class Environment:
+        state_dir = tmp_path / "state"
+        environment_path = tmp_path / "environment"
+
+        def _pkg(self):
+            return object()
+
+        def _store(self, _pkg):
+            return Store()
+
+    server = EnvironmentRPCServer(
+        ControlConfig(
+            sandbox_home=tmp_path / "home",
+            environment_rpc_socket=tmp_path / "rpc" / "environment.sock",
+        ),
+        environment_service=Environment(),
+        policy=object(),
+    )
+    server._grants[hashlib.sha256(token.encode()).hexdigest()] = _GrantRecord(
+        grant_id="project-health-grant",
+        principal_id="principal-agent",
+        host_root=root,
+        sandbox_root="/workspace/project",
+        scope="project",
+        uid=0,
+        expires_at=time.monotonic() + 60,
+        token_file=tmp_path / "grant",
+    )
+    calls = []
+
+    def run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return SimpleNamespace(
+            returncode=0,
+            stdout='{"overall":"unknown","providers":{"forge":"unknown"}}\n',
+            stderr="",
+        )
+
+    monkeypatch.setattr("mncs_control_mcp.environment_rpc.subprocess.run", run)
+    request = {
+        "grant": token,
+        "request_id": "req_project_health",
+        "argv": ["health", "ses_health", "--consumer", "agent", "--live"],
+        "cwd": "/workspace/project",
+    }
+    response = server.dispatch(request, peer_uid=0)
+
+    assert response["ok"] is True
+    assert response["result"]["exit_code"] == 0
+    assert json.loads(response["result"]["stdout"])["overall"] == "unknown"
+    assert len(calls) == 1
+    assert calls[0][0][-5:] == [
+        "health", "ses_health", "--consumer", "agent", "--live",
+    ]
+    assert calls[0][1]["env"]["MNCS_ENV_AUTH_PRINCIPAL_ID"] == "principal-agent"
+    assert calls[0][1]["env"]["MNCS_ENV_RPC_REQUEST_ID"] == "req_project_health"
+
+    snapshot["authenticated_principal_id"] = "different-principal"
+    foreign = server.dispatch({
+        **request,
+        "request_id": "req_project_health_foreign",
+    }, peer_uid=0)
+    assert foreign["error"]["code"] == "ENVIRONMENT_AUTHORITY_DENIED"
+    assert len(calls) == 1
+
+    unsupported = server.dispatch({
+        **request,
+        "request_id": "req_project_doctor_unavailable",
+        "argv": ["doctor", "ses_health"],
+    }, peer_uid=0)
+    assert unsupported["error"]["code"] == "ENVIRONMENT_OPERATION_UNAVAILABLE"
+    assert unsupported["error"]["details"]["status"] == "unknown"
+    assert unsupported["error"]["details"]["operation"] == "doctor"
+    assert len(calls) == 1
+
+
 def test_retire_rpc_exposes_only_scoped_read_only_inventory(tmp_path: Path) -> None:
     server = EnvironmentRPCServer(
         ControlConfig(

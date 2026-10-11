@@ -29,7 +29,7 @@ from .errors import ControlError
 MAX_REQUEST_BYTES = 256 * 1024
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 ALLOWED_COMMANDS = frozenset({
-    "enter", "inspect", "context", "resume", "checkpoint", "handoff", "accept", "claims",
+    "enter", "inspect", "context", "resume", "health", "checkpoint", "handoff", "accept", "claims",
     "retire", "continuation",
 })
 RPC_SANDBOX_SOCKET = "/run/mncs-environment-rpc/environment.sock"
@@ -370,7 +370,15 @@ class EnvironmentRPCServer:
                                "Environment RPC fixes canonical persistence configuration")
         command = argv[0] if argv else None
         if command not in ALLOWED_COMMANDS:
-            raise ControlError("ENVIRONMENT_AUTHORITY_DENIED", "Environment operation is not exposed by Control")
+            raise ControlError(
+                "ENVIRONMENT_OPERATION_UNAVAILABLE",
+                "Environment operation is not exposed by Control",
+                details={
+                    "operation": command,
+                    "status": "unknown",
+                    "next": "use an exposed Environment operation or extend the Control operation contract",
+                },
+            )
         translated = list(argv)
 
         def map_path_option(option: str) -> None:
@@ -659,7 +667,7 @@ class EnvironmentRPCServer:
             argv = request.get("argv")
             session_id = None
             if isinstance(argv, list) and argv and argv[0] in {
-                "inspect", "context", "resume", "checkpoint", "handoff", "accept", "claims",
+                "inspect", "context", "resume", "health", "checkpoint", "handoff", "accept", "claims",
                 "retire",
             }:
                 if argv[0] == "accept":
@@ -749,7 +757,7 @@ class EnvironmentRPCServer:
             # The client cannot choose this root. Environment must not probe a
             # registered checkout outside the execution grant's namespace.
             argv.extend(["--execution-root", str(record.host_root)])
-        if command in {"inspect", "context", "resume", "checkpoint", "handoff", "accept", "claims", "retire"}:
+        if command in {"inspect", "context", "resume", "health", "checkpoint", "handoff", "accept", "claims", "retire"}:
             try:
                 command_index = argv.index(command)
                 positional = (

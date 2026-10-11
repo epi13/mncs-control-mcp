@@ -52,7 +52,13 @@ def test_enter_inspect_claim_release_round_trip(tmp_path: Path) -> None:
     service = EnvironmentService(_config(tmp_path))
     assert service.status()["available"] is True
 
-    entered = service.enter({"name": "control-probe", "intent": {"goal": "probe"}}, "control-probe")
+    entered = service.enter(
+        {
+            "name": "control-probe",
+            "intent": {"goal": "probe", "repositories": ["mncs-vm"]},
+        },
+        "control-probe",
+    )
     assert entered["lifecycle"] == "active"
     session_id = entered["session_id"]
 
@@ -69,8 +75,14 @@ def test_enter_inspect_claim_release_round_trip(tmp_path: Path) -> None:
 @needs_environment
 def test_claim_conflict_across_sessions(tmp_path: Path) -> None:
     service = EnvironmentService(_config(tmp_path))
-    first = service.enter({"name": "a", "intent": {"goal": "a"}}, "consumer-a")
-    second = service.enter({"name": "b", "intent": {"goal": "b"}}, "consumer-b")
+    first = service.enter(
+        {"name": "a", "intent": {"goal": "a", "repositories": ["mncs-vm"]}},
+        "consumer-a",
+    )
+    second = service.enter(
+        {"name": "b", "intent": {"goal": "b", "repositories": ["mncs-vm"]}},
+        "consumer-b",
+    )
     service.acquire_claim(first["session_id"], "mncs-vm", reason="first")
     with pytest.raises(ControlError) as excinfo:
         service.acquire_claim(second["session_id"], "mncs-vm", reason="second")
