@@ -1,0 +1,143 @@
+{
+  "schema_version": "mncs.control.campaign-continuity-live-acceptance/1",
+  "identity": "ev_project_scoped_campaign_continuity_live_20261011",
+  "recorded_at": "2026-10-11T06:25:49Z",
+  "campaign_identity": "cmp_mncs_continuity_20261010",
+  "source": {
+    "repository": "mncs-control-mcp",
+    "tested_revision": "1a523dbf26bef9fa664201885b3793cd7b89ad9a",
+    "tested_revision_is_main_and_origin_main": true,
+    "environment_repository": "mncs-environment",
+    "environment_revision": "adc7ac59674c00bf3cd96897bf5ed37ef2883aa4",
+    "runtime_revision": "1a523dbf26bef9fa664201885b3793cd7b89ad9a",
+    "runtime_source_revision": "1a523dbf26bef9fa664201885b3793cd7b89ad9a",
+    "runtime_restart_required": false
+  },
+  "protected_execution": {
+    "sandbox_backend": "bwrap",
+    "scope": "project",
+    "project": "mncs-environment",
+    "cwd": "/workspace/mncs-environment",
+    "network": false,
+    "canonical_store_directly_visible": false,
+    "canonical_store_directly_writable": false,
+    "persistence_transport": "authenticated per-execution Environment RPC through MNCS Control",
+    "persistence_backend": "store",
+    "store_mutation_owner_state": "owner-write-path-available",
+    "authenticated_control_principal": "ctrl_239c9b758998589eb0fb1d069f8b5927"
+  },
+  "continuation_lookup": {
+    "command": "python3 -B -m mncs_env.cli continuation --campaign-id cmp_mncs_continuity_20261010",
+    "exit_code": 0,
+    "duration_seconds": 6.886,
+    "result_status": "context-conflict",
+    "campaign_id": "cmp_mncs_continuity_20261010",
+    "contexts": [
+      {
+        "definition_id": "env_1ea3af15c7464177",
+        "workspace_root": "/home/epi13/Documents/Projects"
+      },
+      {
+        "definition_id": "env_f31ee034e8e1fdcb",
+        "workspace_root": "/home/epi13/Documents/Projects"
+      }
+    ],
+    "contexts_truncated": false,
+    "checkpointed_session": {
+      "session_id": "ses_7226fbcfe65820f7",
+      "lifecycle": "active",
+      "definition_id": "env_f31ee034e8e1fdcb",
+      "checkpoint_ids": [
+        "chk_7362c31ac75f28b3",
+        "chk_0b555e201b02ebea",
+        "chk_15ed57d5775bc218",
+        "chk_d60b341ab8b68161"
+      ],
+      "claim_ids": [
+        "claim:mncs-environment"
+      ],
+      "evidence_count": 10,
+      "evidence_truncated": false
+    },
+    "uncheckpointed_duplicate": {
+      "session_id": "ses_b4b2d283542220b0",
+      "lifecycle": "active",
+      "definition_id": "env_1ea3af15c7464177",
+      "checkpoint_ids": [],
+      "claim_ids": [],
+      "evidence_count": 0
+    },
+    "selection_behavior": "Control returned both definition contexts and the separate session capsules; it did not select, adopt, or mutate either session during lookup."
+  },
+  "resume_and_fresh_readback": {
+    "operation": "resume existing session",
+    "session_id": "ses_7226fbcfe65820f7",
+    "consumer_id": "codex-process-1",
+    "request_id": "req_mncs_continuity_resume_20261011b",
+    "fresh_process_readback": true,
+    "readback_command": "python3 -B -m mncs_env.cli inspect ses_7226fbcfe65820f7",
+    "readback_observed_at": "2026-10-11T06:25:49.325129Z",
+    "lifecycle": "active",
+    "event_count": 216,
+    "latest_event": {
+      "identity": "evt_e4de54c1fce6e069",
+      "sequence": 216,
+      "type": "session.resumed",
+      "observed_at": "2026-10-11T06:16:08+00:00",
+      "consumer_id": "codex-process-1"
+    },
+    "exclusive_claim_holders": [
+      {
+        "repository": "mncs-control-mcp",
+        "claim_id": "claim:mncs-control-mcp",
+        "session_id": "ses_7226fbcfe65820f7",
+        "recorded_consumer_id": "codex-process-2"
+      },
+      {
+        "repository": "mncs-environment",
+        "claim_id": "claim:mncs-environment",
+        "session_id": "ses_7226fbcfe65820f7",
+        "recorded_consumer_id": "codex-process-2"
+      }
+    ],
+    "foreign_exclusive_claims_preserved": [
+      {
+        "repository": "mncs-compiler",
+        "session_id": "ses_d2537acde8b8a875",
+        "claim_id": "claim:mncs-compiler"
+      },
+      {
+        "repository": "mncs-forge",
+        "session_id": "ses_95c3aa35b8544042",
+        "claim_id": "claim:mncs-forge"
+      },
+      {
+        "repository": "mncs-reference-studies",
+        "session_id": "ses_95c3aa35b8544042",
+        "claim_id": "claim:mncs-reference-studies"
+      }
+    ]
+  },
+  "verification": {
+    "unit_test_command": ".venv/bin/pytest -q tests/test_environment_sessions.py -k campaign_continuation",
+    "unit_test_revision": "1a523dbf26bef9fa664201885b3793cd7b89ad9a",
+    "unit_test_result": "5 passed",
+    "live_project_bwrap_command": "python3 -B -m mncs_env.cli continuation --campaign-id cmp_mncs_continuity_20261010",
+    "live_project_bwrap_result": "PASS; canonical Store continuation records read through authenticated RPC while the caller had no direct Store path access"
+  },
+  "readiness": {
+    "campaign_session_continuity": "PASS for resuming the checkpointed session through the authenticated project-scoped RPC",
+    "ambiguous_campaign_context_resolution": "UNKNOWN; two active Environment definitions remain and the empty duplicate session was intentionally left untouched",
+    "canonical_store_publication_transport": "PASS; canonical mutation owner reports owner-write-path-available",
+    "forge_health": {
+      "status": "capability_unavailable",
+      "diagnostic": "Forge project inspection attempted a lock under /run/user/1000 and received EROFS in the protected Control project sandbox"
+    }
+  },
+  "result": "PASS_WITH_UNRESOLVED_CONTEXT_CONFLICT",
+  "limitations": [
+    "This proves protected readback and an authorized session resume; it does not prove crash-safe atomic claim transfer or retirement of the duplicate session.",
+    "The duplicate active session still requires explicit, authority-valid reconciliation.",
+    "Forge-backed campaign execution remains unavailable in the current protected runtime because its lock path is read-only."
+  ]
+}
