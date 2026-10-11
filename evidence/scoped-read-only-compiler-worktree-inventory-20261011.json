@@ -1,0 +1,79 @@
+{
+  "schema_version": "mncs.control.environment-read-only-retirement-inventory/1",
+  "identity": "ev_control_scoped_compiler_inventory_bwrap_20261011",
+  "recorded_at": "2026-10-11T19:27:39Z",
+  "campaign_identity": "cmp_mncs_continuity_20261010",
+  "source": {
+    "repository": "mncs-control-mcp",
+    "prior_main": "03957b673019ff183d0f674677670f73e08e2af2",
+    "implementation_commit": "7dc804ca46560a6aeb720c5b2428634ceb03676e",
+    "environment_rpc_sha256": "c52a83b807fa24e8b83637d23b837d3c65643eaefcdfb8ae54a61cdca1451406"
+  },
+  "focused_validation": {
+    "test_command": "PYTHONPATH=src pytest -q tests/test_environment_rpc.py -k retire_rpc --tb=short",
+    "result": "1 passed",
+    "static_checks": "ruff check src/mncs_control_mcp/environment_rpc.py tests/test_environment_rpc.py; python3 -m py_compile; git diff --check: PASS"
+  },
+  "protected_execution": {
+    "tool": "MNCS Control terminal_exec",
+    "sandbox_backend": "bwrap",
+    "scope": "project",
+    "project": "mncs-environment",
+    "network": false,
+    "command": "python3 -m mncs_env.cli retire ses_7226fbcfe65820f7 --repository mncs-compiler --dry-run --inventory",
+    "started_at": "2026-10-11T19:26:57.097757Z",
+    "completed_at": "2026-10-11T19:27:06.323602Z",
+    "duration_seconds": 9.226,
+    "exit_code": 0,
+    "control_service": {
+      "unit": "mncs-control-tunnel.service",
+      "restarted_after_source_change": true,
+      "invocation_id": "46423e7fdb014a18a9a8a42b7f55af37",
+      "active": true
+    }
+  },
+  "retirement_inventory": {
+    "session_id": "ses_7226fbcfe65820f7",
+    "schema_version": "mncs.environment.worktree-inventory/1",
+    "dry_run": true,
+    "mutation_performed": false,
+    "repository": {
+      "git_common_directory_identity": "git-common:0356dd87cca2a0c0",
+      "git_common_directory_relative": "mncs-compiler/.git",
+      "main_worktree": "/home/epi13/Documents/Projects/mncs-compiler",
+      "name": "mncs-compiler",
+      "path": "/home/epi13/Documents/Projects/mncs-compiler"
+    },
+    "canonical": {
+      "head": "4e4bf038b46b6090900994bce7121dbe5eafd44f",
+      "ref": "origin/main",
+      "resolves": true
+    },
+    "execution_scope": {
+      "mode": "authorized-root",
+      "root": "/home/epi13/Documents/Projects/mncs-compiler"
+    },
+    "summary": {
+      "branch_count": 62,
+      "branches_by_classification": {
+        "canonical-branch": 1,
+        "protected-by-another-consumer": 61
+      },
+      "worktree_count": 66,
+      "worktrees_by_access_disposition": {
+        "not-probed-protected": 3,
+        "outside-current-execution-scope": 63
+      },
+      "worktrees_by_classification": {
+        "protected-by-another-consumer": 66
+      }
+    },
+    "result": "PASS_FOR_AUTHORIZED_READ_ONLY_CROSS_PROJECT_INVENTORY_WITH_PROTECTED_BWRAP"
+  },
+  "authorization_and_limits": [
+    "Control resolved the repository name under its configured workspace root and passed only that checkout as the Environment inventory execution root.",
+    "Project Bwrap and the authenticated Environment RPC remained in use; no workspace-scoped writable grant or canonical Store path access was added.",
+    "Environment claim claim:mncs-compiler remained held by ses_d2537acde8b8a875 at version 63. Every branch and worktree is classified protected by another consumer; no cleanup or candidate mutation occurred.",
+    "Three protected worktrees were not probed and 63 registrations were outside this operation's repository-root execution scope; neither set is classified as deleted."
+  ]
+}
