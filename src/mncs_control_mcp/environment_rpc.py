@@ -358,6 +358,62 @@ class EnvironmentRPCServer:
             raise ControlError("ENVIRONMENT_WORKSPACE_ESCAPE", "client path resolves outside its granted root")
         return host_path
 
+    def _map_retirement_repository(self, value: str) -> Path:
+        """Resolve one workspace checkout for the read-only inventory operation.
+
+        Project-scoped Bwrap exposes the configured workspace read-only and
+        overlays only the granted project as writable. Retirement inventory
+        has no mutation flags, so it may name one immediate workspace child;
+        the resulting host operation is still fenced to that checkout.
+        """
+        if not isinstance(value, str) or not value or "\x00" in value:
+            raise ControlError(
+                "ENVIRONMENT_WORKSPACE_ESCAPE", "retirement repository is invalid"
+            )
+        supplied = Path(value)
+        if supplied.is_absolute():
+            try:
+                relative = supplied.relative_to("/workspace")
+            except ValueError as error:
+                raise ControlError(
+                    "ENVIRONMENT_WORKSPACE_ESCAPE",
+                    "retirement repository must be inside the mapped workspace",
+                ) from error
+        else:
+            relative = supplied
+        if len(relative.parts) != 1 or relative.name in ("", ".", ".."):
+            raise ControlError(
+                "ENVIRONMENT_WORKSPACE_ESCAPE",
+                "retirement inventory accepts one immediate workspace repository",
+            )
+
+        workspace_root = self.config.workspace_root.expanduser().resolve(strict=True)
+        candidate = workspace_root / relative.name
+        if candidate.is_symlink():
+            raise ControlError(
+                "ENVIRONMENT_WORKSPACE_ESCAPE",
+                "retirement repository must not be a symbolic link",
+            )
+        try:
+            repository = candidate.resolve(strict=True)
+        except OSError as error:
+            raise ControlError(
+                "ENVIRONMENT_WORKSPACE_MISSING",
+                "retirement repository is unavailable in the configured workspace",
+            ) from error
+        if repository.parent != workspace_root or not repository.is_dir():
+            raise ControlError(
+                "ENVIRONMENT_WORKSPACE_ESCAPE",
+                "retirement repository must be an immediate workspace directory",
+            )
+        marker = repository / ".git"
+        if not (marker.is_dir() or marker.is_file()):
+            raise ControlError(
+                "ENVIRONMENT_RPC_INVALID_REQUEST",
+                "retirement target is not a Git checkout",
+            )
+        return repository
+
     def _translate_argv(self, argv: Any, cwd: Path, record: _GrantRecord) -> list[str]:
         if (not isinstance(argv, list) or len(argv) > 256
                 or not all(isinstance(item, str)
@@ -540,7 +596,25 @@ class EnvironmentRPCServer:
             if canonical not in {"origin/main", "origin/master", "main", "master"}:
                 raise ControlError("ENVIRONMENT_AUTHORITY_DENIED",
                                    "retirement inventory canonical ref is not exposed")
-            map_path_option("--repository")
+            index = 0
+            while index < len(translated):
+                item = translated[index]
+                if item == "--repository":
+                    if index + 1 >= len(translated):
+                        raise ControlError(
+                            "ENVIRONMENT_RPC_INVALID_REQUEST",
+                            "--repository needs a value",
+                        )
+                    translated[index + 1] = str(
+                        self._map_retirement_repository(translated[index + 1])
+                    )
+                    index += 2
+                    continue
+                if item.startswith("--repository="):
+                    translated[index] = "--repository=" + str(
+                        self._map_retirement_repository(item.split("=", 1)[1])
+                    )
+                index += 1
         return translated
 
     def _authorize_session(self, session_id: str, principal_id: str) -> None:
@@ -750,9 +824,18 @@ class EnvironmentRPCServer:
         if command == "continuation":
             return self._campaign_continuation(record, argv, request_id)
         if command == "retire":
-            # The client cannot choose this root. Environment must not probe a
-            # registered checkout outside the execution grant's namespace.
-            argv.extend(["--execution-root", str(record.host_root)])
+            # The repository path was resolved by Control to one immediate
+            # configured workspace checkout. Environment may inspect physical
+            # worktrees only within that checkout; other registrations remain
+            # classified outside this operation's scope.
+            repository = next(
+                Path(item.split("=", 1)[1])
+                for item in argv
+                if item.startswith("--repository=")
+            ) if any(item.startswith("--repository=") for item in argv) else Path(
+                argv[argv.index("--repository") + 1]
+            )
+            argv.extend(["--execution-root", str(repository)])
         if command in {"inspect", "context", "resume", "health", "capabilities", "checkpoint", "handoff", "accept", "claims", "complete", "retire"}:
             try:
                 command_index = argv.index(command)

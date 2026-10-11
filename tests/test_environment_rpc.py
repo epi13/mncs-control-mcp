@@ -847,16 +847,29 @@ def test_project_rpc_exposes_session_authorized_read_operations_and_reports_unkn
 
 
 def test_retire_rpc_exposes_only_scoped_read_only_inventory(tmp_path: Path) -> None:
+    projects = tmp_path / "projects"
+    projects.mkdir()
+    host_root = projects / "mncs-environment"
+    host_root.mkdir()
+    (host_root / ".git").mkdir()
+    compiler_root = projects / "mncs-compiler"
+    compiler_root.mkdir()
+    (compiler_root / ".git").mkdir()
+    non_repository = projects / "not-a-repository"
+    non_repository.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / ".git").mkdir()
+    (projects / "linked-repository").symlink_to(outside, target_is_directory=True)
     server = EnvironmentRPCServer(
         ControlConfig(
+            workspace_root=projects,
             sandbox_home=tmp_path / "home",
             environment_rpc_socket=tmp_path / "rpc" / "environment.sock",
         ),
         environment_service=SimpleNamespace(state_dir=tmp_path / "state"),
         policy=object(),
     )
-    host_root = tmp_path / "project"
-    host_root.mkdir()
     grant = _GrantRecord(
         grant_id="grant-retire-test",
         principal_id="principal-test",
@@ -868,7 +881,7 @@ def test_retire_rpc_exposes_only_scoped_read_only_inventory(tmp_path: Path) -> N
         token_file=tmp_path / "grant",
     )
     translated = server._translate_argv(
-        ["retire", "ses_test", "--repository", "/workspace/project",
+        ["retire", "ses_test", "--repository", "/workspace/mncs-environment",
          "--inventory", "--dry-run"],
         host_root,
         grant,
@@ -876,17 +889,55 @@ def test_retire_rpc_exposes_only_scoped_read_only_inventory(tmp_path: Path) -> N
     assert translated == ["retire", "ses_test", "--repository", str(host_root),
                           "--inventory", "--dry-run"]
 
+    cross_project = server._translate_argv(
+        ["retire", "ses_test", "--repository", "mncs-compiler",
+         "--inventory", "--dry-run"],
+        host_root,
+        grant,
+    )
+    assert cross_project == [
+        "retire", "ses_test", "--repository", str(compiler_root),
+        "--inventory", "--dry-run",
+    ]
+    equals = server._translate_argv(
+        ["retire", "ses_test", "--repository=/workspace/mncs-compiler",
+         "--inventory", "--dry-run"],
+        host_root,
+        grant,
+    )
+    assert equals == [
+        "retire", "ses_test", "--repository=" + str(compiler_root),
+        "--inventory", "--dry-run",
+    ]
+
     for argv in (
-        ["retire", "ses_test", "--repository", "/workspace/project", "--inventory"],
-        ["retire", "ses_test", "--repository", "/workspace/project",
+        ["retire", "ses_test", "--repository", "/workspace/mncs-environment", "--inventory"],
+        ["retire", "ses_test", "--repository", "/workspace/mncs-environment",
          "--inventory", "--dry-run", "--branch", "main"],
-        ["retire", "ses_test", "--repository", "/workspace/project",
+        ["retire", "ses_test", "--repository", "/workspace/mncs-environment",
          "--inventory", "--dry-run", "--execution-root", "/"],
-        ["retire", "ses_test", "--repository", "/workspace/project",
+        ["retire", "ses_test", "--repository", "/workspace/mncs-environment",
          "--inventory", "--dry-run", "--canonical=refs/heads/private"],
     ):
         with pytest.raises(ControlError):
             server._translate_argv(argv, host_root, grant)
+
+    for repository in (
+        "../outside",
+        "nested/repository",
+        "/home/agent/mncs-compiler",
+        "/workspace/../outside",
+        "linked-repository",
+        "not-a-repository",
+        "missing-repository",
+    ):
+        with pytest.raises(ControlError):
+            server._translate_argv(
+                ["retire", "ses_test", "--repository", repository,
+                 "--inventory", "--dry-run"],
+                host_root,
+                grant,
+            )
 
 
 def test_entry_preserves_and_bounds_configured_workspace_root(tmp_path: Path) -> None:
