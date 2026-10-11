@@ -238,7 +238,11 @@ def test_campaign_continuation_returns_project_scoped_duplicate_capsules(tmp_pat
                     "clean": True,
                 }]),
                 "checkpoint_ids": ["chk_latest"],
-                "evidence": [{"identity": "evidence-1"}],
+                "evidence": [
+                    {"identity": f"evidence-{index}"} for index in range(12)
+                ],
+                "evidence_count": 12,
+                "evidence_truncated": False,
                 "delivery": {"status": "pending"},
                 "unresolved_pressures": [{"identity": "pressure-1"}],
             }}
@@ -262,6 +266,9 @@ def test_campaign_continuation_returns_project_scoped_duplicate_capsules(tmp_pat
     ]
     assert result["continuations"][0]["snapshot_version"] == 7
     assert result["continuations"][0]["claim_ids"] == ["claim-control"]
+    assert len(result["continuations"][0]["evidence"]) == 12
+    assert result["continuations"][0]["evidence_count"] == 12
+    assert result["continuations"][0]["evidence_truncated"] is False
     assert result["continuations"][0]["claims"][0]["scope"]["exclusive"] is True
     assert result["continuations"][0]["repositories"] == [{
         "repository": "mncs-control-mcp",

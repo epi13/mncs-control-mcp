@@ -707,6 +707,12 @@ class EnvironmentService:
             "goal": str(intent.get("goal", ""))[:800],
             "repositories": intent_project_scope,
         }
+        campaign_evidence = continuation.get("evidence", [])
+        if not isinstance(campaign_evidence, list):
+            campaign_evidence = []
+        evidence_limit = getattr(pkg.sessions, "CAMPAIGN_EVIDENCE_MAX", 32)
+        if type(evidence_limit) is not int or evidence_limit < 1 or evidence_limit > 32:
+            evidence_limit = 32
         return {
             "session_id": session_id,
             "snapshot_version": int(snapshot.get("snapshot_sequence", 0)),
@@ -736,8 +742,11 @@ class EnvironmentService:
                                if isinstance(item, str)]
             if isinstance(continuation.get("checkpoint_ids", []), list) else [],
             "evidence": EnvironmentService._bounded_capsule_value(
-                continuation.get("evidence", [])[-8:]
-                if isinstance(continuation.get("evidence", []), list) else []
+                campaign_evidence[-evidence_limit:], list_limit=evidence_limit,
+            ),
+            "evidence_count": continuation.get("evidence_count", len(campaign_evidence)),
+            "evidence_truncated": continuation.get(
+                "evidence_truncated", len(campaign_evidence) > evidence_limit
             ),
             "delivery": EnvironmentService._bounded_capsule_value(
                 continuation.get("delivery", campaign.get("delivery", {"status": "pending"}))
@@ -749,7 +758,9 @@ class EnvironmentService:
         }
 
     @staticmethod
-    def _bounded_capsule_value(value: Any, *, depth: int = 0) -> Any:
+    def _bounded_capsule_value(
+        value: Any, *, depth: int = 0, list_limit: int = 8,
+    ) -> Any:
         """Keep Store-originated evidence compact before returning it to MCP."""
         if value is None or isinstance(value, (bool, int, float)):
             return value
@@ -758,11 +769,14 @@ class EnvironmentService:
         if depth >= 4:
             return "[truncated]"
         if isinstance(value, list):
-            return [EnvironmentService._bounded_capsule_value(item, depth=depth + 1)
-                    for item in value[:8]]
+            return [EnvironmentService._bounded_capsule_value(
+                item, depth=depth + 1, list_limit=list_limit,
+            ) for item in value[:list_limit]]
         if isinstance(value, dict):
             return {
-                str(key)[:120]: EnvironmentService._bounded_capsule_value(item, depth=depth + 1)
+                str(key)[:120]: EnvironmentService._bounded_capsule_value(
+                    item, depth=depth + 1, list_limit=list_limit,
+                )
                 for key, item in list(value.items())[:24]
                 if isinstance(key, str)
             }
