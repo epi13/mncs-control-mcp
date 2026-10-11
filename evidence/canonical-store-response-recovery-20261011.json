@@ -1,0 +1,114 @@
+{
+  "schema_version": "mncs.control.canonical-store-response-recovery/1",
+  "identity": "ev_control_canonical_store_response_recovery_20261011",
+  "recorded_at": "2026-10-11T19:45:29Z",
+  "owner": "mncs-control-mcp",
+  "campaign_id": "cmp_mncs_continuity_20261010",
+  "session_id": "ses_7226fbcfe65820f7",
+  "source": {
+    "repository": "mncs-control-mcp",
+    "revision": "d4edc75271516b21ef61ca15d7ac20f1c6fd202d",
+    "runtime_invocation_after_restart": "530d6e0f800e454b808273f7b492e2fd",
+    "files": [
+      {
+        "path": "src/mncs_control_mcp/environment_rpc.py",
+        "sha256": "a8234b21e0afc5dd17d2ed4a005639389df0d9f7a61d0f2e413ba7684a7d8748"
+      },
+      {
+        "path": "tests/test_environment_rpc.py",
+        "sha256": "c30299bacb6963c6a8cb167375e7b22e69140106cba79c1a9ec14cdf0e8b2e77"
+      }
+    ]
+  },
+  "store_boundary": {
+    "transport": "authenticated Control Environment RPC",
+    "protected_execution": {
+      "backend": "bwrap",
+      "scope": "project",
+      "project": "mncs-environment",
+      "network": false,
+      "canonical_store_visible": false,
+      "canonical_store_writable": false,
+      "checks": [
+        {
+          "command": "test ! -e /home/epi13/.local/share/mncs-environment/store",
+          "exit_code": 0
+        },
+        {
+          "command": "test ! -w /home/epi13/.local/share/mncs-environment/store",
+          "exit_code": 0
+        }
+      ]
+    },
+    "control_service": {
+      "unit": "mncs-control-tunnel.service",
+      "invocation_id": "530d6e0f800e454b808273f7b492e2fd",
+      "state_after_test": "active",
+      "systemd_policy": {
+        "ProtectSystem": "strict",
+        "ProtectHome": "read-only",
+        "NoNewPrivileges": true,
+        "ReadWritePaths_includes_only_authorized_store_root": true
+      },
+      "owner_armed_test_trigger": "MNCS_CONTROL_TEST_DROP_CHECKPOINT_RESPONSE_REQUEST_ID; unset from the user manager after the request"
+    }
+  },
+  "publication_and_recovery": {
+    "request_id": "req_canoncommitresponse20261011",
+    "principal_id": "ctrl_239c9b758998589eb0fb1d069f8b5927",
+    "operation": "Environment checkpoint",
+    "initial_publication": {
+      "control_invocation_id": "484c03ade49944bda8f1b653ba2ba0a8",
+      "protected_process_exit_code": 0,
+      "checkpoint_id": "chk_a6d31a9072f0a0a6",
+      "sequence": 128,
+      "created_at": "2026-10-11T19:42:42Z",
+      "request_digest": "5c0355dc7e537f52"
+    },
+    "service_restart_replay": {
+      "new_control_invocation_id": "530d6e0f800e454b808273f7b492e2fd",
+      "same_request_and_payload_retried": true,
+      "same_checkpoint_id_returned": "chk_a6d31a9072f0a0a6",
+      "same_sequence_returned": 128,
+      "same_created_at_returned": "2026-10-11T19:42:42Z",
+      "same_request_digest_returned": "5c0355dc7e537f52",
+      "protected_process_exit_code": 0
+    },
+    "commit_to_response_interruption": {
+      "response_dropped_after_successful_environment_operation": true,
+      "control_journal_observation": "2026-10-11T19:44:26Z owner-armed checkpoint response drop after commit request_id=req_canoncommitresponse20261011",
+      "protected_client_retried_same_request_id": true,
+      "retry_returned_original_checkpoint": true,
+      "duplicate_checkpoint_created": false,
+      "scope": "the explicit response-drop log is from the post-restart idempotent replay; this does not claim that the Control process was terminated during its first-ever Store generation commit"
+    },
+    "fresh_protected_process_readback": {
+      "command": "./scripts/mncs-env inspect ses_7226fbcfe65820f7",
+      "exit_code": 0,
+      "session_lifecycle": "active",
+      "checkpoint_id": "chk_a6d31a9072f0a0a6",
+      "checkpoint_occurrences": 1,
+      "matching_checkpoint_events": 1,
+      "event_sequence": 510
+    }
+  },
+  "ownership": {
+    "environment_claim_owner_session": "ses_7226fbcfe65820f7",
+    "control_claim_owner_session": "ses_7226fbcfe65820f7",
+    "compiler_claim_owner_session": "ses_d2537acde8b8a875",
+    "forge_claim_owner_session": "ses_95c3aa35b8544042",
+    "foreign_compiler_and_forge_claims_modified": false
+  },
+  "verification": {
+    "control_rpc_tests": {
+      "command": "PYTHONPATH=src python3 -m pytest -q tests/test_environment_rpc.py",
+      "result": "passed"
+    },
+    "static_checks": "ruff check, py_compile, and git diff --check passed",
+    "service_restart": "mncs-control-tunnel.service active after restart and replay"
+  },
+  "limitations": [
+    "The response-drop acceptance uses the canonical Store path through the deployed owner transport; it is not a process kill at the instant of the first-ever generation commit.",
+    "Control process termination during the first commit-to-send window remains unproven; caller interruption and same-request reconciliation have separate canonical evidence."
+  ]
+}
