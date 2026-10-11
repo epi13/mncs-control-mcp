@@ -1,0 +1,65 @@
+{
+  "schema_version": "mncs.control.environment-completion-rpc/1",
+  "identity": "ev_environment_completion_rpc_20261011",
+  "recorded_at": "2026-10-11T13:43:25Z",
+  "owner": "mncs-control-mcp",
+  "campaign_identity": "cmp_mncs_continuity_20261010",
+  "source": {
+    "repository": "mncs-control-mcp",
+    "main_revision": "ae2b40be5bbc573847c42f231ae17a53cbfbcee8",
+    "files": [
+      "src/mncs_control_mcp/environment_rpc.py",
+      "tests/test_environment_rpc.py"
+    ],
+    "environment_revision": "0ed3e07bdc1b1f08d740af99ce5bb3209bcc8002"
+  },
+  "implementation": {
+    "change": "Admit the bounded Environment complete CLI operation over the existing Control-owned authenticated AF_UNIX bridge.",
+    "authorization": [
+      "Require the existing per-execution project grant and peer credential check.",
+      "Check the session authenticated principal against the grant before launching Environment.",
+      "Pass the authenticated principal and stable RPC request identity to Environment.",
+      "Keep all Store paths and file descriptors outside the sandbox."
+    ],
+    "service_model": "No new daemon or filesystem proxy; the existing Control service remains the canonical Store persistence boundary."
+  },
+  "validation": {
+    "rpc_unit_tests": {
+      "command": "python3 -m pytest tests/test_environment_rpc.py -q",
+      "result": "20 passed",
+      "covers": [
+        "authorized project session completion dispatch",
+        "authenticated principal and RPC request identity injection",
+        "foreign-principal rejection before subprocess execution",
+        "unsupported-operation remains UNKNOWN"
+      ]
+    },
+    "full_control_suite": {
+      "command": "python3 -m pytest tests/ -q",
+      "result": "passed, exit code 0, suite reached 100%"
+    },
+    "scoped_static_checks": {
+      "ruff_select": "E4,E7,E9,F passed on changed Python files",
+      "compileall": "passed",
+      "git_diff_check": "passed"
+    }
+  },
+  "runtime": {
+    "service": "mncs-control-tunnel.service",
+    "active_after_restart": true,
+    "runtime_revision": "ae2b40be5bbc573847c42f231ae17a53cbfbcee8",
+    "source_revision": "ae2b40be5bbc573847c42f231ae17a53cbfbcee8",
+    "restart_required": false,
+    "environment_persistence": {
+      "provider": "mncs-control-environment-rpc",
+      "state": "ready",
+      "authorization": "per-execution-grant-and-peer-credentials",
+      "store_mutation": "owner-write-path-available"
+    }
+  },
+  "protected_completion_proof": "mncs-environment/evidence/session-completion-recovery-20261011.json",
+  "limitations": [
+    "The project-scoped completion surface is the existing Environment CLI bridge; no direct unrestricted host-side MCP completion operation was added.",
+    "Environment owns completion semantics and Store mutations; Control only authenticates and transports the bounded request."
+  ]
+}
