@@ -172,6 +172,7 @@ def test_campaign_continuation_returns_project_scoped_duplicate_capsules(tmp_pat
                     "branch": "campaign/continuity",
                     "head": "abc123",
                     "clean": True,
+                    "observation": "current",
                 }],
                 "delivery": {"status": "pending"},
             },
@@ -228,6 +229,7 @@ def test_campaign_continuation_returns_project_scoped_duplicate_capsules(tmp_pat
                     "branch": "campaign/continuity",
                     "head": "abc123",
                     "clean": True,
+                    "observation": "current",
                 }] if self.session_id == "ses_first" else [{
                     "repository": "mncs-language",
                     "observed_path": "/projects/mncs-language",
@@ -267,7 +269,16 @@ def test_campaign_continuation_returns_project_scoped_duplicate_capsules(tmp_pat
         "branch": "campaign/continuity",
         "head": "abc123",
         "clean": True,
+        "observation": "recorded_snapshot",
+        "recorded_observation": "current",
     }]
+    assert result["continuations"][0]["repository_facts_source"].startswith(
+        "persisted Environment"
+    )
+    assert result["continuations"][0]["live_repository_observation"]["status"] == "unknown"
+    assert result["continuations"][0]["recorded_checkout_comparisons"] == [
+        {"status": "unknown_live_observation"}
+    ]
     assert "mncs-language" not in repr(result)
     assert store.closed is True
 
@@ -383,6 +394,18 @@ def test_campaign_continuation_reads_real_isolated_store(tmp_path: Path) -> None
         workspace=".",
         campaign_id="campaign-isolated-test",
     )
+    recorded_head = subprocess.run(
+        ["git", "-C", str(checkout), "rev-parse", "HEAD"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    (checkout / "README.md").write_text("checkout advanced after session entry\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(checkout), "add", "README.md"], check=True)
+    subprocess.run(["git", "-C", str(checkout), "commit", "-qm", "advance after entry"], check=True)
+    live_head = subprocess.run(
+        ["git", "-C", str(checkout), "rev-parse", "HEAD"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    assert live_head != recorded_head
 
     pkg = service._pkg()
     store = service._store(pkg)
@@ -437,6 +460,20 @@ def test_campaign_continuation_reads_real_isolated_store(tmp_path: Path) -> None
     assert checkout_ref["observed_path"] == str(checkout)
     assert checkout_ref["branch"] in {"main", "master"}
     assert len(checkout_ref["head"]) == 40
+    assert checkout_ref["head"] == recorded_head
+    observation = selected["live_repository_observation"]
+    assert observation["status"] == "current"
+    assert observation["checkout"]["path"] == str(checkout)
+    assert observation["checkout"]["head"] == live_head
+    assert observation["checkout"]["head"] != checkout_ref["head"]
+    assert observation["checkout"]["clean"] is True
+    comparison = selected["recorded_checkout_comparisons"][0]
+    assert comparison["status"] == "checkout_head_changed"
+    assert comparison["recorded_head"] == recorded_head
+    assert comparison["live_head"] == live_head
+    assert observation["worktree_registrations"][0]["physical_checkout_status"].startswith(
+        "not_checked"
+    )
     child_script = """
 import json
 import sys

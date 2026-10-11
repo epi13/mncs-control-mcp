@@ -599,7 +599,7 @@ def build_server(config: ControlConfig | None = None) -> Any:
     def env_enter(definition: dict[str, object], consumer: str, workspace: str | None = None, consumer_kind: str = "agent", campaign_id: str | None = None) -> dict[str, object]:
         return invoke("env_enter", environment_sessions.enter, definition, consumer, workspace=workspace, consumer_kind=consumer_kind, campaign_id=campaign_id, audit_metadata={"consumer": consumer, "campaign_id": campaign_id})  # type: ignore[return-value]
 
-    @server.tool(name="env_campaign_continuation", description="Discover authenticated campaign continuations for one project, or select one campaign identity. Returns compact session, claim, checkout, checkpoint, delivery, and pressure facts; duplicate sessions and campaigns remain explicit for selection.", annotations=ro, structured_output=True)
+    @server.tool(name="env_campaign_continuation", description="Discover authenticated campaign continuations for one project, or select one campaign identity. Returns persisted session facts plus a fresh, read-only Environment Git observation; duplicate sessions and campaigns remain explicit for selection.", annotations=ro, structured_output=True)
     def env_campaign_continuation(repository: str, campaign_id: str | None = None) -> dict[str, object]:
         return invoke(
             "env_campaign_continuation",

@@ -15,8 +15,10 @@ workspace paths, isolated state directories for tests).
 from __future__ import annotations
 
 import importlib
+import os
 import re
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -308,10 +310,12 @@ class EnvironmentService:
                     })
                     continue
 
+                live_observation = self._observe_project_checkout(repository)
                 continuations = [
                     self._continuation_capsule(
                         pkg, store, session_id, snapshot, repository,
                         claims_by_session.get(session_id, []),
+                        live_observation,
                     )
                     # Once the campaign is proven to include this project,
                     # retain same-principal duplicates even if one projection
@@ -406,10 +410,191 @@ class EnvironmentService:
                 return True
         return any(claim.get("repository") == repository for claim in claims)
 
+    def _observe_project_checkout(self, repository: str) -> dict[str, Any]:
+        """Add a fresh, bounded Environment-owned Git observation to the capsule.
+
+        Session snapshots are durable and may describe an earlier checkout. The
+        workspace provider owns repository discovery, so use its read-only
+        project-scoped scanner and keep the persisted session facts alongside
+        this explicitly time-bound observation.
+        """
+        observed_at = datetime.now(UTC).isoformat()
+        root = self._config.workspace_root.expanduser().resolve()
+        project_path = root / repository
+        try:
+            workspace = importlib.import_module(f"{PACKAGE}.workspace")
+            invalidate = getattr(workspace, "invalidate_repo_facts", None)
+            if callable(invalidate):
+                invalidate(project_path)
+            result = workspace.discover_workspace(
+                root, repositories=[repository], timeout_seconds=3.0,
+            )
+        except Exception as exc:
+            return {
+                "status": "unknown",
+                "observed_at": observed_at,
+                "repository": repository,
+                "diagnostic": str(exc)[:500],
+            }
+
+        result = result if isinstance(result, dict) else {}
+        scan = result.get("scan")
+        scan = scan if isinstance(scan, dict) else {}
+        rows = result.get("repositories") if isinstance(result, dict) else None
+        rows = rows if isinstance(rows, list) else []
+        checkout = next((row for row in rows
+                         if isinstance(row, dict) and row.get("name") == repository), None)
+        if result.get("error") or scan.get("status") != "complete" or checkout is None:
+            return {
+                "status": "unknown",
+                "observed_at": observed_at,
+                "repository": repository,
+                "workspace_root": str(root),
+                "scan_status": scan.get("status", "unknown"),
+                "diagnostic": str(result.get("error") or scan.get("message")
+                                  or "Environment did not observe the selected checkout")[:500],
+            }
+
+        git_error = checkout.get("git_error")
+        worktrees = checkout.get("worktrees")
+        worktrees = worktrees if isinstance(worktrees, list) else []
+        return {
+            "status": "current" if not git_error and isinstance(checkout.get("head"), str)
+            else "unknown",
+            "observed_at": observed_at,
+            "source": "mncs-environment.workspace.discover_workspace",
+            "workspace_root": str(root),
+            "repository": repository,
+            "scan_status": scan.get("status"),
+            "checkout": {
+                "path": checkout.get("path"),
+                "manifest_repository": checkout.get("manifest_repository"),
+                "manifest_revision": checkout.get("manifest_revision"),
+                "branch": checkout.get("branch"),
+                "head": checkout.get("head"),
+                "clean": not bool(checkout.get("dirty")) if not git_error else None,
+                "dirty_files": (checkout.get("dirty_files", [])[:16]
+                                 if isinstance(checkout.get("dirty_files"), list) else []),
+                "dirty_files_truncated": bool(checkout.get("dirty_truncated"))
+                or len(checkout.get("dirty_files", [])) > 16
+                if isinstance(checkout.get("dirty_files"), list) else False,
+                "untracked_count": checkout.get("untracked_count"),
+                "git_error": str(git_error)[:500] if git_error else None,
+            },
+            "worktree_registrations": [
+                {
+                    "registered_path": str(item.get("path", ""))[:1000],
+                    "branch": str(item.get("branch", "")).removeprefix("refs/heads/")[:256] or None,
+                    "head": str(item.get("head", ""))[:64] or None,
+                    "detached": item.get("detached") == "true",
+                    "physical_checkout_status": "not_checked; Git registration only",
+                }
+                for item in worktrees[:16] if isinstance(item, dict)
+            ],
+            "worktree_registrations_count": len(worktrees),
+            "worktree_registrations_truncated": len(worktrees) > 16,
+        }
+
+    @staticmethod
+    def _compare_recorded_checkouts(
+        references: list[dict[str, Any]], live_observation: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        """Relate persisted checkout facts to the bounded live Git observation."""
+        if live_observation.get("status") != "current":
+            return [{"status": "unknown_live_observation"} for _ in references[:8]]
+
+        root = str(live_observation.get("workspace_root", ""))
+
+        def path_key(value: Any) -> str | None:
+            if not isinstance(value, str) or not value:
+                return None
+            candidate = value if os.path.isabs(value) else os.path.join(root, value)
+            return os.path.normcase(os.path.normpath(candidate))
+
+        def branch_key(value: Any) -> str | None:
+            if not isinstance(value, str) or not value:
+                return None
+            return value.removeprefix("refs/heads/")
+
+        checkout = live_observation.get("checkout")
+        checkout = checkout if isinstance(checkout, dict) else {}
+        registrations = live_observation.get("worktree_registrations")
+        registrations = registrations if isinstance(registrations, list) else []
+        checkout_path_key = path_key(checkout.get("path"))
+        candidates = [{
+            "registered_path": checkout.get("path"),
+            "branch": checkout.get("branch"),
+            "head": checkout.get("head"),
+            "source": "project_checkout",
+        }]
+        candidates.extend(
+            item for item in registrations
+            if path_key(item.get("registered_path")) != checkout_path_key
+        )
+        output: list[dict[str, Any]] = []
+        for reference in references[:8]:
+            recorded_path = reference.get("observed_path") or reference.get("path")
+            recorded_path_key = path_key(recorded_path)
+            recorded_branch = branch_key(reference.get("branch"))
+            recorded_head = reference.get("head")
+            path_matches = [item for item in candidates
+                            if recorded_path_key is not None
+                            and path_key(item.get("registered_path")) == recorded_path_key]
+            matched = path_matches[0] if len(path_matches) == 1 else None
+            if matched is None:
+                identity_matches = [item for item in candidates
+                                    if ((recorded_branch is not None
+                                         and branch_key(item.get("branch")) == recorded_branch)
+                                        or (isinstance(recorded_head, str)
+                                            and item.get("head") == recorded_head))]
+                matched = identity_matches[0] if len(identity_matches) == 1 else None
+            if matched is None:
+                status = ("unknown_registration_list_truncated"
+                          if live_observation.get("worktree_registrations_truncated")
+                          else "not_observed_in_current_registration_set")
+                output.append({
+                    "status": status,
+                    "recorded_path": str(recorded_path)[:1000] if recorded_path else None,
+                    "recorded_branch": recorded_branch,
+                    "recorded_head": recorded_head,
+                })
+                continue
+
+            live_branch = branch_key(matched.get("branch"))
+            live_head = matched.get("head")
+            branch_matches = recorded_branch is None or recorded_branch == live_branch
+            head_matches = not isinstance(recorded_head, str) or recorded_head == live_head
+            same_path = (recorded_path_key is not None
+                         and path_key(matched.get("registered_path")) == recorded_path_key)
+            if same_path and branch_matches and head_matches:
+                status = "same_checkout"
+            elif same_path and branch_matches:
+                status = "checkout_head_changed"
+            elif same_path:
+                status = "checkout_branch_changed"
+            elif branch_matches and head_matches:
+                status = "registered_branch_head_match_path_mapping_differs"
+            elif branch_matches:
+                status = "registered_branch_head_changed_path_mapping_differs"
+            else:
+                status = "registered_checkout_differs"
+            output.append({
+                "status": status,
+                "recorded_path": str(recorded_path)[:1000] if recorded_path else None,
+                "recorded_branch": recorded_branch,
+                "recorded_head": recorded_head,
+                "live_registered_path": str(matched.get("registered_path", ""))[:1000],
+                "live_branch": live_branch,
+                "live_head": live_head,
+                "path_matches": same_path,
+            })
+        return output
+
     @staticmethod
     def _continuation_capsule(
         pkg: Any, store: Any, session_id: str, snapshot: dict[str, Any],
         repository: str, claims: list[dict[str, Any]],
+        live_observation: dict[str, Any],
     ) -> dict[str, Any]:
         session = pkg.sessions.Session.open(
             state_dir=Path("."), session_id=session_id, backend="store", store=store,
@@ -470,6 +655,10 @@ class EnvironmentService:
                         ] if isinstance(worktrees, list) else [],
                     }]
                     break
+        for reference in selected_references:
+            if "observation" in reference:
+                reference["recorded_observation"] = reference["observation"]
+                reference["observation"] = "recorded_snapshot"
         claim_capsules = [
             {key: claim.get(key) for key in
              ("claim_id", "version", "repository", "scope", "basis", "status", "expires_at")}
@@ -506,6 +695,11 @@ class EnvironmentService:
             "workspace_root": (snapshot.get("workspace") or {}).get("root"),
             "work_intent": work_intent,
             "repositories": selected_references,
+            "repository_facts_source": "persisted Environment snapshot; may be stale",
+            "live_repository_observation": live_observation,
+            "recorded_checkout_comparisons": EnvironmentService._compare_recorded_checkouts(
+                selected_references, live_observation,
+            ),
             "claim_ids": [str(claim.get("claim_id")) for claim in claim_capsules],
             "claims": EnvironmentService._bounded_capsule_value(claim_capsules[:8]),
             "checkpoint_ids": [str(item)[:160] for item in

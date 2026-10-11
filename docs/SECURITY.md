@@ -113,6 +113,15 @@ owner session identities are not returned. Duplicate sessions remain explicit
 and must be selected by exact session identity before `env_resume`. If the
 campaign identity is omitted, Control discovers same-principal campaigns
 recorded against that project; multiple campaigns remain explicit choices.
+Persisted checkout references are labeled as snapshot facts because their
+heads may be stale. The response also includes a fresh, bounded, read-only
+Environment workspace observation for the selected project. Registered
+worktree paths are reported as Git metadata only; registration does not prove
+that a physical checkout is currently available or clean. Incomplete or
+unavailable discovery remains `unknown` instead of reusing stored facts as
+current. The capsule compares persisted branch/head/path facts to the bounded
+live checkout and registration set when possible, while retaining `unknown`
+when the registration list is truncated or the facts cannot be matched.
 Nonterminal setup or handed-off lifecycles return a reconciliation result
 instead of being labeled resumable; handed-off sessions continue through
 Environment's recipient-bound accept operation.
