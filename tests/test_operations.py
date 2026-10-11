@@ -111,16 +111,33 @@ def test_deployment_paths_and_unit_rendering(tmp_path: Path) -> None:
     assert "%h/.local/share/mncs-environment/store" in deployed_unit
 
 
-def test_update_watcher_units_reload_tunnel_on_main_ref_change(tmp_path: Path) -> None:
+def test_update_watcher_units_reload_tunnel_for_control_and_environment_changes(
+    tmp_path: Path,
+) -> None:
     repository = tmp_path / "mncs-control-mcp"
-    path_unit = render_update_path(repository=repository)
+    environment_repository = tmp_path / "mncs-environment"
+    path_unit = render_update_path(
+        repository=repository,
+        environment_repository=environment_repository,
+    )
     service_unit = render_update_service()
-    assert f"PathChanged={repository}/.git/HEAD" in path_unit
-    assert f"PathChanged={repository}/.git/refs/heads/main" in path_unit
-    assert f"PathChanged={repository}/.git/packed-refs" in path_unit
+    for root in (repository, environment_repository):
+        assert f"PathChanged={root}/.git/HEAD" in path_unit
+        assert f"PathChanged={root}/.git/refs/heads/main" in path_unit
+        assert f"PathChanged={root}/.git/packed-refs" in path_unit
     assert "Unit=mncs-control-update.service" in path_unit
     assert "try-restart mncs-control-tunnel.service" in service_unit
     assert "NoNewPrivileges=true" in service_unit
+    deployed = (
+        Path(__file__).resolve().parents[1]
+        / "deploy"
+        / "systemd"
+        / "mncs-control-update.path"
+    ).read_text(encoding="utf-8")
+    assert "%h/Documents/Projects/mncs-control-mcp/.git/HEAD" in deployed
+    assert "%h/Documents/Projects/mncs-environment/.git/HEAD" in deployed
+    assert "%h/Documents/Projects/mncs-environment/.git/refs/heads/main" in deployed
+    assert "%h/Documents/Projects/mncs-environment/.git/packed-refs" in deployed
 
 
 def test_update_service_can_reach_user_bus_for_restart() -> None:

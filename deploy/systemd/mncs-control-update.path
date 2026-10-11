@@ -1,10 +1,13 @@
 [Unit]
-Description=Watch MNCS Control source revision
+Description=Watch MNCS Control and Environment source revisions
 
 [Path]
 PathChanged=%h/Documents/Projects/mncs-control-mcp/.git/HEAD
 PathChanged=%h/Documents/Projects/mncs-control-mcp/.git/refs/heads/main
 PathChanged=%h/Documents/Projects/mncs-control-mcp/.git/packed-refs
+PathChanged=%h/Documents/Projects/mncs-environment/.git/HEAD
+PathChanged=%h/Documents/Projects/mncs-environment/.git/refs/heads/main
+PathChanged=%h/Documents/Projects/mncs-environment/.git/packed-refs
 Unit=mncs-control-update.service
 
 [Install]

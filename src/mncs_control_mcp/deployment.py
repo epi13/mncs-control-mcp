@@ -106,29 +106,42 @@ WantedBy=default.target
 """
 
 
-def render_update_path(*, repository: Path) -> str:
-    """Watch the checked-out refs so a source update reloads Control.
+def render_update_path(
+    *, repository: Path, environment_repository: Path | None = None,
+) -> str:
+    """Watch Control and Environment refs so source updates reload Control.
 
     The tunnel process is intentionally long-lived. An editable Python install
     therefore makes new source available after ``git pull`` but does not make
-    the already-imported MCP process execute it. The path unit closes that gap
+    the already-imported MCP process execute it. Control also imports the
+    sibling ``mncs-environment`` package into that process, so Environment
+    source changes must trigger the same reload. The path unit closes that gap
     without granting the MCP sandbox access to the user systemd bus.
 
     ``.git/HEAD`` is watched in addition to ``refs/heads/main`` and
-    ``packed-refs`` so branch switches and detached checkouts also trigger a
-    reload; without it, a process started on an older commit keeps serving a
-    stale tool surface even though ``system_status`` reports revision drift.
+    ``packed-refs`` for both repositories so branch switches and detached
+    checkouts also trigger a reload; without it, a process started on older
+    source keeps serving stale behavior even though status reports revision
+    drift.
     """
 
     repo = repository.expanduser().resolve()
-    escaped_repo = str(repo).replace("%", "%%")
+    environment_repo = (
+        (environment_repository or repo.parent / "mncs-environment")
+        .expanduser()
+        .resolve()
+    )
+    roots = tuple(dict.fromkeys((repo, environment_repo)))
+    watched_refs = "\n".join(
+        f"PathChanged={str(root).replace('%', '%%')}/.git/{ref}"
+        for root in roots
+        for ref in ("HEAD", "refs/heads/main", "packed-refs")
+    )
     return f"""[Unit]
-Description=Watch MNCS Control source revision
+Description=Watch MNCS Control and Environment source revisions
 
 [Path]
-PathChanged={escaped_repo}/.git/HEAD
-PathChanged={escaped_repo}/.git/refs/heads/main
-PathChanged={escaped_repo}/.git/packed-refs
+{watched_refs}
 Unit=mncs-control-update.service
 
 [Install]
