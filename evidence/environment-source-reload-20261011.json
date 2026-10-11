@@ -1,7 +1,7 @@
 {
   "schema_version": "mncs.control.environment-source-reload-proof/1",
   "identity": "ev_control_environment_source_reload_20261011",
-  "recorded_at": "2026-10-11T23:08:00Z",
+  "recorded_at": "2026-10-11T23:10:23Z",
   "owner": "mncs-control-mcp",
   "campaign_identity": "cmp_mncs_continuity_20261010",
   "source": {
@@ -80,6 +80,36 @@
       "tracks_control_and_environment_refs": true,
       "state": "active/waiting",
       "activated_at": "2026-10-11T15:07:42-08:00"
+    }
+  },
+  "post_delivery_reload": {
+    "control_main": "37dbd21f0267709bfe8e50c7dc396e150ffcef45",
+    "control_remote_main": "37dbd21f0267709bfe8e50c7dc396e150ffcef45",
+    "update_service": {
+      "result": "success",
+      "started_at": "2026-10-11T15:09:10-08:00"
+    },
+    "control_service": {
+      "state": "active/running",
+      "started_at": "2026-10-11T15:09:10-08:00",
+      "process_id": 1946345
+    },
+    "fresh_protected_continuation": {
+      "control_job_id": "term-68e4765015c8f3b12cd64869",
+      "sandbox_backend": "bwrap",
+      "network": false,
+      "started_at": "2026-10-11T23:09:46.524552Z",
+      "completed_at": "2026-10-11T23:09:54.788950Z",
+      "exit_code": 0,
+      "status": "ready",
+      "selected_session_id": "ses_7226fbcfe65820f7",
+      "selection_basis": "authenticated-project-environment-definition",
+      "context_conflict_status": "context-conflict",
+      "contexts_count": 2,
+      "unselected_contexts_count": 1,
+      "campaign_evidence_count": 104,
+      "campaign_evidence_truncated": false,
+      "bounded_evidence_refs_truncated": true
     }
   },
   "limitations": [
