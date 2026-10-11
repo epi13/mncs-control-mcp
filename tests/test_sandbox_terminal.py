@@ -260,6 +260,12 @@ def test_project_bwrap_reconciles_checkpoint_after_control_rpc_restart(config) -
         assert inspected.returncode == 0, inspected.stdout + inspected.stderr
         snapshot = json.loads(inspected.stdout)
         assert snapshot["checkpoints"].count(checkpoint["identity"]) == 1
+        events = snapshot["latest_events"]
+        assert sum(
+            event.get("type") == "session.resumed"
+            and event.get("payload", {}).get("request_id") == request_id
+            for event in events
+        ) == 1
         assert second_rpc.status()["store_mutation"]["state"] == "owner-write-path-available"
     finally:
         first_rpc.revoke_grant(first_grant)
