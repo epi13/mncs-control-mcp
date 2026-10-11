@@ -34,6 +34,21 @@ def utc_now() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
+def _mcp_tool_error_diagnostic(result: object) -> str:
+    """Keep bounded, redacted details from an MCP tool-level failure."""
+    content = getattr(result, "content", None)
+    if not isinstance(content, (list, tuple)):
+        return "MCP tool call returned an error without text details"
+    messages: list[str] = []
+    for item in content[:4]:
+        text = item.get("text") if isinstance(item, Mapping) else getattr(item, "text", None)
+        if isinstance(text, str) and text.strip():
+            messages.append(redact_text(text.strip())[:512])
+    if not messages:
+        return "MCP tool call returned an error without text details"
+    return "; ".join(messages)[:2048]
+
+
 def _load_sibling_package(package: str, source_root: Path) -> Any:
     """Import an optional sibling package without making it a dependency of this project."""
     source = source_root / "src"
@@ -1756,7 +1771,8 @@ class ForgeAdapter:
                     return {
                         "health_status": "capability_unavailable",
                         "reachable": True,
-                        "diagnostic": "project inspection tool returned an MCP error",
+                        "failed_capability": "mncs_forge_project_inspect",
+                        "diagnostic": _mcp_tool_error_diagnostic(inspection),
                         "server": server_value(initialization, "name"),
                         "version": server_value(initialization, "version"),
                         "protocol_version": value(
