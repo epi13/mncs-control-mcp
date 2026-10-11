@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import shutil
+import subprocess
 import tempfile
 import threading
 import time
@@ -13,6 +14,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from mncs_control_mcp import environment_rpc as environment_rpc_module
 from mncs_control_mcp.config import ControlConfig
 from mncs_control_mcp.environment_rpc import (
     MAX_ARGUMENT_BYTES,
@@ -997,6 +999,148 @@ def test_project_entry_maps_workspace_without_campaign_id(tmp_path: Path) -> Non
             grant,
         )
     assert raised.value.code == "ENVIRONMENT_AUTHORITY_DENIED"
+
+
+def test_workspace_project_resolution_uses_git_common_directory(tmp_path: Path) -> None:
+    workspace = tmp_path / "projects"
+    project = workspace / "mncs-environment"
+    project.mkdir(parents=True)
+    subprocess.run(["git", "init", "--quiet", str(project)], check=True)
+    (project / "README.md").write_text("fixture\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(project), "add", "README.md"], check=True)
+    subprocess.run(
+        ["git", "-C", str(project), "-c", "user.name=MNCS Test",
+         "-c", "user.email=mncs-test@example.invalid", "commit", "--quiet", "-m", "fixture"],
+        check=True,
+    )
+    worktree = project / ".worktrees" / "continuation"
+    worktree.parent.mkdir()
+    subprocess.run(
+        ["git", "-C", str(project), "worktree", "add", "--quiet", "--detach",
+         str(worktree), "HEAD"],
+        check=True,
+    )
+    nested_cwd = worktree / "src"
+    nested_cwd.mkdir()
+
+    server = EnvironmentRPCServer(
+        ControlConfig(
+            workspace_root=workspace,
+            sandbox_home=tmp_path / "home",
+            environment_rpc_socket=tmp_path / "rpc" / "environment.sock",
+        ),
+        environment_service=SimpleNamespace(state_dir=tmp_path / "state"),
+        policy=object(),
+    )
+    grant = _GrantRecord(
+        grant_id="workspace-project-resolution",
+        principal_id="principal-test",
+        host_root=workspace,
+        sandbox_root="/workspace",
+        scope="workspace",
+        uid=0,
+        expires_at=time.monotonic() + 60,
+        token_file=tmp_path / "grant",
+    )
+
+    assert server._project_repository(grant, cwd=nested_cwd) == "mncs-environment"
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    subprocess.run(["git", "init", "--quiet", str(outside)], check=True)
+    with pytest.raises(ControlError) as escaped:
+        server._project_repository(grant, cwd=outside)
+    assert escaped.value.code == "ENVIRONMENT_WORKSPACE_ESCAPE"
+
+    nested_repo = project / "nested" / "independent"
+    nested_repo.mkdir(parents=True)
+    subprocess.run(["git", "init", "--quiet", str(nested_repo)], check=True)
+    with pytest.raises(ControlError) as nested:
+        server._project_repository(grant, cwd=nested_repo)
+    assert nested.value.code == "ENVIRONMENT_WORKSPACE_ESCAPE"
+
+
+def test_workspace_entry_attaches_capsule_after_readiness_block(tmp_path: Path, monkeypatch) -> None:
+    workspace = tmp_path / "projects"
+    project = workspace / "mncs-environment"
+    project.mkdir(parents=True)
+    subprocess.run(["git", "init", "--quiet", str(project)], check=True)
+    calls: list[tuple[str, str | None]] = []
+
+    def campaign_continuation(repository: str, campaign_id: str | None = None):
+        calls.append((repository, campaign_id))
+        return {
+            "schema_version": "mncs.control.campaign-continuation/1",
+            "repository": repository,
+            "campaign_id": campaign_id,
+            "status": "context-conflict",
+            "continuations": [
+                {"session_id": "ses_project_context"},
+                {"session_id": "ses_workspace_context"},
+            ],
+        }
+
+    environment = SimpleNamespace(
+        state_dir=tmp_path / "environment-state",
+        environment_path=tmp_path / "environment-source",
+        authenticated_principal_id="principal-test",
+        campaign_continuation=campaign_continuation,
+    )
+    server = EnvironmentRPCServer(
+        ControlConfig(
+            workspace_root=workspace,
+            sandbox_home=tmp_path / "home",
+            environment_rpc_socket=tmp_path / "rpc" / "environment.sock",
+        ),
+        environment_service=environment,
+        policy=object(),
+    )
+    token = "workspace-entry-capsule"
+    server._grants[hashlib.sha256(token.encode()).hexdigest()] = _GrantRecord(
+        grant_id="workspace-entry-capsule-grant",
+        principal_id="principal-test",
+        host_root=workspace,
+        sandbox_root="/workspace",
+        scope="workspace",
+        uid=0,
+        expires_at=time.monotonic() + 60,
+        token_file=tmp_path / "grant",
+    )
+    server._translate_argv = lambda argv, _cwd, _record: argv
+    entry_result = {
+        "session_id": "ses_project_context",
+        "continuation": {"identity": "cmp_workspace_entry"},
+        "entry": {"reused": True},
+        "readiness": {"status": "blocked"},
+    }
+    real_run = subprocess.run
+
+    def run_with_blocked_entry(command, *args, **kwargs):
+        if isinstance(command, list) and len(command) > 2 and command[1] == "-c":
+            return subprocess.CompletedProcess(
+                command, 5, stdout=json.dumps(entry_result), stderr="",
+            )
+        return real_run(command, *args, **kwargs)
+
+    monkeypatch.setattr(environment_rpc_module.subprocess, "run", run_with_blocked_entry)
+    response = server.dispatch({
+        "grant": token,
+        "request_id": "req_workspace_entry_capsule",
+        "argv": ["enter"],
+        "cwd": "/workspace/mncs-environment",
+    }, peer_uid=0)
+
+    assert response["ok"] is True
+    result = response["result"]
+    assert result["exit_code"] == 5
+    returned = json.loads(result["stdout"])
+    assert returned["readiness"]["status"] == "blocked"
+    assert returned["control_project_continuation"]["status"] == "context-conflict"
+    assert [item["session_id"] for item in
+            returned["control_project_continuation"]["continuations"]] == [
+                "ses_project_context", "ses_workspace_context",
+            ]
+    assert calls == [("mncs-environment", "cmp_workspace_entry")]
 
 
 def test_retry_identity_replays_across_fresh_execution_grants(tmp_path: Path) -> None:

@@ -818,14 +818,15 @@ class EnvironmentRPCServer:
         output_limit = MAX_RESPONSE_BYTES // 2
         stdout = completed.stdout[:output_limit]
         stderr = completed.stderr[:output_limit]
-        if command == "enter" and completed.returncode == 0:
+        if command == "enter" and completed.returncode in {0, 5}:
             stdout = self._attach_project_continuation(
-                record, stdout, original_stdout_bytes=len(completed.stdout.encode("utf-8")),
+                record, stdout, cwd=cwd,
+                original_stdout_bytes=len(completed.stdout.encode("utf-8")),
                 output_limit=output_limit,
             )
         elif command == "enter":
             stdout, stderr = self._attach_project_entry_diagnostic(
-                record, stdout, stderr,
+                record, stdout, stderr, cwd=cwd,
                 original_stdout_bytes=len(completed.stdout.encode("utf-8")),
                 original_stderr_bytes=len(completed.stderr.encode("utf-8")),
                 output_limit=output_limit,
@@ -838,52 +839,124 @@ class EnvironmentRPCServer:
             "principal_id": record.principal_id,
         }}
 
-    def _project_repository(self, record: _GrantRecord) -> str:
-        """Resolve the one immediate project named by an execution grant."""
-        if record.scope != "project":
+    def _project_repository(
+        self, record: _GrantRecord, *, cwd: Path | None = None,
+    ) -> str:
+        """Resolve one configured project from a project grant or workspace cwd."""
+        configured_root = Path(self.config.workspace_root).expanduser().resolve()
+        if record.scope == "project":
+            try:
+                project_root = record.host_root.expanduser().resolve(strict=True)
+            except OSError as error:
+                raise ControlError(
+                    "ENVIRONMENT_PROJECT_UNKNOWN",
+                    "project-scoped continuation checkout is unavailable",
+                ) from error
+            if project_root.parent != configured_root or not project_root.is_dir():
+                raise ControlError(
+                    "ENVIRONMENT_WORKSPACE_ESCAPE",
+                    "project-scoped continuation grant does not identify an immediate configured project",
+                )
+            return project_root.name
+
+        if record.scope != "workspace" or cwd is None:
             raise ControlError(
                 "ENVIRONMENT_AUTHORITY_DENIED",
-                "project continuation requires a project-scoped execution grant",
+                "project continuation requires a project grant or a workspace grant with a repository cwd",
             )
-        configured_root = Path(self.config.workspace_root).expanduser().resolve()
         try:
-            project_root = record.host_root.expanduser().resolve(strict=True)
+            workspace_root = record.host_root.expanduser().resolve(strict=True)
+            working_directory = cwd.expanduser().resolve(strict=True)
+        except OSError as error:
+            raise ControlError(
+                "ENVIRONMENT_WORKSPACE_MISSING",
+                "workspace-scoped continuation cwd is unavailable",
+            ) from error
+        if workspace_root != configured_root:
+            raise ControlError(
+                "ENVIRONMENT_AUTHORITY_DENIED",
+                "workspace-scoped continuation must use the configured workspace root",
+            )
+        if (working_directory != workspace_root
+                and workspace_root not in working_directory.parents):
+            raise ControlError(
+                "ENVIRONMENT_WORKSPACE_ESCAPE",
+                "workspace-scoped continuation cwd escapes the configured workspace",
+            )
+        try:
+            resolved = subprocess.run(
+                ["git", "rev-parse", "--show-toplevel", "--git-common-dir"],
+                cwd=working_directory, capture_output=True, text=True,
+                timeout=2.0, check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise ControlError(
+                "ENVIRONMENT_PROJECT_UNKNOWN",
+                "workspace cwd could not be resolved to a Git checkout",
+            ) from error
+        paths = resolved.stdout.splitlines()
+        if resolved.returncode != 0 or len(paths) != 2:
+            raise ControlError(
+                "ENVIRONMENT_PROJECT_UNKNOWN",
+                "workspace cwd is not inside a configured Git checkout",
+            )
+        try:
+            checkout_root = Path(paths[0]).expanduser().resolve(strict=True)
+            common_dir = Path(paths[1]).expanduser()
+            if not common_dir.is_absolute():
+                common_dir = checkout_root / common_dir
+            common_dir = common_dir.resolve(strict=True)
         except OSError as error:
             raise ControlError(
                 "ENVIRONMENT_PROJECT_UNKNOWN",
-                "project-scoped continuation checkout is unavailable",
+                "workspace cwd has an unavailable Git common directory",
             ) from error
-        if project_root.parent != configured_root or not project_root.is_dir():
+        if common_dir.name != ".git":
+            raise ControlError(
+                "ENVIRONMENT_PROJECT_UNKNOWN",
+                "workspace checkout does not have a configured project Git common directory",
+            )
+        project_root = common_dir.parent
+        if project_root.parent != workspace_root or not project_root.is_dir():
             raise ControlError(
                 "ENVIRONMENT_WORKSPACE_ESCAPE",
-                "project-scoped continuation grant does not identify an immediate configured project",
+                "workspace checkout Git common directory does not identify one immediate configured project",
+            )
+        if checkout_root != project_root and project_root not in checkout_root.parents:
+            raise ControlError(
+                "ENVIRONMENT_WORKSPACE_ESCAPE",
+                "workspace checkout is outside its configured project Git common directory",
             )
         return project_root.name
 
     def _attach_project_continuation(
         self, record: _GrantRecord, stdout: str, *,
+        cwd: Path,
         original_stdout_bytes: int, output_limit: int,
     ) -> str:
-        """Add a read-only project capsule to successful project-scoped entry.
+        """Add a read-only project capsule to a persisted Environment entry.
 
         The Environment entry remains the authority for session selection and
-        mutation. Control adds its already-scoped continuation projection so
-        entry immediately shows same-campaign sessions that belong to other
-        Environment contexts. The projection cannot transfer or adopt them.
+        mutation. Control derives one project from the authenticated project
+        grant or workspace-scoped cwd, then adds its existing read-only
+        continuation projection. Readiness-blocked entries still have a
+        durable session result and receive the same capsule. The projection
+        cannot transfer or adopt another context.
         """
-        if (record.scope != "project"
+        if (record.scope not in {"project", "workspace"}
                 or original_stdout_bytes > output_limit):
             return stdout
         try:
             payload = json.loads(stdout)
         except (TypeError, json.JSONDecodeError):
             return stdout
-        if not isinstance(payload, dict):
+        if (not isinstance(payload, dict)
+                or not isinstance(payload.get("session_id"), str)):
             return stdout
         project: str | None = None
         project_error: ControlError | None = None
         try:
-            project = self._project_repository(record)
+            project = self._project_repository(record, cwd=cwd)
         except ControlError as error:
             project_error = error
         continuation = payload.get("continuation")
@@ -900,6 +973,14 @@ class EnvironmentRPCServer:
                     and isinstance(project_error.details.get("next"), str)
                     else "verify that the grant identifies one configured project"
                 ),
+            }
+        elif project is None:
+            payload["control_project_continuation"] = {
+                "schema_version": "mncs.control.project-entry-continuation/1",
+                "campaign_id": campaign_id if isinstance(campaign_id, str) else None,
+                "status": "unknown",
+                "code": "ENVIRONMENT_PROJECT_UNKNOWN",
+                "next": "select a cwd inside one configured repository before reading its campaign capsule",
             }
         elif (getattr(self.environment_service, "authenticated_principal_id", None)
               != record.principal_id):
@@ -969,12 +1050,12 @@ class EnvironmentRPCServer:
         return rendered if len(rendered.encode("utf-8")) <= output_limit else stdout
 
     def _attach_project_entry_diagnostic(
-        self, record: _GrantRecord, stdout: str, stderr: str, *,
+        self, record: _GrantRecord, stdout: str, stderr: str, *, cwd: Path,
         original_stdout_bytes: int, original_stderr_bytes: int,
         output_limit: int,
     ) -> tuple[str, str]:
         """Add bounded project choices to authenticated campaign-entry errors."""
-        if (record.scope != "project"
+        if (record.scope not in {"project", "workspace"}
                 or original_stdout_bytes > output_limit
                 or original_stderr_bytes > output_limit
                 or getattr(self.environment_service, "authenticated_principal_id", None)
@@ -999,7 +1080,7 @@ class EnvironmentRPCServer:
                 continue
 
             try:
-                repository = self._project_repository(record)
+                repository = self._project_repository(record, cwd=cwd)
                 campaign_id = diagnostics.get("campaign_id")
                 capsule = self.environment_service.campaign_continuation(
                     repository,
@@ -1012,21 +1093,23 @@ class EnvironmentRPCServer:
                 next_step = error.details.get("next") if isinstance(error.details, dict) else None
                 projected = {
                     "schema_version": "mncs.control.project-entry-continuation/1",
-                    "repository": Path(record.host_root).name,
                     "status": "unknown",
                     "code": error.code,
                     "next": next_step if isinstance(next_step, str) else (
                         "run the project-scoped Environment continuation lookup"
                     ),
                 }
+                if record.scope == "project":
+                    projected["repository"] = Path(record.host_root).name
             except Exception:
                 projected = {
                     "schema_version": "mncs.control.project-entry-continuation/1",
-                    "repository": Path(record.host_root).name,
                     "status": "unknown",
                     "code": "campaign-lookup-failed",
                     "next": "run the project-scoped Environment continuation lookup",
                 }
+                if record.scope == "project":
+                    projected["repository"] = Path(record.host_root).name
 
             if "continuation" not in diagnostics:
                 diagnostics["continuation"] = projected

@@ -442,6 +442,113 @@ def test_project_bwrap_campaign_entry_reuses_session_without_session_id(config) 
 
 
 @pytest.mark.requires_bwrap_namespace
+def test_workspace_bwrap_entry_reuses_session_and_attaches_project_capsule(config) -> None:
+    project = config.workspace_root / "mncs-environment"
+    project.mkdir()
+    subprocess.run(["git", "init", "--quiet", str(project)], check=True)
+    environment_root = Path(__file__).resolve().parents[2] / "mncs-environment"
+    manifest_source = environment_root / ".mncs" / "project.json"
+    if not (environment_root / "mncs_env" / "cli.py").is_file():
+        pytest.skip("sibling mncs-environment checkout is unavailable")
+    if not manifest_source.is_file():
+        pytest.skip("Environment campaign entry fixtures are unavailable")
+    manifest = project / ".mncs" / "project.json"
+    manifest.parent.mkdir()
+    shutil.copyfile(manifest_source, manifest)
+    (project / ".mncs" / "environment.json").write_text(json.dumps({
+        "name": "workspace-entry-capsule",
+        "workspace_root": "../..",
+        "workspace_scope": {
+            "kind": "workspace",
+            "repositories": ["mncs-environment"],
+        },
+        "intent": {
+            "goal": "verify workspace-scoped campaign continuation projection",
+            "repositories": ["mncs-environment"],
+        },
+        "verification": {"enabled": False},
+        "actions": {"enabled": False},
+        "diagnostics": {"enabled": False},
+        "family": {"enabled": False},
+    }), encoding="utf-8")
+
+    private_root = Path(tempfile.mkdtemp(prefix="mce-workspace-entry-", dir="/tmp"))
+    endpoint_config = replace(
+        config,
+        environment_rpc_socket=private_root / "environment.sock",
+    )
+    environment = SimpleNamespace(
+        state_dir=private_root / "environment-state",
+        environment_path=environment_root,
+        authenticated_principal_id=None,
+    )
+    continuation_calls: list[tuple[str, str | None]] = []
+
+    def campaign_continuation(repository: str, campaign_id: str | None = None):
+        continuation_calls.append((repository, campaign_id))
+        return {
+            "schema_version": "mncs.control.campaign-continuation/1",
+            "campaign_id": campaign_id,
+            "repository": repository,
+            "status": "context-conflict",
+            "continuations": [
+                {"session_id": "ses_local_definition", "project_reference": {"status": "linked"}},
+                {"session_id": "ses_workspace_definition", "project_reference": {"status": "linked"}},
+            ],
+        }
+
+    environment.campaign_continuation = campaign_continuation
+    policy = WorkspacePolicy(config)
+    rpc = EnvironmentRPCServer(endpoint_config, environment, policy)
+    rpc.start()
+    environment.authenticated_principal_id = rpc.principal_id
+    sandbox = Sandbox(config, policy)
+    sandbox.environment_rpc = rpc
+    resolution = policy.resolve_scope(
+        scope="workspace", project=None, cwd="mncs-environment",
+    )
+    grant = rpc.issue_grant(resolution)
+
+    def enter(consumer: str, request_id: str) -> dict[str, object]:
+        command = (
+            f"MNCS_ENV_RPC_REQUEST_ID={request_id} python3 -B -m mncs_env.cli enter "
+            f"--consumer {consumer} --campaign-id cmp_workspace_entry"
+        )
+        argv, _enabled = sandbox.command_argv(
+            "test ! -e /home/developer/.local/share/mncs-environment/store && " + command,
+            resolution,
+            network=False,
+            environment_rpc_grant=grant,
+        )
+        result = subprocess.run(
+            argv, capture_output=True, text=True, timeout=90, check=False, env={},
+        )
+        assert result.returncode in {0, 5}, result.stdout + result.stderr
+        return json.loads(result.stdout)
+
+    try:
+        first = enter("workspace-agent-before-restart", "req_workspace_entry_first")
+        second = enter("workspace-agent-after-restart", "req_workspace_entry_second")
+        assert first["entry"]["reused"] is False
+        assert second["entry"]["reused"] is True
+        assert second["session_id"] == first["session_id"]
+        for result in (first, second):
+            assert result["control_project_continuation"]["status"] == "context-conflict"
+            assert [item["session_id"] for item in
+                    result["control_project_continuation"]["continuations"]] == [
+                        "ses_local_definition", "ses_workspace_definition",
+                    ]
+        assert continuation_calls == [
+            ("mncs-environment", "cmp_workspace_entry"),
+            ("mncs-environment", "cmp_workspace_entry"),
+        ]
+    finally:
+        rpc.revoke_grant(grant)
+        rpc.close()
+        shutil.rmtree(private_root, ignore_errors=True)
+
+
+@pytest.mark.requires_bwrap_namespace
 def test_project_bwrap_ambiguous_entry_surfaces_campaign_capsules(config) -> None:
     project = config.workspace_root / "mncs-environment"
     project.mkdir()
