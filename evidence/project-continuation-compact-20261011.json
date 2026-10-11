@@ -1,0 +1,114 @@
+{
+  "schema_version": "mncs.control.project-continuation-compact-proof/1",
+  "identity": "ev_control_project_continuation_compact_20261011",
+  "recorded_at": "2026-10-11T14:24:02Z",
+  "owner": "mncs-control-mcp",
+  "campaign_identity": "cmp_mncs_continuity_20261010",
+  "source": {
+    "repository": "mncs-control-mcp",
+    "code_revision": "0df4e850b64a0ffe238008f8e7f7dae542542d68",
+    "files": [
+      "src/mncs_control_mcp/environment_rpc.py",
+      "tests/test_environment_rpc.py",
+      "README.md"
+    ]
+  },
+  "implementation": {
+    "owner_boundary": "Control derives project identity from the authenticated immediate-project grant, asks Environment for its owner-authorized capsule, and presents a bounded first-use projection. Environment remains authoritative for session, campaign, and claim semantics.",
+    "projection": [
+      "Retain every returned campaign and duplicate session identity within the existing result bounds.",
+      "Keep project-reference basis, claims, latest checkpoint, delivery, current checkout mapping, and recorded checkout comparisons.",
+      "Keep only the six newest evidence references by default and report total and truncation explicitly.",
+      "Leave selection between campaigns or conflicting Environment contexts explicit; do not adopt or transfer another session.",
+      "The typed Control environment.campaign-continuation capability remains available for the complete bounded evidence-reference list."
+    ],
+    "security_boundary": [
+      "Project continuation still requires a project-scoped Control grant and the matching authenticated principal.",
+      "The caller cannot widen the project selector or supply a different principal.",
+      "No Store filesystem path, file descriptor, or direct write permission is exposed to the Bwrap consumer."
+    ]
+  },
+  "validation": {
+    "full_control_suite": {
+      "command": "python -m pytest tests/ -q",
+      "collected": 205,
+      "result": "passed; reached 100%; exit code 0"
+    },
+    "focused_rpc_suite": {
+      "command": "python -m pytest tests/test_environment_rpc.py -q",
+      "result": "passed; exit code 0"
+    },
+    "static_checks": {
+      "ruff": "passed for changed Python source and tests",
+      "compileall": "passed for changed RPC module",
+      "git_diff_check": "passed"
+    }
+  },
+  "protected_execution_proof": {
+    "project": "mncs-environment",
+    "sandbox_backend": "bwrap",
+    "scope": "project",
+    "network": false,
+    "operation": "python3 -m mncs_env.cli continuation --campaign-id cmp_mncs_continuity_20261010",
+    "control_job_id": "term-11d6bcaed10b0917d456cb9e",
+    "exit_code": 0,
+    "capsule": {
+      "schema_version": "mncs.control.campaign-continuation/2",
+      "status": "context-conflict",
+      "campaign_id": "cmp_mncs_continuity_20261010",
+      "project_path": "/home/epi13/Documents/Projects/mncs-environment",
+      "sessions": [
+        {
+          "session_id": "ses_7226fbcfe65820f7",
+          "definition_id": "env_f31ee034e8e1fdcb",
+          "lifecycle": "active",
+          "project_reference": "linked",
+          "claim_ids": ["claim:mncs-environment"],
+          "evidence_count": 62,
+          "evidence_refs_returned": 6,
+          "evidence_refs_truncated": true
+        },
+        {
+          "session_id": "ses_b4b2d283542220b0",
+          "definition_id": "env_1ea3af15c7464177",
+          "lifecycle": "active",
+          "project_reference": "linked",
+          "claim_ids": [],
+          "evidence_count": 0,
+          "evidence_refs_returned": 0,
+          "evidence_refs_truncated": false
+        }
+      ]
+    },
+    "fresh_authenticated_entry": {
+      "operation": "python3 -m mncs_env.cli enter --definition tests/fixtures/control-rpc-entry.json --consumer local-agent --campaign-id cmp_mncs_continuity_20261010",
+      "control_job_id": "term-5b166ba317aa7cf818108da1",
+      "exit_code": 0,
+      "session_id": "ses_7226fbcfe65820f7",
+      "lifecycle": "active",
+      "campaign_state_checkpoint_id": "chk_b11004d500502c46",
+      "claim_ids": ["claim:mncs-control-mcp", "claim:mncs-environment"],
+      "duplicate_capsule_sessions": [
+        "ses_7226fbcfe65820f7",
+        "ses_b4b2d283542220b0"
+      ]
+    },
+    "fresh_process_readback": {
+      "operation": "python3 -m mncs_env.cli context ses_7226fbcfe65820f7 --consumer local-agent",
+      "control_job_id": "term-1e757b90e0919bbee611815c",
+      "exit_code": 0,
+      "session_id": "ses_7226fbcfe65820f7",
+      "lifecycle": "active",
+      "campaign_id": "cmp_mncs_continuity_20261010",
+      "campaign_state_checkpoint_id": "chk_b11004d500502c46",
+      "claim_ids": ["claim:mncs-control-mcp", "claim:mncs-environment"],
+      "evidence_count": 62,
+      "evidence_truncated": false
+    },
+    "prior_canonical_store_proof": "mncs-environment/evidence/canonical-store-path-grant-acceptance-20261011.json"
+  },
+  "limitations": [
+    "When more than one campaign or Environment context is present, the capsule remains explicit and the caller must choose the intended campaign and definition. The fresh entry here supplied the campaign identity already present in the authorized campaign charter.",
+    "The Control system_status MCP probe timed out during this run; the live Bwrap RPC response using schema /2 verifies the new handler was active."
+  ]
+}
