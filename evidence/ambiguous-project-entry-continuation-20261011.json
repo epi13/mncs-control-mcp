@@ -1,0 +1,59 @@
+{
+  "schema_version": "mncs.control.evidence/1",
+  "evidence_id": "ambiguous-project-entry-continuation-20261011",
+  "recorded_at": "2026-10-11",
+  "campaign_id": "cmp_mncs_continuity_20261010",
+  "owner_repository": "mncs-control-mcp",
+  "purpose": "Expose project-scoped durable campaign choices in authenticated Environment entry errors without changing entry authority.",
+  "authorization": {
+    "scope": "mncs-control-mcp",
+    "basis": "User authorized the narrow Control change for project-scoped campaign lookup and continuation."
+  },
+  "implementation": {
+    "commit": "e05662b0bd2c9d30c79eb755f586702b5ce604ca",
+    "base_main": "79a669d09a13215c25587d07d8281673c09f7f7f",
+    "files": {
+      "src/mncs_control_mcp/environment_rpc.py": "48bb405ee5d2a62e18d7585e34352b6bb1b35e789fca1c21b7fc1d8f77dfd80a",
+      "tests/test_environment_rpc.py": "73f382fc26d8731eba42708af02ceb584a97677eacd1eff7b8b276997b9d4905",
+      "tests/test_sandbox_terminal.py": "c8468a87873ab8a3ddd790d07d64bb94fab6ef29db17e9863143357991d2ce11"
+    },
+    "behavior": [
+      "Only project-scoped grants whose principal matches the authenticated Environment service are eligible.",
+      "Only campaign-continuation-ambiguous, campaign-context-mismatch, and campaign-session-active entry errors receive a supplementary read-only lookup.",
+      "Lookup is bound to the granted project repository and campaign identity returned by Environment diagnostics, when present.",
+      "Continuation rows are compacted and bounded; lookup failure is reported as unknown without converting the failed entry into success.",
+      "Environment remains authoritative for session selection and all mutations."
+    ]
+  },
+  "verification": {
+    "tests": [
+      {
+        "command": "python3 -B -m pytest -q tests/test_environment_rpc.py -m 'not requires_bwrap_namespace'",
+        "result": "20 passed"
+      },
+      {
+        "command": "ruff check src/mncs_control_mcp/environment_rpc.py tests/test_environment_rpc.py tests/test_sandbox_terminal.py",
+        "result": "passed"
+      },
+      {
+        "command": "python3 -B -m pytest -q tests/test_sandbox_terminal.py::test_project_bwrap_ambiguous_entry_surfaces_campaign_capsules",
+        "result": "1 passed"
+      },
+      {
+        "command": "python3 -B -m pytest -q tests/test_sandbox_terminal.py::test_project_bwrap_campaign_entry_reuses_session_without_session_id tests/test_sandbox_terminal.py::test_project_bwrap_ambiguous_entry_surfaces_campaign_capsules",
+        "result": "2 passed"
+      }
+    ],
+    "restricted_environment": {
+      "client": "Project-scoped Bwrap execution with network disabled.",
+      "transport": "Authenticated local Control Environment RPC.",
+      "filesystem_boundary": "The Bwrap client does not receive direct Store path access.",
+      "continuation_source": "The integration test uses a deterministic campaign-capsule fixture; it verifies request binding, error propagation, bounded projection, and session-resume behavior through the real Bwrap client and RPC server."
+    }
+  },
+  "readiness": {
+    "status": "verified-for-project-entry-diagnostics",
+    "canonical_store_acceptance": "This change adds no Store authority or filesystem access. Canonical Store continuity evidence remains in the separate Environment evidence records.",
+    "remaining_limit": "The new ambiguous-entry Bwrap test uses a deterministic capsule provider, so it does not independently re-prove live lookup over every canonical campaign record."
+  }
+}
