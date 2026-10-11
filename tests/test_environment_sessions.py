@@ -288,6 +288,79 @@ def test_campaign_continuation_returns_project_scoped_duplicate_capsules(tmp_pat
     assert discovered["campaign_id"] == "campaign-1"
 
 
+def test_campaign_continuation_surfaces_bounded_context_conflict_capsules(
+    tmp_path: Path,
+) -> None:
+    service = EnvironmentService(_config(tmp_path))
+    service.authenticated_principal_id = "principal-caller"
+    (service._config.workspace_root / "mncs-control-mcp").mkdir()
+    snapshots = {
+        f"ses_{index:02d}": {
+            "snapshot_sequence": index,
+            "lifecycle": "active",
+            "consumer_id": f"consumer-{index}",
+            "authenticated_principal_id": "principal-caller",
+            "provenance": {"definition_id": f"definition-{index}"},
+            "workspace": {"root": f"/projects/workspace-{index}"},
+            "campaign": {
+                "identity": "campaign-context-conflict",
+                "work_intent": {
+                    "goal": "continue the same authorized project work",
+                    "repositories": ["mncs-control-mcp"],
+                },
+            },
+        }
+        for index in range(17)
+    }
+
+    class Store:
+        closed = False
+
+        def list_sessions(self):
+            return list(snapshots)
+
+        def load_snapshot(self, session_id: str):
+            return snapshots.get(session_id)
+
+        def read_claims(self):
+            return []
+
+        def close(self):
+            self.closed = True
+
+    store = Store()
+    service._pkg = lambda: SimpleNamespace(
+        claims=SimpleNamespace(active_claims=lambda _records: {}),
+    )
+    service._store = lambda _pkg: store
+    service._observe_project_checkout = lambda repository: {
+        "status": "unknown", "repository": repository,
+    }
+    def capsule(_pkg, _store, session_id, snapshot, _repository, _claims, _observation):
+        return {
+            "session_id": session_id,
+            "definition_id": snapshot["provenance"]["definition_id"],
+            "workspace_root": snapshot["workspace"]["root"],
+            "lifecycle": snapshot["lifecycle"],
+        }
+
+    service._continuation_capsule = capsule
+
+    result = service.campaign_continuation("mncs-control-mcp")
+
+    assert result["status"] == "context-conflict"
+    assert result["contexts_count"] == 17
+    assert result["contexts_truncated"] is True
+    assert len(result["contexts"]) == 16
+    assert result["continuations_count"] == 17
+    assert result["continuations_truncated"] is True
+    assert [item["session_id"] for item in result["continuations"]] == [
+        f"ses_{index:02d}" for index in range(16)
+    ]
+    assert result["next"].startswith("select the exact recorded Environment")
+    assert store.closed is True
+
+
 def test_campaign_continuation_hides_foreign_session_identity(tmp_path: Path) -> None:
     service = EnvironmentService(_config(tmp_path))
     service.authenticated_principal_id = "principal-caller"

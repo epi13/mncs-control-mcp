@@ -287,12 +287,41 @@ class EnvironmentService:
                     for _, snapshot in matching
                 }
                 if len(contexts) > 1:
-                    raise ControlError(
-                        "ENVIRONMENT_CAMPAIGN_CONTEXT_CONFLICT",
-                        "campaign identity is bound to more than one Environment definition or workspace",
-                        details={"campaign_id": selected_campaign,
-                                 "next": "inspect the recorded definition and workspace before continuing"},
-                    )
+                    # This is a valid read result, not an invitation to choose
+                    # the first row. Keep the conflicting owner-authorized
+                    # session capsules visible so Environment can resume only
+                    # after the caller selects the exact recorded context.
+                    live_observation = self._observe_project_checkout(repository)
+                    context_rows = [
+                        {"definition_id": definition_id[:256] or None,
+                         "workspace_root": workspace_root[:1000] or None}
+                        for definition_id, workspace_root in sorted(contexts)
+                    ]
+                    ordered_matching = sorted(matching, key=lambda item: item[0])
+                    continuations = [
+                        self._continuation_capsule(
+                            pkg, store, session_id, snapshot, repository,
+                            claims_by_session.get(session_id, []), live_observation,
+                        )
+                        for session_id, snapshot in ordered_matching[:16]
+                    ]
+                    results.append({
+                        "schema_version": "mncs.control.campaign-continuation/1",
+                        "campaign_id": selected_campaign,
+                        "repository": repository,
+                        "status": "context-conflict",
+                        "contexts": context_rows[:16],
+                        "contexts_count": len(context_rows),
+                        "contexts_truncated": len(context_rows) > 16,
+                        "continuations": continuations,
+                        "continuations_count": len(ordered_matching),
+                        "continuations_truncated": len(ordered_matching) > 16,
+                        "next": (
+                            "select the exact recorded Environment definition and workspace; "
+                            "Control will not choose between conflicting campaign contexts"
+                        ),
+                    })
+                    continue
                 noncontinuable = [
                     {"session_id": session_id, "lifecycle": snapshot.get("lifecycle")}
                     for session_id, snapshot in matching
