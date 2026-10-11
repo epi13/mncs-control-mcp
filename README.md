@@ -250,9 +250,15 @@ Every Git command runs inside the same project sandbox, including repository hoo
 `env_campaign_continuation` derives its repository selector from the caller's
 single-project grant and the authenticated Control principal. Its bounded
 capsule includes the latest Environment checkpoint's progress and pending
-items alongside durable campaign evidence and claims. Multiple sessions or
-conflicting Environment contexts remain explicit for selection; Control does
-not choose a session or adopt its work. Each session capsule reports a bounded
+items alongside durable campaign evidence and claims. A project-scoped grant
+can select one exact continuation when the Environment definition identity and
+mapped workspace identify a unique linked session with no competing claim on
+that repository. Direct lookup uses the canonical project definition; an entry
+projection uses the exact definition returned by Environment. Other
+same-campaign contexts remain visible and unchanged. Duplicate exact sessions,
+truncated results, and competing
+claims remain explicit for owner resolution; Control does not adopt their
+work. Each session capsule reports a bounded
 `project_reference` status and the persisted facts that link it to the selected
 repository. A same-principal session shown only because it shares the campaign
 identity is labeled `same_campaign_only` and is not implicitly selected. When

@@ -144,10 +144,16 @@ without granting the sandbox access to sibling repositories.
 After successful project-scoped CLI entry, Control also attaches a
 `control_project_continuation` projection to the Environment JSON response.
 It uses the grant's immediate project and the authenticated Control principal
-to expose same-campaign sessions from other Environment contexts. The
-projection is read-only and does not select another session or change claims.
-If the lookup fails after Environment entry succeeds, the response retains the
-successful entry and marks the supplementary projection `unknown`.
+to expose same-campaign sessions from other Environment contexts. After entry,
+Control uses the exact definition identity and workspace returned by Environment;
+for a direct project continuation query it uses the canonical project
+definition. When that context identifies exactly one project-linked session,
+Control marks it as selected while
+keeping every other capsule visible. It declines selection when the result is
+truncated, the exact context is duplicated, or another same-campaign session
+holds a claim on the project. The projection is read-only and never changes
+claims. If the lookup fails after Environment entry succeeds, the response
+retains the successful entry and marks the supplementary projection `unknown`.
 
 ## Audit
 

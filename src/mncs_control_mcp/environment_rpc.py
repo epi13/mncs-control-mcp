@@ -1157,6 +1157,25 @@ class EnvironmentRPCServer:
             project_error = error
         continuation = payload.get("continuation")
         campaign_id = continuation.get("identity") if isinstance(continuation, dict) else None
+        entry_configuration = payload.get("configuration")
+        entry_definition_id = (
+            entry_configuration.get("definition_id")
+            if isinstance(entry_configuration, dict) else None
+        )
+        entry_workspace_root = payload.get("workspace_root")
+        project_context = None
+        if (record.scope == "project"
+                and isinstance(entry_definition_id, str)
+                and entry_definition_id.startswith("env_")
+                and len(entry_definition_id) == 20
+                and all(char in "0123456789abcdef" for char in entry_definition_id[4:])
+                and isinstance(entry_workspace_root, str)):
+            try:
+                configured_root = Path(self.config.workspace_root).expanduser().resolve(strict=True)
+            except OSError:
+                configured_root = None
+            if configured_root is not None and entry_workspace_root == str(configured_root):
+                project_context = (entry_definition_id, entry_workspace_root)
         if project_error is not None:
             payload["control_project_continuation"] = {
                 "schema_version": "mncs.control.project-entry-continuation/1",
@@ -1204,6 +1223,11 @@ class EnvironmentRPCServer:
                 )
                 if not isinstance(capsule, dict):
                     raise TypeError("Environment returned a non-object continuation capsule")
+                capsule = self._select_project_campaign_context(
+                    capsule, record, project,
+                    project_context=project_context,
+                    derive_project_context=False,
+                )
                 payload["control_project_continuation"] = capsule
             except ControlError as error:
                 next_step = error.details.get("next") if isinstance(error.details, dict) else None
@@ -1390,10 +1414,295 @@ class EnvironmentRPCServer:
             ),
         }
         for key in ("campaign_id", "contexts", "contexts_count", "contexts_truncated",
-                    "campaigns_truncated", "continuations_truncated"):
+                    "campaigns_truncated", "continuations_truncated",
+                    "selected_session_id", "selected_context", "selection_basis",
+                    "context_conflict_status", "unselected_contexts",
+                    "unselected_contexts_count", "unselected_sessions_count",
+                    "project_selection"):
             if key in capsule:
                 result[key] = capsule[key]
         return result
+
+    def _project_environment_identity(
+        self, record: _GrantRecord, repository: str,
+    ) -> tuple[str, str] | None:
+        """Resolve the project's owner-controlled Environment definition.
+
+        A project grant may select only the regular definition stored in that
+        repository's .mncs directory. The definition must retain the same
+        one-repository and workspace-root restrictions enforced by ``enter``.
+        Missing project metadata yields no selector; it never causes Control
+        to guess between campaign contexts.
+        """
+        if record.scope != "project":
+            return None
+        try:
+            workspace_root = Path(self.config.workspace_root).expanduser().resolve(strict=True)
+            project_root = record.host_root.expanduser().resolve(strict=True)
+        except OSError as error:
+            raise ControlError(
+                "ENVIRONMENT_WORKSPACE_MISSING",
+                "project Environment context is unavailable",
+            ) from error
+        if (project_root.parent != workspace_root
+                or project_root.name != repository):
+            raise ControlError(
+                "ENVIRONMENT_WORKSPACE_ESCAPE",
+                "project continuation is outside its configured immediate workspace",
+            )
+
+        definition_path = project_root / ".mncs" / "project-environment.json"
+        try:
+            observed = definition_path.lstat()
+        except FileNotFoundError:
+            return None
+        except OSError as error:
+            raise ControlError(
+                "ENVIRONMENT_WORKSPACE_MISSING",
+                "project Environment definition could not be inspected",
+            ) from error
+        if not stat.S_ISREG(observed.st_mode):
+            raise ControlError(
+                "ENVIRONMENT_WORKSPACE_ESCAPE",
+                "project Environment definition must be a regular file",
+            )
+        try:
+            resolved_definition = definition_path.resolve(strict=True)
+            if (resolved_definition != project_root
+                    and project_root not in resolved_definition.parents):
+                raise ControlError(
+                    "ENVIRONMENT_WORKSPACE_ESCAPE",
+                    "project Environment definition exceeds its project grant",
+                )
+            definition = json.loads(resolved_definition.read_text(encoding="utf-8"))
+        except ControlError:
+            raise
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise ControlError(
+                "ENVIRONMENT_DEFINITION_INVALID",
+                "project Environment definition is not readable JSON",
+            ) from error
+        if not isinstance(definition, dict):
+            raise ControlError(
+                "ENVIRONMENT_DEFINITION_INVALID",
+                "project Environment definition must be an object",
+            )
+        scope = definition.get("workspace_scope")
+        if (not isinstance(scope, dict)
+                or scope.get("repositories") != [repository]
+                or definition.get("workspace_root", ".") not in (None, "", ".")):
+            raise ControlError(
+                "ENVIRONMENT_AUTHORITY_DENIED",
+                "project continuation definition must remain limited to its granted repository",
+                details={"repository": repository},
+            )
+
+        package_loader = getattr(self.environment_service, "_pkg", None)
+        if not callable(package_loader):
+            # Test doubles and alternate adapters without Environment's
+            # identity implementation cannot establish this selector.
+            return None
+        package = package_loader()
+        identity_module = getattr(package, "identity", None)
+        identity_function = getattr(identity_module, "environment_id", None)
+        if not callable(identity_function):
+            return None
+        definition_id = identity_function(definition)
+        if not isinstance(definition_id, str) or not definition_id.startswith("env_"):
+            raise ControlError(
+                "ENVIRONMENT_DEFINITION_INVALID",
+                "Environment returned an invalid project definition identity",
+            )
+        return definition_id, str(workspace_root)
+
+    def _select_project_campaign_context(
+        self, capsule: dict[str, Any], record: _GrantRecord, repository: str,
+        *, project_context: tuple[str, str] | None = None,
+        derive_project_context: bool = True,
+    ) -> dict[str, Any]:
+        """Select one exact project context while preserving other capsules.
+
+        Selection is possible only when the authenticated project's canonical
+        definition and mapped workspace identify exactly one linked session,
+        the bounded result is complete, and no other same-campaign session has
+        a claim on this repository. All original continuations remain visible.
+        """
+        if record.scope != "project":
+            return capsule
+        selector = project_context
+        if selector is None and derive_project_context:
+            selector = self._project_environment_identity(record, repository)
+        if selector is None:
+            return capsule
+        definition_id, workspace_root = selector
+        if capsule.get("repository") not in (None, repository):
+            return capsule
+        if capsule.get("status") not in {"ready", "context-conflict"}:
+            return capsule
+        rows = capsule.get("continuations")
+        if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
+            return capsule
+        continuation_count = capsule.get("continuations_count", len(rows))
+        if (capsule.get("continuations_truncated") is True
+                or capsule.get("contexts_truncated") is True
+                or type(continuation_count) is not int
+                or continuation_count != len(rows)):
+            capsule["project_selection"] = {
+                "status": "unknown",
+                "reason": "continuation-inventory-truncated",
+                "definition_id": definition_id,
+                "workspace_root": workspace_root,
+            }
+            return capsule
+
+        exact_context_rows = [
+            row for row in rows
+            if row.get("definition_id") == definition_id
+            and row.get("workspace_root") == workspace_root
+        ]
+        if not exact_context_rows:
+            capsule["project_selection"] = {
+                "status": "unmatched",
+                "reason": "no-session-matches-project-definition-and-workspace",
+                "definition_id": definition_id,
+                "workspace_root": workspace_root,
+            }
+            if capsule.get("status") == "ready":
+                capsule["context_conflict_status"] = "ready"
+                capsule["status"] = "context-mismatch"
+            capsule["next"] = (
+                "no same-campaign session matches this project's Environment definition; "
+                "review the visible capsules and continue only through an exact context or owner-issued handoff"
+            )
+            return capsule
+        selected_rows = [
+            row for row in exact_context_rows
+            if (row.get("project_reference") or {}).get("status") == "linked"
+            and isinstance(row.get("session_id"), str)
+            and row.get("lifecycle") in {
+                "active", "blocked", "waiting", "checkpointed", "abandoned",
+            }
+        ]
+        if len(exact_context_rows) != 1:
+            capsule["project_selection"] = {
+                "status": "ambiguous",
+                "reason": "multiple-sessions-match-project-definition-and-workspace",
+                "definition_id": definition_id,
+                "workspace_root": workspace_root,
+                "candidate_sessions": sorted(
+                    row.get("session_id") for row in exact_context_rows
+                    if isinstance(row.get("session_id"), str)
+                ),
+            }
+            return capsule
+        if len(selected_rows) != 1:
+            exact = exact_context_rows[0]
+            lifecycle = exact.get("lifecycle")
+            linked = (exact.get("project_reference") or {}).get("status") == "linked"
+            capsule["project_selection"] = {
+                "status": "blocked",
+                "reason": (
+                    "project-context-not-linked" if not linked
+                    else "project-session-lifecycle-requires-reconciliation"
+                ),
+                "definition_id": definition_id,
+                "workspace_root": workspace_root,
+                "session_id": exact.get("session_id"),
+                "lifecycle": lifecycle,
+            }
+            if linked and capsule.get("status") == "ready":
+                capsule["context_conflict_status"] = "ready"
+                capsule["status"] = "reconciliation-required"
+            capsule["next"] = (
+                "reconcile the exact project session lifecycle before continuing; "
+                "handed-off sessions require Environment.accept"
+            )
+            return capsule
+        selected = selected_rows[0]
+        selected_session = selected["session_id"]
+
+        other_rows = [row for row in rows if row.get("session_id") != selected_session]
+        competing_claim_sessions = []
+        unknown_claim_sessions = []
+        for row in other_rows:
+            claims = row.get("claims")
+            claim_ids = row.get("claim_ids")
+            if not isinstance(claim_ids, list):
+                session_id = row.get("session_id")
+                if isinstance(session_id, str):
+                    unknown_claim_sessions.append(session_id)
+                else:
+                    unknown_claim_sessions.append("unknown-session")
+                continue
+            has_repository_claim = bool(claim_ids)
+            if isinstance(claims, list):
+                has_repository_claim = has_repository_claim or any(
+                    isinstance(claim, dict)
+                    and claim.get("repository") == repository
+                    and claim.get("status") == "held"
+                    for claim in claims
+                )
+            if has_repository_claim:
+                session_id = row.get("session_id")
+                if isinstance(session_id, str):
+                    competing_claim_sessions.append(session_id)
+                else:
+                    unknown_claim_sessions.append("unknown-session")
+        if competing_claim_sessions or unknown_claim_sessions:
+            capsule["project_selection"] = {
+                "status": "blocked" if competing_claim_sessions else "unknown",
+                "reason": (
+                    "another-same-campaign-session-holds-a-project-claim"
+                    if competing_claim_sessions
+                    else "same-campaign-session-claim-projection-is-incomplete"
+                ),
+                "definition_id": definition_id,
+                "workspace_root": workspace_root,
+                "competing_claim_sessions": sorted(competing_claim_sessions),
+                "unknown_claim_sessions": sorted(set(unknown_claim_sessions)),
+            }
+            capsule["next"] = (
+                "inspect the listed project claims and use the owning session's handoff "
+                "or release protocol; Control did not transfer ownership"
+                if competing_claim_sessions else
+                "refresh the complete claim projection before selecting a project session"
+            )
+            return capsule
+
+        unselected_contexts: dict[tuple[str, str], list[str]] = {}
+        for row in other_rows:
+            context = (
+                str(row.get("definition_id") or ""),
+                str(row.get("workspace_root") or ""),
+            )
+            session_id = row.get("session_id")
+            if isinstance(session_id, str):
+                unselected_contexts.setdefault(context, []).append(session_id)
+        if capsule.get("status") == "context-conflict":
+            capsule["context_conflict_status"] = "context-conflict"
+        capsule["status"] = "ready"
+        capsule["selected_session_id"] = selected_session
+        capsule["selected_context"] = {
+            "definition_id": definition_id,
+            "workspace_root": workspace_root,
+        }
+        capsule["selection_basis"] = "authenticated-project-environment-definition"
+        capsule["unselected_contexts"] = [
+            {
+                "definition_id": context[0] or None,
+                "workspace_root": context[1] or None,
+                "session_ids": sorted(session_ids),
+                "session_count": len(session_ids),
+            }
+            for context, session_ids in sorted(unselected_contexts.items())
+        ]
+        capsule["unselected_contexts_count"] = len(unselected_contexts)
+        capsule["unselected_sessions_count"] = len(other_rows)
+        capsule["next"] = (
+            "continue the selected project session with Environment revalidation; "
+            "other same-campaign contexts remain visible and unchanged"
+        )
+        return capsule
 
     def _campaign_continuation(
         self, record: _GrantRecord, argv: list[str], request_id: str,
@@ -1452,9 +1761,10 @@ class EnvironmentRPCServer:
                 "ENVIRONMENT_AUTHORITY_DENIED",
                 "campaign continuation is not bound to the Control-authenticated principal",
             )
-        capsule = self.environment_service.campaign_continuation(
-            project, campaign_id,
-        )
+        capsule = self.environment_service.campaign_continuation(project, campaign_id)
+        if not isinstance(capsule, dict):
+            raise TypeError("Environment returned a non-object continuation capsule")
+        capsule = self._select_project_campaign_context(capsule, record, project)
         capsule = self._compact_entry_continuation(capsule)
         capsule["schema_version"] = "mncs.control.campaign-continuation/2"
         return {"ok": True, "result": {

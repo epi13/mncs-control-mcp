@@ -431,6 +431,8 @@ def test_project_entry_returns_campaign_capsule_without_changing_entry_authority
     entry_result = {
         "session_id": "ses_selected",
         "lifecycle": "active",
+        "configuration": {"definition_id": "env_3333333333333333"},
+        "workspace_root": str(workspace),
         "continuation": {"identity": "cmp_test"},
         "readiness": {"status": "ready"},
     }
@@ -440,8 +442,24 @@ def test_project_entry_returns_campaign_capsule_without_changing_entry_authority
         "repository": "mncs-environment",
         "status": "context-conflict",
         "continuations": [
-            {"session_id": "ses_selected", "project_reference": {"status": "linked"}},
-            {"session_id": "ses_other_context", "project_reference": {"status": "same_campaign_only"}},
+            {
+                "session_id": "ses_selected",
+                "lifecycle": "active",
+                "definition_id": "env_3333333333333333",
+                "workspace_root": str(workspace),
+                "project_reference": {"status": "linked"},
+                "claim_ids": [],
+                "claims": [],
+            },
+            {
+                "session_id": "ses_other_context",
+                "lifecycle": "active",
+                "definition_id": "env_4444444444444444",
+                "workspace_root": str(workspace),
+                "project_reference": {"status": "same_campaign_only"},
+                "claim_ids": [],
+                "claims": [],
+            },
         ],
         "next": "select the exact recorded Environment context",
     }
@@ -502,6 +520,11 @@ def test_project_entry_returns_campaign_capsule_without_changing_entry_authority
     result = json.loads(response["result"]["stdout"])
     assert result["session_id"] == "ses_selected"
     assert result["continuation"] == {"identity": "cmp_test"}
+    assert result["control_project_continuation"]["status"] == "ready"
+    assert result["control_project_continuation"]["selected_session_id"] == "ses_selected"
+    assert result["control_project_continuation"]["selection_basis"] == (
+        "authenticated-project-environment-definition"
+    )
     assert result["control_project_continuation"] == capsule
     assert [item["session_id"] for item in
             result["control_project_continuation"]["continuations"]] == [
@@ -715,7 +738,11 @@ def test_project_continuation_cli_returns_compact_duplicate_session_capsule(
 ) -> None:
     workspace = tmp_path / "projects"
     project = workspace / "mncs-environment"
-    project.mkdir(parents=True)
+    definition_dir = project / ".mncs"
+    definition_dir.mkdir(parents=True)
+    (definition_dir / "project-environment.json").write_text(json.dumps({
+        "workspace_scope": {"repositories": ["mncs-environment"]},
+    }), encoding="utf-8")
     evidence = [
         {
             "identity": f"ev_{index:02d}",
@@ -761,7 +788,7 @@ def test_project_continuation_cli_returns_compact_duplicate_session_capsule(
                 "session_id": "ses_linked",
                 "lifecycle": "active",
                 "consumer_id": "consumer-a",
-                "definition_id": "env-exact",
+                    "definition_id": "env_1111111111111111",
                 "workspace_root": str(workspace),
                 "project_reference": {"status": "linked", "basis": ["active_claim.repository"]},
                 "claim_ids": ["claim:mncs-environment"],
@@ -803,6 +830,12 @@ def test_project_continuation_cli_returns_compact_duplicate_session_capsule(
         def __init__(self) -> None:
             self.calls: list[tuple[str, str | None]] = []
 
+        @staticmethod
+        def _pkg():
+            return SimpleNamespace(identity=SimpleNamespace(
+                environment_id=lambda _definition: "env_1111111111111111",
+            ))
+
         def campaign_continuation(self, repository: str, campaign_id: str | None = None):
             self.calls.append((repository, campaign_id))
             return capsule
@@ -839,8 +872,17 @@ def test_project_continuation_cli_returns_compact_duplicate_session_capsule(
     assert response["ok"] is True
     result = json.loads(response["result"]["stdout"])
     assert result["schema_version"] == "mncs.control.campaign-continuation/2"
-    assert result["status"] == "context-conflict"
+    assert result["status"] == "ready"
+    assert result["context_conflict_status"] == "context-conflict"
     assert result["campaign_id"] == "cmp_continuation_fixture"
+    assert result["selected_session_id"] == "ses_linked"
+    assert result["selected_context"] == {
+        "definition_id": "env_1111111111111111",
+        "workspace_root": str(workspace),
+    }
+    assert result["selection_basis"] == "authenticated-project-environment-definition"
+    assert result["unselected_contexts_count"] == 1
+    assert result["unselected_sessions_count"] == 1
     assert [item["session_id"] for item in result["continuations"]] == [
         "ses_linked", "ses_other_context",
     ]
@@ -864,6 +906,155 @@ def test_project_continuation_cli_returns_compact_duplicate_session_capsule(
         json.dumps(capsule).encode()
     )
     assert environment.calls == [("mncs-environment", "cmp_continuation_fixture")]
+
+
+def test_project_continuation_refuses_selection_when_other_context_holds_claim(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "projects"
+    project = workspace / "mncs-environment"
+    definition_dir = project / ".mncs"
+    definition_dir.mkdir(parents=True)
+    (definition_dir / "project-environment.json").write_text(json.dumps({
+        "workspace_scope": {"repositories": ["mncs-environment"]},
+    }), encoding="utf-8")
+
+    class Environment:
+        state_dir = tmp_path / "state"
+        environment_path = tmp_path / "environment"
+        authenticated_principal_id = "principal-test"
+
+        @staticmethod
+        def _pkg():
+            return SimpleNamespace(identity=SimpleNamespace(
+                environment_id=lambda _definition: "env_2222222222222222",
+            ))
+
+    server = EnvironmentRPCServer(
+        ControlConfig(
+            workspace_root=workspace,
+            sandbox_home=tmp_path / "home",
+            environment_rpc_socket=tmp_path / "rpc" / "environment.sock",
+        ),
+        environment_service=Environment(),
+        policy=object(),
+    )
+    record = _GrantRecord(
+        grant_id="project-claim-selection-grant",
+        principal_id="principal-test",
+        host_root=project,
+        sandbox_root="/workspace/mncs-environment",
+        scope="project",
+        uid=0,
+        expires_at=time.monotonic() + 60,
+        token_file=tmp_path / "grant",
+    )
+    capsule = {
+        "campaign_id": "cmp_test",
+        "repository": "mncs-environment",
+        "status": "context-conflict",
+        "continuations_count": 2,
+        "continuations": [
+            {
+                "session_id": "ses_project",
+                    "definition_id": "env_2222222222222222",
+                "workspace_root": str(workspace),
+                "lifecycle": "active",
+                "project_reference": {"status": "linked"},
+                "claim_ids": [],
+                "claims": [],
+            },
+            {
+                "session_id": "ses_other",
+                "definition_id": "env-workspace",
+                "workspace_root": str(workspace),
+                "lifecycle": "active",
+                "project_reference": {"status": "linked"},
+                "claim_ids": ["claim:mncs-environment"],
+                "claims": [{
+                    "claim_id": "claim:mncs-environment",
+                    "repository": "mncs-environment",
+                    "status": "held",
+                }],
+            },
+        ],
+    }
+
+    result = server._select_project_campaign_context(
+        capsule, record, "mncs-environment",
+    )
+
+    assert result["status"] == "context-conflict"
+    assert "selected_session_id" not in result
+    assert result["project_selection"]["status"] == "blocked"
+    assert result["project_selection"]["competing_claim_sessions"] == ["ses_other"]
+
+
+def test_project_continuation_does_not_select_from_truncated_inventory(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "projects"
+    project = workspace / "mncs-environment"
+    definition_dir = project / ".mncs"
+    definition_dir.mkdir(parents=True)
+    (definition_dir / "project-environment.json").write_text(json.dumps({
+        "workspace_scope": {"repositories": ["mncs-environment"]},
+    }), encoding="utf-8")
+
+    class Environment:
+        state_dir = tmp_path / "state"
+        environment_path = tmp_path / "environment"
+
+        @staticmethod
+        def _pkg():
+            return SimpleNamespace(identity=SimpleNamespace(
+                environment_id=lambda _definition: "env_2222222222222222",
+            ))
+
+    server = EnvironmentRPCServer(
+        ControlConfig(
+            workspace_root=workspace,
+            sandbox_home=tmp_path / "home",
+            environment_rpc_socket=tmp_path / "rpc" / "environment.sock",
+        ),
+        environment_service=Environment(),
+        policy=object(),
+    )
+    record = _GrantRecord(
+        grant_id="project-truncated-selection-grant",
+        principal_id="principal-test",
+        host_root=project,
+        sandbox_root="/workspace/mncs-environment",
+        scope="project",
+        uid=0,
+        expires_at=time.monotonic() + 60,
+        token_file=tmp_path / "grant",
+    )
+    capsule = {
+        "campaign_id": "cmp_test",
+        "repository": "mncs-environment",
+        "status": "context-conflict",
+        "continuations_count": 3,
+        "continuations_truncated": True,
+        "continuations": [{
+            "session_id": "ses_project",
+            "definition_id": "env_2222222222222222",
+            "workspace_root": str(workspace),
+            "lifecycle": "active",
+            "project_reference": {"status": "linked"},
+            "claim_ids": [],
+            "claims": [],
+        }],
+    }
+
+    result = server._select_project_campaign_context(
+        capsule, record, "mncs-environment",
+    )
+
+    assert result["status"] == "context-conflict"
+    assert "selected_session_id" not in result
+    assert result["project_selection"]["status"] == "unknown"
+    assert result["project_selection"]["reason"] == "continuation-inventory-truncated"
 
 
 def test_project_rpc_exposes_session_authorized_read_operations_and_reports_unknown_operations(
