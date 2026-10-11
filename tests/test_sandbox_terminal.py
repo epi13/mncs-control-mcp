@@ -14,6 +14,7 @@ import pytest
 
 from mncs_control_mcp.audit import AuditLog
 from mncs_control_mcp.environment_rpc import EnvironmentRPCServer
+from mncs_control_mcp.environment_sessions import EnvironmentService
 from mncs_control_mcp.errors import ControlError
 from mncs_control_mcp.processes import ProcessManager
 from mncs_control_mcp.sandbox import Sandbox
@@ -139,6 +140,134 @@ def test_environment_grant_is_mounted_only_in_its_execution(config) -> None:
         rpc.revoke_grant(grant)
         rpc.close()
         shutil.rmtree(private_root)
+
+
+@pytest.mark.requires_bwrap_namespace
+def test_project_bwrap_reconciles_checkpoint_after_control_rpc_restart(config) -> None:
+    project = config.workspace_root / "mncs-environment"
+    project.mkdir()
+    subprocess.run(["git", "init", "--quiet", str(project)], check=True)
+    environment_root = Path(__file__).resolve().parents[2] / "mncs-environment"
+    fixture_source = environment_root / "tests" / "fixtures" / "control-rpc-entry.json"
+    manifest_source = environment_root / ".mncs" / "project.json"
+    if not (environment_root / "mncs_env" / "cli.py").is_file():
+        pytest.skip("sibling mncs-environment checkout is unavailable")
+    if not fixture_source.is_file() or not manifest_source.is_file():
+        pytest.skip("Environment campaign entry fixtures are unavailable")
+    definition = project / "tests" / "fixtures" / "control-rpc-entry.json"
+    definition.parent.mkdir(parents=True)
+    shutil.copyfile(fixture_source, definition)
+    manifest = project / ".mncs" / "project.json"
+    manifest.parent.mkdir()
+    shutil.copyfile(manifest_source, manifest)
+
+    private_root = Path(tempfile.mkdtemp(prefix="mce-rpc-restart-", dir="/tmp"))
+    endpoint_config = replace(
+        config,
+        environment_rpc_socket=private_root / "environment.sock",
+    )
+    environment_config = replace(
+        endpoint_config,
+        repositories={**config.repositories, "environment": str(environment_root)},
+        environment_state_dir=private_root / "environment-state",
+    )
+    environment = EnvironmentService(environment_config)
+
+    class DropNextResponseRPC(EnvironmentRPCServer):
+        drop_next_response = False
+
+        def _send_frame(self, connection, value):
+            if self.drop_next_response:
+                self.drop_next_response = False
+                # Dispatch has completed and Environment has returned its
+                # durable result. Closing the service here models process
+                # loss before the caller receives that result.
+                self.close()
+                return
+            super()._send_frame(connection, value)
+
+    policy = WorkspacePolicy(config)
+    first_rpc = DropNextResponseRPC(endpoint_config, environment, policy)
+    first_rpc.start()
+    environment.authenticated_principal_id = first_rpc.principal_id
+    first_sandbox = Sandbox(config, policy)
+    first_sandbox.environment_rpc = first_rpc
+    resolution = policy.resolve_scope(
+        scope="project", project="mncs-environment", cwd=".",
+    )
+    first_grant = first_rpc.issue_grant(resolution)
+
+    def run_client(sandbox, grant, command):
+        argv, _enabled = sandbox.command_argv(
+            command,
+            resolution,
+            network=False,
+            environment_rpc_grant=grant,
+        )
+        return subprocess.run(
+            argv, capture_output=True, text=True, timeout=60,
+            check=False, env={},
+        )
+
+    second_rpc = None
+    second_grant = None
+    request_id = "req_checkpoint_service_restart"
+    try:
+        entry = run_client(
+            first_sandbox, first_grant,
+            "test ! -e /home/developer/.local/share/mncs-environment/store "
+            "&& MNCS_ENV_RPC_REQUEST_ID=req_restart_entry "
+            "python3 -B -m mncs_env.cli enter "
+            "--definition tests/fixtures/control-rpc-entry.json "
+            "--consumer restart-proof-agent --campaign-id cmp_rpc_restart_proof",
+        )
+        assert entry.returncode == 0, entry.stdout + entry.stderr
+        entered = json.loads(entry.stdout)
+        session_id = entered["session_id"]
+        checkpoint_command = (
+            f"MNCS_ENV_RPC_REQUEST_ID={request_id} "
+            f"python3 -B -m mncs_env.cli checkpoint {session_id} "
+            "--progress interrupted-after-publication --remaining verify-readback"
+        )
+
+        first_rpc.drop_next_response = True
+        interrupted = run_client(
+            first_sandbox, first_grant, checkpoint_command,
+        )
+        assert interrupted.returncode == 3, interrupted.stdout + interrupted.stderr
+        diagnostic = json.loads(interrupted.stdout)["diagnostics"]
+        assert diagnostic["code"] == "publication-outcome-ambiguous"
+        assert diagnostic["publication_completed"] is None
+        assert diagnostic["request_id"] == request_id
+
+        second_rpc = EnvironmentRPCServer(endpoint_config, environment, policy)
+        second_rpc.start()
+        assert second_rpc.principal_id == first_rpc.principal_id
+        second_sandbox = Sandbox(config, policy)
+        second_sandbox.environment_rpc = second_rpc
+        second_grant = second_rpc.issue_grant(resolution)
+
+        retried = run_client(
+            second_sandbox, second_grant, checkpoint_command,
+        )
+        assert retried.returncode == 0, retried.stdout + retried.stderr
+        checkpoint = json.loads(retried.stdout)
+
+        inspected = run_client(
+            second_sandbox, second_grant,
+            f"python3 -B -m mncs_env.cli inspect {session_id}",
+        )
+        assert inspected.returncode == 0, inspected.stdout + inspected.stderr
+        snapshot = json.loads(inspected.stdout)
+        assert snapshot["checkpoints"].count(checkpoint["identity"]) == 1
+        assert second_rpc.status()["store_mutation"]["state"] == "owner-write-path-available"
+    finally:
+        first_rpc.revoke_grant(first_grant)
+        first_rpc.close()
+        if second_rpc is not None:
+            second_rpc.revoke_grant(second_grant)
+            second_rpc.close()
+        shutil.rmtree(private_root, ignore_errors=True)
 
 
 @pytest.mark.requires_bwrap_namespace
