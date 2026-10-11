@@ -99,6 +99,16 @@ def test_deployment_paths_and_unit_rendering(tmp_path: Path) -> None:
     assert "EnvironmentFile=-%h/.config/mncs-control-mcp/tunnel.env" in unit
     assert "ProtectHome=read-only" in unit
     assert "ReadWritePaths=%h/Documents/Projects" in unit
+    assert "%h/.local/share/mncs-environment/store" in unit
+    assert "ProtectSystem=strict" in unit
+    assert "NoNewPrivileges=true" in unit
+    deployed_unit = (
+        Path(__file__).resolve().parents[1]
+        / "deploy"
+        / "systemd"
+        / "mncs-control-tunnel.service"
+    ).read_text(encoding="utf-8")
+    assert "%h/.local/share/mncs-environment/store" in deployed_unit
 
 
 def test_update_watcher_units_reload_tunnel_on_main_ref_change(tmp_path: Path) -> None:
