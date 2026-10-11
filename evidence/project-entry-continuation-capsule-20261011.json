@@ -1,0 +1,112 @@
+{
+  "schema_version": "mncs.control.project-entry-continuation-live-acceptance/1",
+  "identity": "ev_control_project_entry_continuation_capsule_20261011",
+  "observed_at": "2026-10-11T11:58:26Z",
+  "source": {
+    "repository": "mncs-control-mcp",
+    "branch": "main",
+    "commit": "5ea30d8ad56a4d4a079fb4febe1297888d835626",
+    "remote_ref": "origin/main",
+    "artifacts": {
+      "src/mncs_control_mcp/environment_rpc.py": "9a69a5d3ba1d4b27abcb22c8de010259f838de43b93a78828b4028c0a1291b3f",
+      "tests/test_environment_rpc.py": "c6ea18b348101c9161cf5010d13a17def4e7c6a09947ac2e80c9508618631839",
+      "tests/test_sandbox_terminal.py": "242def8e2ec1e50cbb5f63970b5956e72585c9973e847ee528a851f8bcb4ba7d",
+      "docs/SECURITY.md": "5b63ab66c7d1b1795344640bead827985fee0eb51a2226c434f51236f8dc2201"
+    }
+  },
+  "implementation": {
+    "owner": "MNCS Control",
+    "behavior": "successful project-scoped Environment entry appends control_project_continuation, using the exact immediate project in the authenticated execution grant and the entered Environment campaign identity",
+    "authority": "Environment remains authoritative for entry, session selection, claim mutation, and campaign records; Control performs a read-only project capsule lookup after successful entry",
+    "failure_behavior": "supplementary lookup failure keeps the successful entry result and reports status unknown with a diagnostic code",
+    "ownership_effect": "no other session is resumed, adopted, terminated, or transferred"
+  },
+  "validation": {
+    "project_sandbox": {
+      "backend": "bwrap",
+      "network": false,
+      "direct_canonical_store_path_visible": false,
+      "visibility_check": {
+        "command": "test ! -e /home/epi13/.local/share/mncs-environment/store",
+        "exit_code": 0
+      }
+    },
+    "tests": [
+      {
+        "command": "python3 -B -m pytest -q tests/test_environment_rpc.py -m 'not requires_bwrap_namespace'",
+        "execution": "MNCS Control project Bwrap",
+        "result": "19 passed"
+      },
+      {
+        "command": "python3 -B -m pytest -q tests/test_sandbox_terminal.py::test_project_bwrap_campaign_entry_reuses_session_without_session_id",
+        "execution": "real project Bwrap client over authenticated Environment RPC",
+        "result": "passed"
+      },
+      {
+        "command": "ruff check src/mncs_control_mcp/environment_rpc.py tests/test_environment_rpc.py tests/test_sandbox_terminal.py",
+        "execution": "MNCS Control project Bwrap",
+        "result": "passed"
+      }
+    ]
+  },
+  "canonical_live_acceptance": {
+    "service": {
+      "unit": "mncs-control-tunnel.service",
+      "state": "active",
+      "implementation_revision": "5ea30d8ad56a4d4a079fb4febe1297888d835626",
+      "main_pid": 1395972,
+      "reloaded_after_main_fast_forward": true
+    },
+    "entry": {
+      "project": "mncs-environment",
+      "sandbox_backend": "bwrap",
+      "network": false,
+      "command": "python3 -B -m mncs_env.cli enter --definition tests/fixtures/control-rpc-entry.json --consumer local-agent --campaign-id cmp_mncs_continuity_20261010",
+      "request_id": "req_entry_capsule_live_20261011",
+      "exit_code": 0,
+      "session_id": "ses_7226fbcfe65820f7",
+      "consumer_id": "local-agent",
+      "entry_reused": true,
+      "campaign_id": "cmp_mncs_continuity_20261010",
+      "project_capsule": {
+        "status": "context-conflict",
+        "repository": "mncs-environment",
+        "sessions": [
+          {
+            "session_id": "ses_7226fbcfe65820f7",
+            "lifecycle": "active",
+            "project_reference": "linked",
+            "checkpoint_count": 4,
+            "claim_count": 1
+          },
+          {
+            "session_id": "ses_b4b2d283542220b0",
+            "lifecycle": "active",
+            "project_reference": "linked",
+            "checkpoint_count": 0,
+            "claim_count": 0
+          }
+        ],
+        "selection_behavior": "both recorded contexts are shown; Control does not choose between them"
+      }
+    },
+    "fresh_process_readback": {
+      "command": "python3 -B -m mncs_env.cli continuation --campaign-id cmp_mncs_continuity_20261010",
+      "project": "mncs-environment",
+      "sandbox_backend": "bwrap",
+      "network": false,
+      "exit_code": 0,
+      "status": "context-conflict",
+      "session_ids": [
+        "ses_7226fbcfe65820f7",
+        "ses_b4b2d283542220b0"
+      ]
+    },
+    "persistence_transport": "authenticated Control Environment RPC to canonical Store; caller had no direct Store path visibility"
+  },
+  "result": "PASS_FOR_PROJECT_ENTRY_CONTINUATION_CAPSULE_WITH_CANONICAL_RPC_READBACK",
+  "limitations": [
+    "Environment context conflict remains explicit and requires selection of the intended recorded context.",
+    "This proves the Control entry projection and canonical readback; it does not prove claim-transfer crash recovery, pre-response service interruption reconciliation, compiler resource feedback, or compiler Stage-1/Stage-2 succession."
+  ]
+}
