@@ -1,0 +1,94 @@
+{
+  "authority_boundary": {
+    "canonical_store_acceptance_reference": "mncs-environment/evidence/canonical-store-path-grant-acceptance-20261011.json",
+    "control_role": "project-scoped lookup and response projection only",
+    "direct_store_filesystem_access_granted_to_bwrap_consumer": false,
+    "environment_remains_authoritative_for": [
+      "campaign identity",
+      "session lifecycle",
+      "claims",
+      "checkpoint publication"
+    ]
+  },
+  "campaign_identity": "cmp_mncs_continuity_20261010",
+  "control_service": {
+    "active_state": "active",
+    "exec_main_start": "2026-10-11 13:05:45 AKDT",
+    "main_pid": 1858527,
+    "observed_at": "2026-10-11T21:09:32Z",
+    "result": "success",
+    "sub_state": "running",
+    "unit": "mncs-control-tunnel.service"
+  },
+  "identity": "ev_control_project_continuation_restart_20261011",
+  "limitations": [
+    "The project-linked session is selected for this exact project definition, while the capsule continues to report context-conflict across two definitions.",
+    "This artifact proves restart continuation selection and the focused Control RPC suite; it does not claim compiler succession or resource-feedback integration."
+  ],
+  "owner": "mncs-control-mcp",
+  "protected_execution_proof": {
+    "command": "./scripts/mncs-env continuation --campaign-id cmp_mncs_continuity_20261010",
+    "environment": "mncs-environment",
+    "execution_completed_at": "2026-10-11T21:08:44.065567Z",
+    "execution_started_at": "2026-10-11T21:08:35.897900Z",
+    "exit_code": 0,
+    "interpretation": "A fresh protected CLI process selected the single continuable session linked to the exact project Environment definition. The second context and the workspace-level conflict remain visible; no session or claim was adopted, transferred, or hidden.",
+    "network": false,
+    "response": {
+      "context_conflict_status": "context-conflict",
+      "contexts": [
+        {
+          "definition_id": "env_1ea3af15c7464177",
+          "workspace_root": "/home/epi13/Documents/Projects"
+        },
+        {
+          "definition_id": "env_f31ee034e8e1fdcb",
+          "workspace_root": "/home/epi13/Documents/Projects"
+        }
+      ],
+      "selected_context": {
+        "definition_id": "env_f31ee034e8e1fdcb",
+        "workspace_root": "/home/epi13/Documents/Projects"
+      },
+      "selected_session_id": "ses_7226fbcfe65820f7",
+      "selection_basis": "authenticated-project-environment-definition",
+      "status": "ready"
+    },
+    "sandbox_backend": "bwrap",
+    "scope": "project",
+    "timed_out": false
+  },
+  "recorded_at": "2026-10-11T21:09:41Z",
+  "schema_version": "mncs.control.project-continuation-restart-proof/1",
+  "source": {
+    "files": {
+      "README.md": "50fd5c666a7427335395664d594bd863acf58a6f8e4a2f135bf931242e617dd5",
+      "docs/SECURITY.md": "8a4704f42c260691f4ff9a5980e0a8a17bfbcfb405581f262bf5543b11b6d4b7",
+      "src/mncs_control_mcp/environment_rpc.py": "af3490f152a304d9b5b996f756bd567dfd37d36a28d638b002d63d8d9ee0ae49",
+      "tests/test_environment_rpc.py": "aee897b3105efcfbe253b30f0cea3d119098f07cfdf444ba0a1943f498900510"
+    },
+    "repository": "mncs-control-mcp",
+    "revision": "a767f79401f9108b92d85b8c551cb998ed411cbd"
+  },
+  "validation": {
+    "focused_rpc_suite": {
+      "command": "PYTHONPATH=src python3 -m pytest -q tests/test_environment_rpc.py",
+      "completed_at": "2026-10-11T21:09:33.192750Z",
+      "exit_code": 0,
+      "network": false,
+      "result": "passed",
+      "sandbox_backend": "bwrap",
+      "started_at": "2026-10-11T21:09:32.125325Z",
+      "test_count": 29
+    },
+    "static_checks": {
+      "checks": [
+        "ruff check",
+        "python3 -m compileall",
+        "git diff --check"
+      ],
+      "result": "passed",
+      "source_revision": "a767f79401f9108b92d85b8c551cb998ed411cbd"
+    }
+  }
+}
