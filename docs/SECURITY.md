@@ -113,10 +113,14 @@ path accepts only explicit branch or worktree targets. A mutation requires an
 exact project grant, a repository equal to that grant's checkout, and the exact
 session selected by Environment continuation within the same protected
 execution. Worktree paths are mapped under that project before forwarding.
-Environment independently requires declared write intent and a live claim
-covering the requested scope, then rechecks Git safety before deletion. Control
-does not expose metadata pruning, arbitrary repository paths, or a general Git
-proxy.
+Control also supplies an internal, grant-derived pair of sandbox and host
+project roots so Environment can match Git registrations created under
+`/workspace` without accepting caller-selected mappings. Environment
+independently requires declared write intent and a live claim covering the
+requested scope, then rechecks Git safety before deletion. A matching path
+prefix does not prove the owner service can inspect the checkout: Git status
+errors remain unknown and preserve the registration. Control does not expose
+metadata pruning, arbitrary repository paths, or a general Git proxy.
 
 The typed `env_campaign_continuation` operation is a read-only projection over
 canonical Environment snapshots. It requires Control's authenticated

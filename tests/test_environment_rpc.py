@@ -1831,6 +1831,8 @@ def test_retire_rpc_scopes_inventory_and_project_mutation(tmp_path: Path) -> Non
         ["retire", "ses_test", "--repository", "/workspace/mncs-environment",
          "--inventory", "--dry-run", "--execution-root", "/"],
         ["retire", "ses_test", "--repository", "/workspace/mncs-environment",
+         "--inventory", "--dry-run", "--sandbox-root", "/workspace"],
+        ["retire", "ses_test", "--repository", "/workspace/mncs-environment",
          "--inventory", "--dry-run", "--canonical=refs/heads/private"],
     ):
         with pytest.raises(ControlError):
@@ -1908,6 +1910,8 @@ def test_retire_rpc_requires_continuation_selected_session_before_mutation(
     forwarded = run.call_args.args[0]
     assert "--execution-root" in forwarded
     assert str(host_root) in forwarded
+    assert "--sandbox-root" in forwarded
+    assert "/workspace/mncs-environment" in forwarded
 
 
 def test_entry_preserves_and_bounds_configured_workspace_root(tmp_path: Path) -> None:

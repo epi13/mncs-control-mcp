@@ -515,6 +515,7 @@ class EnvironmentRPCServer:
                or item.startswith("--state-") or item == "--persistence"
                or item.startswith("--persistence=") or item.startswith("--persist")
                or item == "--execution-root" or item.startswith("--execution-root=")
+               or item == "--sandbox-root" or item.startswith("--sandbox-root=")
                for item in argv):
             raise ControlError("ENVIRONMENT_AUTHORITY_DENIED",
                                "Environment RPC fixes canonical persistence configuration")
@@ -1337,7 +1338,20 @@ class EnvironmentRPCServer:
             ) if any(item.startswith("--repository=") for item in argv) else Path(
                 argv[argv.index("--repository") + 1]
             )
-            argv.extend(["--execution-root", str(repository)])
+            host_root = record.host_root.expanduser().resolve(strict=True)
+            repository = repository.expanduser().resolve(strict=True)
+            try:
+                repository_relative = repository.relative_to(host_root)
+            except ValueError as error:
+                raise ControlError(
+                    "ENVIRONMENT_WORKSPACE_ESCAPE",
+                    "retirement repository escapes its authenticated execution root",
+                ) from error
+            sandbox_repository = Path(record.sandbox_root) / repository_relative
+            argv.extend([
+                "--execution-root", str(repository),
+                "--sandbox-root", str(sandbox_repository),
+            ])
         if command in {"inspect", "context", "resume", "health", "capabilities", "checkpoint", "handoff", "accept", "claims", "complete", "retire", "store", "scope-grant", "invoke", "artifact-read", "campaign-state"}:
             try:
                 command_index = argv.index(command)
