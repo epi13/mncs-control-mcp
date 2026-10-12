@@ -34,7 +34,7 @@ MAX_ARGUMENT_BYTES = 48 * 1024
 ALLOWED_COMMANDS = frozenset({
     "enter", "inspect", "context", "resume", "health", "capabilities", "checkpoint", "handoff", "accept", "claims",
     "complete", "store", "invoke", "artifact-read", "campaign-state",
-    "retire", "continuation", "scope-grant",
+    "retire", "continuation", "campaign-bind", "scope-grant",
 })
 MAX_CAMPAIGN_EVIDENCE_PAGE = 128
 ALLOWED_INVOKE_CAPABILITIES = frozenset({
@@ -1246,7 +1246,7 @@ class EnvironmentRPCServer:
                 command = argv[0] if isinstance(argv, list) and argv else None
                 selection_lock = (
                     grant.selection_lock
-                    if command in {"continuation", "artifact-read", "retire"} else None
+                    if command in {"continuation", "campaign-bind", "artifact-read", "retire"} else None
                 )
                 if selection_lock is not None:
                     with selection_lock:
@@ -1326,6 +1326,8 @@ class EnvironmentRPCServer:
             raise ControlError("ENVIRONMENT_RPC_INVALID_REQUEST", "stable request identity is invalid")
         if command == "continuation":
             return self._campaign_continuation(record, argv, request_id)
+        if command == "campaign-bind":
+            return self._campaign_task_bind(record, argv, request_id)
         if command == "retire":
             # The repository path was resolved by Control to one immediate
             # configured workspace checkout. Environment may inspect physical
@@ -2131,6 +2133,88 @@ class EnvironmentRPCServer:
             "other same-campaign contexts remain visible and unchanged"
         )
         return capsule
+
+    def _campaign_task_bind(
+        self, record: _GrantRecord, argv: list[str], request_id: str,
+    ) -> dict[str, Any]:
+        """Bind a task selector to one explicitly named session in this project."""
+        record.bound_session_id = None
+        if record.scope != "project":
+            raise ControlError(
+                "ENVIRONMENT_AUTHORITY_DENIED",
+                "campaign task binding requires a project-scoped Control grant",
+            )
+        project = self._project_repository(record)
+        values: dict[str, str] = {}
+        allowed = {"--campaign-id", "--session-id", "--task-identity"}
+        index = 1
+        while index < len(argv):
+            item = argv[index]
+            if item.startswith("--") and "=" in item:
+                option, _, value = item.partition("=")
+                if option not in allowed:
+                    raise ControlError(
+                        "ENVIRONMENT_RPC_INVALID_REQUEST",
+                        "campaign-bind accepts only campaign, session, and task identity options",
+                    )
+                step = 1
+            elif item in allowed:
+                option = item
+                if index + 1 >= len(argv) or argv[index + 1].startswith("--"):
+                    raise ControlError(
+                        "ENVIRONMENT_RPC_INVALID_REQUEST",
+                        f"{option} needs a value",
+                    )
+                value = argv[index + 1]
+                step = 2
+            else:
+                raise ControlError(
+                    "ENVIRONMENT_RPC_INVALID_REQUEST",
+                    "campaign-bind accepts only --campaign-id, --session-id, and --task-identity",
+                )
+            if not value or option in values:
+                raise ControlError(
+                    "ENVIRONMENT_RPC_INVALID_REQUEST",
+                    f"{option} must occur exactly once with a nonempty value",
+                )
+            values[option] = value
+            index += step
+
+        required = {"--campaign-id", "--session-id", "--task-identity"}
+        if set(values) != required:
+            raise ControlError(
+                "ENVIRONMENT_RPC_INVALID_REQUEST",
+                "campaign-bind requires one explicit campaign, session, and task identity",
+            )
+        campaign_id = values["--campaign-id"]
+        session_id = values["--session-id"]
+        task_identity = values["--task-identity"]
+        if (len(campaign_id) > 160 or "\x00" in campaign_id
+                or not re.fullmatch(r"ses_[A-Za-z0-9_-]{1,120}", session_id)
+                or len(task_identity) > 256 or "\x00" in task_identity):
+            raise ControlError(
+                "ENVIRONMENT_RPC_INVALID_REQUEST",
+                "campaign-bind identity arguments are malformed or exceed their limits",
+            )
+        if (getattr(self.environment_service, "authenticated_principal_id", None)
+                != record.principal_id):
+            raise ControlError(
+                "ENVIRONMENT_AUTHORITY_DENIED",
+                "campaign task binding is not bound to the Control-authenticated principal",
+            )
+        binding = self.environment_service.bind_task_identity(
+            project, campaign_id, session_id, task_identity, request_id,
+        )
+        if not isinstance(binding, dict) or binding.get("status") != "bound":
+            raise TypeError("Environment returned an unconfirmed task binding")
+        record.bound_session_id = session_id
+        return {"ok": True, "result": {
+            "exit_code": 0,
+            "stdout": json.dumps(binding, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            "stderr": "",
+            "request_id": request_id,
+            "principal_id": record.principal_id,
+        }}
 
     def _campaign_continuation(
         self, record: _GrantRecord, argv: list[str], request_id: str,

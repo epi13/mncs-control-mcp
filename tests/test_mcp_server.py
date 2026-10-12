@@ -165,9 +165,15 @@ environment_rpc_socket = {str(environment_rpc_socket)!r}
             "commons_evidence",
             "commons_sync",
             "env_campaign_continuation",
+            "env_campaign_task_bind",
             "env_projection_evidence",
         } <= names
         assert "commons_publish" not in names
+        binding_tool = next(item for item in tools if item["name"] == "env_campaign_task_bind")
+        assert binding_tool["inputSchema"]["required"] == [
+            "repository", "campaign_id", "session_id", "task_identity",
+        ]
+        assert binding_tool["annotations"]["readOnlyHint"] is False
         continuation_tool = next(item for item in tools if item["name"] == "env_campaign_continuation")
         assert "repository" in continuation_tool["inputSchema"]["required"]
         assert "campaign_id" not in continuation_tool["inputSchema"].get("required", [])
@@ -370,3 +376,53 @@ fabric_execution_mode = "unavailable-until-service-support"
         client.close()
         service.request_stop()
         thread.join(timeout=3)
+
+
+@pytest.mark.skipif(shutil.which("bwrap") is None, reason="bubblewrap is not installed")
+def test_environment_campaign_task_bind_tool_schema(
+    tmp_path: Path, environment_rpc_socket: Path,
+) -> None:
+    pytest.importorskip("mcp")
+    pytest.importorskip(
+        "mcp.server.fastmcp",
+        reason="installed MCP SDK does not include the FastMCP server API",
+    )
+    workspace = tmp_path / "projects"
+    workspace.mkdir()
+    config_path = tmp_path / "control.toml"
+    config_path.write_text(
+        f"""
+[workspace]
+root = {str(workspace)!r}
+[sandbox]
+backend = "bwrap"
+require_real_sandbox = true
+home = {str(tmp_path / "sandbox-home")!r}
+[terminal]
+job_state_path = {str(tmp_path / "state" / "jobs.json")!r}
+[server]
+audit_path = {str(tmp_path / "state" / "audit.jsonl")!r}
+[integration]
+environment_rpc_socket = {str(environment_rpc_socket)!r}
+""",
+        encoding="utf-8",
+    )
+    client = StdioClient(config_path, Path(__file__).parents[1])
+    try:
+        client.request(
+            "initialize",
+            {
+                "protocolVersion": "2025-11-25",
+                "capabilities": {},
+                "clientInfo": {"name": "schema-client", "version": "1"},
+            },
+        )
+        client.notify("notifications/initialized", {})
+        tools = client.request("tools/list", {})["tools"]
+        binding = next(item for item in tools if item["name"] == "env_campaign_task_bind")
+        assert binding["inputSchema"]["required"] == [
+            "repository", "campaign_id", "session_id", "task_identity",
+        ]
+        assert binding["annotations"]["readOnlyHint"] is False
+    finally:
+        client.close()

@@ -630,6 +630,38 @@ def build_server(config: ControlConfig | None = None) -> Any:
             },
         )  # type: ignore[return-value]
 
+    @server.tool(
+        name="env_campaign_task_bind",
+        description=(
+            "Bind a stable task identity to one explicitly named, authenticated "
+            "Environment campaign session linked to the selected project. This "
+            "publishes a lookup index only and does not transfer claims or grant "
+            "session authority."
+        ),
+        annotations=mutate,
+        structured_output=True,
+    )
+    def env_campaign_task_bind(
+        repository: str,
+        campaign_id: str,
+        session_id: str,
+        task_identity: str,
+    ) -> dict[str, object]:
+        return invoke(
+            "env_campaign_task_bind",
+            environment_sessions.bind_task_identity,
+            repository,
+            campaign_id,
+            session_id,
+            task_identity,
+            audit_metadata={
+                "repository": repository,
+                "campaign_id": campaign_id,
+                "session_id": session_id,
+                "task_identity_present": bool(task_identity),
+            },
+        )  # type: ignore[return-value]
+
     @server.tool(name="env_campaign_continuation", description="Discover authenticated campaign continuations for one project, select one campaign identity, or resolve a previously bound task identity. Task identity lookup is principal, Environment definition, and workspace scoped; unbound selectors never adopt work.", annotations=ro, structured_output=True)
     def env_campaign_continuation(
         repository: str,

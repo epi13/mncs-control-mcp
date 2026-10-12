@@ -191,6 +191,182 @@ class EnvironmentService:
                 details=diagnostics if isinstance(diagnostics, dict) else None,
             ) from exc
 
+    def bind_task_identity(
+        self,
+        repository: str,
+        campaign_id: str,
+        session_id: str,
+        task_identity: str,
+        request_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Bind one stable task key to an exact authenticated project session.
+
+        This owner operation publishes a lookup index only. It neither resumes
+        the session nor transfers claims; ordinary Environment admission still
+        governs every continuation and mutation.
+        """
+        if self.authenticated_principal_id is None:
+            raise ControlError(
+                "ENVIRONMENT_AUTHORITY_DENIED",
+                "campaign task binding requires a Control-authenticated principal",
+            )
+        if (not isinstance(campaign_id, str) or not campaign_id.strip()
+                or len(campaign_id) > _CAMPAIGN_ID_MAX or "\x00" in campaign_id):
+            raise ControlError(
+                "ENVIRONMENT_CAMPAIGN_ID_INVALID",
+                "campaign identity must be bounded nonempty text",
+            )
+        if (not isinstance(session_id, str)
+                or not re.fullmatch(r"ses_[A-Za-z0-9_-]{1,120}", session_id)):
+            raise ControlError(
+                "ENVIRONMENT_SESSION_INVALID",
+                "session identity is malformed",
+            )
+        if (not isinstance(task_identity, str) or not task_identity.strip()
+                or len(task_identity) > 256 or "\x00" in task_identity):
+            raise ControlError(
+                "ENVIRONMENT_TASK_IDENTITY_INVALID",
+                "task identity must be bounded nonempty text",
+            )
+        repository = self._validate_repository_selector(repository)
+        pkg = self._pkg()
+        store = self._store(pkg)
+        try:
+            snapshot = store.load_snapshot(session_id)
+            if not isinstance(snapshot, dict):
+                raise ControlError(
+                    "ENVIRONMENT_SESSION_MISSING",
+                    "selected session is not present in canonical Store",
+                    details={"session_id": session_id},
+                )
+            if snapshot.get("authenticated_principal_id") != self.authenticated_principal_id:
+                raise ControlError(
+                    "ENVIRONMENT_AUTHORITY_DENIED",
+                    "selected session belongs to a different authenticated principal",
+                    details={"session_id": session_id,
+                             "next": "request an explicit handoff from the recorded owner"},
+                )
+            campaign = snapshot.get("campaign")
+            campaign = campaign if isinstance(campaign, dict) else {}
+            if campaign.get("identity") != campaign_id:
+                raise ControlError(
+                    "ENVIRONMENT_CAMPAIGN_SESSION_CONFLICT",
+                    "selected session does not belong to the explicitly selected campaign",
+                    details={"campaign_id": campaign_id, "session_id": session_id},
+                )
+            if snapshot.get("lifecycle") not in _CONTINUABLE_LIFECYCLES:
+                raise ControlError(
+                    "ENVIRONMENT_SESSION_TERMINAL",
+                    "task identity can bind only a continuable session",
+                    details={"session_id": session_id,
+                             "lifecycle": snapshot.get("lifecycle")},
+                )
+
+            all_claims = store.read_claims()
+            active_claims = pkg.claims.active_claims(all_claims)
+            session_claims = [
+                claim for claim in active_claims.values()
+                if isinstance(claim, dict) and claim.get("session_id") == session_id
+            ]
+            basis = self._snapshot_repository_reference_basis(
+                snapshot, repository, session_claims,
+            )
+            if not basis:
+                raise ControlError(
+                    "ENVIRONMENT_PROJECT_SCOPE_REQUIRED",
+                    "the selected session has no durable link to this project",
+                    details={"repository": repository, "session_id": session_id},
+                )
+
+            provenance = snapshot.get("provenance")
+            provenance = provenance if isinstance(provenance, dict) else {}
+            workspace = snapshot.get("workspace")
+            workspace = workspace if isinstance(workspace, dict) else {}
+            definition_id = provenance.get("definition_id")
+            workspace_root = workspace.get("root")
+            if (not isinstance(definition_id, str)
+                    or not isinstance(workspace_root, str)):
+                raise ControlError(
+                    "ENVIRONMENT_SESSION_CORRUPT",
+                    "selected session lacks its persisted Environment definition or workspace",
+                )
+            if request_id is None:
+                request_material = {
+                    "operation": "mncs.environment.task-binding-request/1",
+                    "principal_id": self.authenticated_principal_id,
+                    "repository": repository,
+                    "campaign_id": campaign_id,
+                    "session_id": session_id,
+                    "task_identity": task_identity,
+                }
+                request_id = "req_" + hashlib.sha256(
+                    json.dumps(
+                        request_material, sort_keys=True, separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest()[:48]
+            elif (not isinstance(request_id, str) or not request_id.startswith("req_")
+                    or len(request_id) > 160 or "\x00" in request_id):
+                raise ControlError(
+                    "ENVIRONMENT_RPC_INVALID_REQUEST",
+                    "stable task-binding request identity is invalid",
+                )
+
+            session = pkg.sessions.Session(store, session_id)
+            try:
+                binding = session.bind_task_identity(
+                    task_identity,
+                    campaign_id=campaign_id,
+                    authenticated_principal_id=self.authenticated_principal_id,
+                    request_id=request_id,
+                )
+            except Exception as exc:
+                if type(exc).__name__ == "AuthorityDenied":
+                    raise ControlError("ENVIRONMENT_AUTHORITY_DENIED", str(exc)) from exc
+                if type(exc).__name__ == "LifecycleError":
+                    raise ControlError("ENVIRONMENT_SESSION_TERMINAL", str(exc)) from exc
+                if type(exc).__name__ == "TaskSelectorError":
+                    code = getattr(exc, "code", None)
+                    if code == "store-corruption":
+                        raise ControlError("ENVIRONMENT_STORE_CORRUPTION", str(exc)) from exc
+                    if code == "persistence-service-unavailable":
+                        raise ControlError("ENVIRONMENT_PERSISTENCE_UNAVAILABLE", str(exc)) from exc
+                    if code == "ambiguous-publication":
+                        raise ControlError(
+                            "ENVIRONMENT_PUBLICATION_AMBIGUOUS",
+                            str(exc),
+                            details={"request_id": request_id,
+                                     "next": "retry the same task identity and request ID to reconcile Store readback"},
+                        ) from exc
+                    raise ControlError(
+                        "ENVIRONMENT_CAMPAIGN_TASK_CONFLICT", str(exc),
+                    ) from exc
+                raise
+            return {
+                "schema_version": "mncs.control.campaign-task-binding/1",
+                "status": "bound",
+                "selector_identity": binding["selector_identity"],
+                "campaign_id": binding["campaign_id"],
+                "session_id": binding["session_id"],
+                "definition_id": binding["definition_id"],
+                "workspace_root": binding["workspace_root"],
+                "request_id": binding["request_id"],
+                "bound_at": binding["bound_at"],
+                "project_scope_basis": list(basis),
+                "authority_effect": "lookup-only",
+            }
+        except ControlError:
+            raise
+        except Exception as exc:
+            if type(exc).__name__ in {"StoreIntegrityFailure", "StoreCorruption"}:
+                raise ControlError("ENVIRONMENT_STORE_CORRUPTION", str(exc)) from exc
+            if type(exc).__name__ == "StoreUnavailable":
+                raise ControlError("ENVIRONMENT_PERSISTENCE_UNAVAILABLE", str(exc)) from exc
+            raise ControlError("ENVIRONMENT_TASK_BIND_FAILED", str(exc)) from exc
+        finally:
+            close = getattr(store, "close", None)
+            if callable(close):
+                close()
+
     def campaign_continuation(
         self, repository: str, campaign_id: str | None = None,
         task_identity: str | None = None,

@@ -29,6 +29,7 @@ _JOURNAL_CONTEXT_TOOLS = {
 _ENVIRONMENT_CONTINUATION_TOOLS = {
     "env_enter",
     "env_campaign_continuation",
+    "env_campaign_task_bind",
     "env_resume",
 }
 

@@ -1150,3 +1150,131 @@ print(json.dumps({
         assert set(inventory.list_sessions()) == {entered["session_id"], duplicate_session_id}
     finally:
         inventory.close()
+
+
+def test_task_binding_uses_authenticated_project_link_and_stable_request(tmp_path: Path) -> None:
+    workspace = tmp_path / "projects"
+    workspace.mkdir()
+    (workspace / "mncs-control-mcp").mkdir()
+    (workspace / "mncs-environment").mkdir()
+    snapshot = {
+        "session_id": "ses_task_binding",
+        "authenticated_principal_id": "principal-test",
+        "snapshot_sequence": 7,
+        "lifecycle": "active",
+        "provenance": {"definition_id": "env_persisted_definition"},
+        "workspace": {"root": "/persisted/workspace"},
+        "campaign": {
+            "identity": "cmp_task_binding",
+            "principal_id": "principal-test",
+            "work_intent": {
+                "goal": "continue the current authorized project task",
+                "repositories": ["mncs-control-mcp"],
+            },
+        },
+    }
+    calls = []
+
+    class Store:
+        def load_snapshot(self, session_id):
+            return snapshot if session_id == snapshot["session_id"] else None
+
+        def read_claims(self):
+            return []
+
+        def close(self):
+            pass
+
+    class Session:
+        def __init__(self, store, session_id):
+            assert store.load_snapshot(session_id) is snapshot
+            self.session_id = session_id
+
+        def bind_task_identity(self, task_identity, **kwargs):
+            calls.append((task_identity, kwargs))
+            return {
+                "selector_identity": "tsel_fixture",
+                "campaign_id": kwargs["campaign_id"],
+                "session_id": self.session_id,
+                "definition_id": "env_persisted_definition",
+                "workspace_root": "/persisted/workspace",
+                "request_id": kwargs["request_id"],
+                "bound_at": "2026-10-12T00:00:00+00:00",
+            }
+
+    service = EnvironmentService(_config(tmp_path))
+    service.authenticated_principal_id = "principal-test"
+    service._pkg = lambda: SimpleNamespace(
+        claims=SimpleNamespace(active_claims=lambda _records: {}),
+        sessions=SimpleNamespace(Session=Session),
+    )
+    service._store = lambda _pkg: Store()
+
+    first = service.bind_task_identity(
+        "mncs-control-mcp", "cmp_task_binding", "ses_task_binding",
+        "durable-task-binding-identity",
+    )
+    second = service.bind_task_identity(
+        "mncs-control-mcp", "cmp_task_binding", "ses_task_binding",
+        "durable-task-binding-identity",
+    )
+    assert first == second
+    assert first["status"] == "bound"
+    assert first["authority_effect"] == "lookup-only"
+    assert len(calls) == 2
+    assert calls[0][1]["request_id"] == calls[1][1]["request_id"]
+    assert snapshot["snapshot_sequence"] == 7
+
+    with pytest.raises(ControlError) as unlinked:
+        service.bind_task_identity(
+            "mncs-environment", "cmp_task_binding", "ses_task_binding",
+            "durable-task-binding-identity",
+        )
+    assert unlinked.value.code == "ENVIRONMENT_PROJECT_SCOPE_REQUIRED"
+
+    service.authenticated_principal_id = "principal-foreign"
+    with pytest.raises(ControlError) as foreign:
+        service.bind_task_identity(
+            "mncs-control-mcp", "cmp_task_binding", "ses_task_binding",
+            "durable-task-binding-identity",
+        )
+    assert foreign.value.code == "ENVIRONMENT_AUTHORITY_DENIED"
+
+
+@needs_environment
+def test_task_binding_survives_a_fresh_environment_service(tmp_path: Path) -> None:
+    workspace = tmp_path / "projects"
+    workspace.mkdir()
+    (workspace / "mncs-control-mcp").mkdir()
+    config = _config(tmp_path)
+    service = EnvironmentService(config)
+    service.authenticated_principal_id = "principal-task-binding-test"
+    campaign_id = "cmp_task_binding_fresh_service"
+    task_identity = "fresh-service-task-binding"
+
+    entered = service.enter(
+        {
+            "name": "task-binding-test",
+            "intent": {
+                "goal": "verify durable task selector across service instances",
+                "repositories": ["mncs-control-mcp"],
+            },
+        },
+        "task-binding-test-consumer",
+        campaign_id=campaign_id,
+    )
+    session_id = entered["session_id"]
+    bound = service.bind_task_identity(
+        "mncs-control-mcp", campaign_id, session_id, task_identity,
+    )
+    assert bound["status"] == "bound"
+    assert bound["session_id"] == session_id
+
+    restarted_service = EnvironmentService(config)
+    restarted_service.authenticated_principal_id = "principal-task-binding-test"
+    capsule = restarted_service.campaign_continuation(
+        "mncs-control-mcp", task_identity=task_identity,
+    )
+    assert capsule["task_selector"]["status"] == "resolved"
+    assert capsule["task_selector"]["session_id"] == session_id
+    assert capsule["task_selector"]["campaign_id"] == campaign_id

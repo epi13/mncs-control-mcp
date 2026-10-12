@@ -2569,3 +2569,83 @@ def test_store_corruption_during_authorization_is_structured(tmp_path: Path) -> 
     }, peer_uid=0)
 
     assert response["error"]["code"] == "ENVIRONMENT_STORE_CORRUPTION"
+
+
+def test_campaign_task_bind_rpc_selects_one_exact_project_session(tmp_path: Path) -> None:
+    workspace = tmp_path / "projects"
+    project = workspace / "mncs-control-mcp"
+    project.mkdir(parents=True)
+    calls = []
+
+    class Environment:
+        authenticated_principal_id = "principal-test"
+        state_dir = tmp_path / "state"
+
+        def bind_task_identity(self, repository, campaign_id, session_id,
+                               task_identity, request_id):
+            calls.append((repository, campaign_id, session_id, task_identity, request_id))
+            return {
+                "status": "bound",
+                "campaign_id": campaign_id,
+                "session_id": session_id,
+                "selector_identity": "tsel_fixture",
+            }
+
+    server = EnvironmentRPCServer(
+        ControlConfig(
+            workspace_root=workspace,
+            sandbox_home=tmp_path / "home",
+            environment_rpc_socket=tmp_path / "rpc" / "environment.sock",
+        ),
+        environment_service=Environment(),
+        policy=object(),
+    )
+    token = "campaign-task-bind-grant"
+    record = _GrantRecord(
+        grant_id="campaign-task-bind-grant",
+        principal_id="principal-test",
+        host_root=project,
+        sandbox_root="/workspace/mncs-control-mcp",
+        scope="project",
+        uid=0,
+        expires_at=time.monotonic() + 60,
+        token_file=tmp_path / "grant",
+    )
+    server._grants[hashlib.sha256(token.encode()).hexdigest()] = record
+    response = server.dispatch({
+        "grant": token,
+        "request_id": "req_campaign_task_bind_rpc",
+        "argv": [
+            "campaign-bind",
+            "--campaign-id=cmp_task_binding",
+            "--session-id", "ses_task_binding",
+            "--task-identity", "durable-task-binding-identity",
+        ],
+        "cwd": "/workspace/mncs-control-mcp",
+    }, peer_uid=0)
+
+    assert response["ok"] is True
+    assert response["result"]["exit_code"] == 0
+    payload = json.loads(response["result"]["stdout"])
+    assert payload["status"] == "bound"
+    assert record.bound_session_id == "ses_task_binding"
+    assert calls == [(
+        "mncs-control-mcp",
+        "cmp_task_binding",
+        "ses_task_binding",
+        "durable-task-binding-identity",
+        "req_campaign_task_bind_rpc",
+    )]
+
+    malformed = server.dispatch({
+        "grant": token,
+        "request_id": "req_campaign_task_bind_missing_session",
+        "argv": [
+            "campaign-bind",
+            "--campaign-id", "cmp_task_binding",
+            "--task-identity", "durable-task-binding-identity",
+        ],
+        "cwd": "/workspace/mncs-control-mcp",
+    }, peer_uid=0)
+    assert malformed["error"]["code"] == "ENVIRONMENT_RPC_INVALID_REQUEST"
+    assert len(calls) == 1
