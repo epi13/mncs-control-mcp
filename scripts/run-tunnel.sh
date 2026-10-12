@@ -4,6 +4,7 @@ set -euo pipefail
 repository="${MNCS_CONTROL_REPOSITORY:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 profile="${MNCS_CONTROL_TUNNEL_PROFILE:-mncs-fedora}"
 tunnel_client="${MNCS_CONTROL_TUNNEL_CLIENT:-$HOME/.local/bin/tunnel-client}"
+export MNCS_CONTROL_CONFIG="${MNCS_CONTROL_CONFIG:-$repository/control.toml}"
 
 if [[ ! -x "$tunnel_client" ]]; then
     tunnel_client="$(command -v tunnel-client || true)"

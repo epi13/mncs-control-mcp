@@ -120,6 +120,98 @@ def test_path_options_are_mapped_in_split_and_equals_forms(tmp_path: Path) -> No
     assert equals == ["enter", "--workspace=" + str(host_root / "nested")]
 
 
+def test_scope_grant_rpc_requires_exact_campaign_approval_and_environment_project(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "projects"
+    environment = workspace / "mncs-environment"
+    target = workspace / "mncs-control-mcp"
+    for checkout in (environment, target):
+        (checkout / ".git").mkdir(parents=True)
+    approval = "user-approval:campaign-scope-test"
+    server = EnvironmentRPCServer(
+        ControlConfig(
+            workspace_root=workspace,
+            sandbox_home=tmp_path / "home",
+            environment_rpc_socket=tmp_path / "rpc" / "environment.sock",
+            environment_scope_grants={
+                "cmp_scope_test": {"mncs-control-mcp": approval},
+            },
+        ),
+        environment_service=SimpleNamespace(
+            state_dir=tmp_path / "state", environment_path=tmp_path / "environment-source",
+        ),
+        policy=object(),
+    )
+    grant = _GrantRecord(
+        grant_id="scope-grant-test",
+        principal_id="principal-test",
+        host_root=environment,
+        sandbox_root="/workspace/mncs-environment",
+        scope="project",
+        uid=0,
+        expires_at=time.monotonic() + 60,
+        token_file=tmp_path / "grant",
+    )
+    args = [
+        "scope-grant", "ses_scope_test",
+        "--campaign-id", "cmp_scope_test",
+        "--repository", "mncs-control-mcp",
+        "--expected-authority-revision", "a" * 64,
+        "--approval-reference", approval,
+    ]
+
+    assert server._translate_argv(args, environment, grant) == args
+    for changed in (
+        args[:-1] + ["user-approval:other"],
+        args[:3] + ["cmp_other"] + args[4:],
+        args[:5] + ["mncs-language"] + args[6:],
+    ):
+        with pytest.raises(ControlError) as raised:
+            server._translate_argv(changed, environment, grant)
+        assert raised.value.code == "ENVIRONMENT_AUTHORITY_DENIED"
+
+    authorized_sessions: list[str] = []
+    monkeypatch.setattr(server, "_grant", lambda _request, _peer: grant)
+    monkeypatch.setattr(
+        server, "_authorize_session", lambda session_id, _principal:
+        authorized_sessions.append(session_id),
+    )
+    monkeypatch.setattr(
+        environment_rpc_module.subprocess, "run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=0, stdout="{}\n", stderr="",
+        ),
+    )
+    response = server._dispatch_once(
+        {
+            "cwd": "/workspace/mncs-environment",
+            "argv": args,
+            "request_id": "req_scope_grant_dispatch_test",
+        },
+        peer_uid=grant.uid,
+    )
+    assert response["ok"] is True
+    assert authorized_sessions == ["ses_scope_test"]
+
+    workspace_grant = _GrantRecord(
+        **{**grant.__dict__, "scope": "workspace", "host_root": workspace},
+    )
+    with pytest.raises(ControlError) as raised:
+        server._translate_argv(args, environment, workspace_grant)
+    assert raised.value.code == "ENVIRONMENT_AUTHORITY_DENIED"
+
+    linked_target = workspace / "mncs-other-control"
+    linked_target.symlink_to(target, target_is_directory=True)
+    server.config.environment_scope_grants["cmp_scope_test"] = {
+        "mncs-other-control": approval,
+    }
+    linked_args = args[:5] + ["mncs-other-control"] + args[6:]
+    with pytest.raises(ControlError) as raised:
+        server._translate_argv(linked_args, environment, grant)
+    assert raised.value.code == "ENVIRONMENT_WORKSPACE_ESCAPE"
+
+
 def test_rpc_accepts_bounded_campaign_metadata_and_rejects_oversized_arguments(
     tmp_path: Path,
 ) -> None:

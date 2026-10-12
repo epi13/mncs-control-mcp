@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -193,6 +194,8 @@ class ControlConfig:
     environment_rpc_socket: Path = field(
         default_factory=lambda: Path.home() / ".local" / "state" / "mncs-control-mcp" / "environment-rpc" / "environment.sock"
     )
+    environment_scope_grants: dict[str, dict[str, str]] = field(default_factory=dict)
+    environment_scope_grants_path: Path | None = None
 
     @property
     def environment_path(self) -> Path:
@@ -335,6 +338,58 @@ def load_config(path: Path | str | None = None) -> ControlConfig:
             "integration.commons_service_timeout_seconds must be between 0.1 and 30",
         )
 
+    scope_grants_value = integration.get("environment_scope_grants_file")
+    scope_grants_path = _path(scope_grants_value) if scope_grants_value else None
+    environment_scope_grants: dict[str, dict[str, str]] = {}
+    if scope_grants_path is not None and scope_grants_path.is_symlink():
+        raise ControlError(
+            "CONFIG_INVALID", "Environment scope grants file must not be a symbolic link"
+        )
+    if scope_grants_path is not None and scope_grants_path.exists():
+        try:
+            metadata = scope_grants_path.stat()
+        except OSError as exc:
+            raise ControlError(
+                "CONFIG_READ", f"cannot inspect Environment scope grants: {exc}"
+            ) from exc
+        if (not scope_grants_path.is_file() or metadata.st_uid != os.getuid()
+                or metadata.st_mode & 0o077 or metadata.st_size > 256 * 1024):
+            raise ControlError(
+                "CONFIG_INVALID",
+                "Environment scope grants file must be a private, user-owned regular file under 256 KiB",
+            )
+        try:
+            with scope_grants_path.open("rb") as handle:
+                scope_grants_raw = tomllib.load(handle)
+        except (OSError, tomllib.TOMLDecodeError) as exc:
+            raise ControlError(
+                "CONFIG_READ", f"cannot read Environment scope grants: {exc}"
+            ) from exc
+        campaigns = scope_grants_raw.get("campaigns", {})
+        if not isinstance(campaigns, dict):
+            raise ControlError(
+                "CONFIG_INVALID", "scope grant campaigns must be a table"
+            )
+        for campaign_id, repositories in campaigns.items():
+            if (not isinstance(campaign_id, str)
+                    or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,159}", campaign_id)
+                    or not isinstance(repositories, dict) or not repositories):
+                raise ControlError(
+                    "CONFIG_INVALID", "Environment scope grant campaign entries are invalid"
+                )
+            validated: dict[str, str] = {}
+            for repository, approval_reference in repositories.items():
+                if (not isinstance(repository, str)
+                        or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,119}", repository)
+                        or not isinstance(approval_reference, str)
+                        or not approval_reference.strip() or len(approval_reference) > 256
+                        or "\x00" in approval_reference):
+                    raise ControlError(
+                        "CONFIG_INVALID", "Environment scope grant repository entries are invalid"
+                    )
+                validated[repository] = approval_reference
+            environment_scope_grants[campaign_id] = validated
+
     harness_value = integration.get("harness_config")
     forge_executable = integration.get("forge_mcp_executable")
     forge_config = integration.get("forge_mcp_config")
@@ -436,6 +491,8 @@ def load_config(path: Path | str | None = None) -> ControlConfig:
             "environment_rpc_socket",
             Path.home() / ".local" / "state" / "mncs-control-mcp" / "environment-rpc" / "environment.sock",
         ),
+        environment_scope_grants=environment_scope_grants,
+        environment_scope_grants_path=scope_grants_path,
         fabric_execution_mode=fabric_execution_mode,
         fabric_controller_id=str(integration.get("fabric_controller_id", "mncs-harness")),
         forge_config_name=str(integration.get("forge_config_name", "mncs-forge.toml")),

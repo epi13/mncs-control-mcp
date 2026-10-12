@@ -107,6 +107,50 @@ fixture = "fixture"
     assert config.max_concurrent_jobs == 2
 
 
+def test_configuration_loads_owner_scoped_environment_grant_file(
+    tmp_path: Path,
+) -> None:
+    approval_file = tmp_path / "scope-grants.toml"
+    approval_file.write_text(
+        "[campaigns.cmp_scope_test]\n"
+        '"mncs-control-mcp" = "user-approval:scope-test"\n',
+        encoding="utf-8",
+    )
+    approval_file.chmod(0o600)
+    config_path = tmp_path / "control.toml"
+    config_path.write_text(
+        "[workspace]\n"
+        f"root = {str(tmp_path / 'projects')!r}\n"
+        "[integration]\n"
+        f"environment_scope_grants_file = {str(approval_file)!r}\n",
+        encoding="utf-8",
+    )
+
+    config = load_config(config_path)
+
+    assert config.environment_scope_grants_path == approval_file.resolve()
+    assert config.environment_scope_grants == {
+        "cmp_scope_test": {"mncs-control-mcp": "user-approval:scope-test"},
+    }
+
+
+def test_configuration_rejects_non_private_environment_grant_file(
+    tmp_path: Path,
+) -> None:
+    approval_file = tmp_path / "scope-grants.toml"
+    approval_file.write_text("[campaigns]\n", encoding="utf-8")
+    approval_file.chmod(0o644)
+    config_path = tmp_path / "control.toml"
+    config_path.write_text(
+        "[integration]\n"
+        f"environment_scope_grants_file = {str(approval_file)!r}\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ControlError, match="private, user-owned regular file"):
+        load_config(config_path)
+
+
 def test_new_workspace_environment_takes_precedence(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

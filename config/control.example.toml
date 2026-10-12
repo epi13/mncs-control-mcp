@@ -80,6 +80,8 @@ forge_config_name = "mncs-forge.toml"
 # checkout's .venv entry point and the migrated reference-studies config.
 # forge_mcp_executable = "~/Documents/Projects/mncs-forge/scripts/codex-mcp"
 # forge_mcp_config = "~/Documents/Projects/mncs-reference-studies/mncs-forge.toml"
+# Optional private, owner-approved campaign/repository scope grants:
+# environment_scope_grants_file = "~/.config/mncs-control-mcp/environment-scope-grants.toml"
 
 [journal]
 # Bounded local evidence projection for the Atlas Development Journal.

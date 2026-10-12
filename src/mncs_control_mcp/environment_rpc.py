@@ -12,6 +12,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import secrets
 import socket
 import stat
@@ -33,7 +34,7 @@ MAX_ARGUMENT_BYTES = 32 * 1024
 ALLOWED_COMMANDS = frozenset({
     "enter", "inspect", "context", "resume", "health", "capabilities", "checkpoint", "handoff", "accept", "claims",
     "complete", "store",
-    "retire", "continuation",
+    "retire", "continuation", "scope-grant",
 })
 RPC_SANDBOX_SOCKET = "/run/mncs-environment-rpc/environment.sock"
 LOGGER = logging.getLogger(__name__)
@@ -532,6 +533,9 @@ class EnvironmentRPCServer:
                 )
         translated = list(argv)
 
+        if command == "scope-grant":
+            self._authorize_scope_grant_argv(translated, cwd, record)
+
         def map_path_option(option: str) -> None:
             index = 0
             while index < len(translated):
@@ -739,6 +743,110 @@ class EnvironmentRPCServer:
                     )
                 index += 1
         return translated
+
+    def _authorize_scope_grant_argv(
+        self, argv: list[str], cwd: Path, record: _GrantRecord,
+    ) -> None:
+        """Gate one Environment session's repository-scope admission.
+
+        The Control-owned approval file grants exactly a campaign/repository
+        pair. The operation is callable only from the Environment project
+        sandbox and can name only one immediate configured workspace checkout.
+        Environment performs the independent session, rights, Git, claim, and
+        Store-CAS checks before recording the immutable grant.
+        """
+        required = {
+            "--campaign-id", "--repository", "--expected-authority-revision",
+            "--approval-reference",
+        }
+        values: dict[str, str] = {}
+        index = 2  # command plus the positional Environment session identity
+        if len(argv) < 2 or not re.fullmatch(r"ses_[A-Za-z0-9_-]{1,120}", argv[1]):
+            raise ControlError(
+                "ENVIRONMENT_RPC_INVALID_REQUEST",
+                "scope admission requires one Environment session identity",
+            )
+        while index < len(argv):
+            item = argv[index]
+            if item.startswith("--") and "=" in item:
+                option, value = item.split("=", 1)
+            elif item in required and index + 1 < len(argv):
+                option, value = item, argv[index + 1]
+                index += 1
+            else:
+                raise ControlError(
+                    "ENVIRONMENT_RPC_INVALID_REQUEST",
+                    "scope admission arguments are incomplete or contain unsupported options",
+                )
+            if option not in required or option in values or not value or "\x00" in value:
+                raise ControlError(
+                    "ENVIRONMENT_RPC_INVALID_REQUEST",
+                    "scope admission arguments are invalid or repeated",
+                )
+            values[option] = value
+            index += 1
+        if set(values) != required:
+            raise ControlError(
+                "ENVIRONMENT_RPC_INVALID_REQUEST",
+                "scope admission requires campaign, repository, authority revision, and approval reference",
+            )
+
+        environment_name = self.config.repositories.get(
+            "environment", "mncs-environment"
+        )
+        workspace_root = Path(self.config.workspace_root).expanduser().resolve(strict=True)
+        environment_root = workspace_root / environment_name
+        project_root = record.host_root.resolve(strict=True)
+        working_directory = cwd.resolve(strict=True)
+        if (record.scope != "project" or project_root != environment_root
+                or (working_directory != project_root
+                    and project_root not in working_directory.parents)):
+            raise ControlError(
+                "ENVIRONMENT_AUTHORITY_DENIED",
+                "repository scope admission is available only from the Environment project grant",
+            )
+
+        campaign_id = values["--campaign-id"]
+        repository_name = values["--repository"]
+        authority_revision = values["--expected-authority-revision"]
+        approval_reference = values["--approval-reference"]
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,159}", campaign_id):
+            raise ControlError(
+                "ENVIRONMENT_RPC_INVALID_REQUEST", "scope admission campaign identity is invalid"
+            )
+        if not re.fullmatch(r"[0-9a-f]{64}", authority_revision):
+            raise ControlError(
+                "ENVIRONMENT_RPC_INVALID_REQUEST", "scope admission authority revision is invalid"
+            )
+        approved = self.config.environment_scope_grants.get(campaign_id, {})
+        if approved.get(repository_name) != approval_reference:
+            raise ControlError(
+                "ENVIRONMENT_AUTHORITY_DENIED",
+                "Control has no exact owner-approved campaign/repository scope grant",
+                details={"campaign_id": campaign_id, "repository": repository_name},
+            )
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,119}", repository_name):
+            raise ControlError(
+                "ENVIRONMENT_RPC_INVALID_REQUEST", "scope admission repository identity is invalid"
+            )
+        target = workspace_root / repository_name
+        if target.is_symlink():
+            raise ControlError(
+                "ENVIRONMENT_WORKSPACE_ESCAPE", "scope admission target cannot be a symbolic link"
+            )
+        try:
+            resolved_target = target.resolve(strict=True)
+        except OSError as error:
+            raise ControlError(
+                "ENVIRONMENT_WORKSPACE_MISSING", "scope admission target is unavailable"
+            ) from error
+        if (resolved_target.parent != workspace_root or not resolved_target.is_dir()
+                or not ((resolved_target / ".git").is_dir()
+                        or (resolved_target / ".git").is_file())):
+            raise ControlError(
+                "ENVIRONMENT_WORKSPACE_ESCAPE",
+                "scope admission target must be an immediate configured Git checkout",
+            )
 
     def _authorize_session(self, session_id: str, principal_id: str) -> None:
         pkg = self.environment_service._pkg()
@@ -959,16 +1067,19 @@ class EnvironmentRPCServer:
                 argv[argv.index("--repository") + 1]
             )
             argv.extend(["--execution-root", str(repository)])
-        if command in {"inspect", "context", "resume", "health", "capabilities", "checkpoint", "handoff", "accept", "claims", "complete", "retire", "store"}:
+        if command in {"inspect", "context", "resume", "health", "capabilities", "checkpoint", "handoff", "accept", "claims", "complete", "retire", "store", "scope-grant"}:
             try:
                 command_index = argv.index(command)
-                positional = (
-                    self._accept_positionals(argv, command_index)
-                    if command == "accept"
-                    else [item for item in argv[command_index + 1:]
-                          if not item.startswith("-")]
-                )
-                session_id = positional[0]
+                if command == "scope-grant":
+                    session_id = argv[command_index + 1]
+                else:
+                    positional = (
+                        self._accept_positionals(argv, command_index)
+                        if command == "accept"
+                        else [item for item in argv[command_index + 1:]
+                              if not item.startswith("-")]
+                    )
+                    session_id = positional[0]
             except (StopIteration, ValueError, IndexError) as error:
                 raise ControlError("ENVIRONMENT_RPC_INVALID_REQUEST", "session identity is required") from error
             if command == "accept":
