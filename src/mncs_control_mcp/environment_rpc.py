@@ -33,9 +33,10 @@ MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 MAX_ARGUMENT_BYTES = 48 * 1024
 ALLOWED_COMMANDS = frozenset({
     "enter", "inspect", "context", "resume", "health", "capabilities", "checkpoint", "handoff", "accept", "claims",
-    "complete", "store", "invoke",
+    "complete", "store", "invoke", "campaign-state",
     "retire", "continuation", "scope-grant",
 })
+MAX_CAMPAIGN_EVIDENCE_PAGE = 128
 ALLOWED_INVOKE_CAPABILITIES = frozenset({
     "mncs-environment:ambient-projection-coherence",
     "mncs-environment:projection-evidence-inspection",
@@ -536,6 +537,8 @@ class EnvironmentRPCServer:
                         "store", "--session", "<authorized-session>", "--verify",
                     ]},
                 )
+        if command == "campaign-state":
+            self._authorize_campaign_state_argv(argv, record)
         if command == "invoke":
             if (len(argv) < 3
                     or not re.fullmatch(r"ses_[A-Za-z0-9_-]{1,120}", argv[1])):
@@ -789,6 +792,58 @@ class EnvironmentRPCServer:
                     )
                 index += 1
         return translated
+
+    def _authorize_campaign_state_argv(
+        self, argv: list[str], record: _GrantRecord,
+    ) -> None:
+        """Expose only a bounded page read for the authenticated Environment session."""
+        if (len(argv) < 2
+                or not re.fullmatch(r"ses_[A-Za-z0-9_-]{1,120}", argv[1])):
+            raise ControlError(
+                "ENVIRONMENT_RPC_INVALID_REQUEST",
+                "campaign-state requires one Environment session identity",
+            )
+        environment_project = self.config.repositories.get(
+            "environment", "mncs-environment"
+        )
+        if (record.scope != "project"
+                or self._project_repository(record) != environment_project):
+            raise ControlError(
+                "ENVIRONMENT_AUTHORITY_DENIED",
+                "campaign-state paging is available only through the Environment project grant",
+                details={"required_project": environment_project},
+            )
+
+        seen: set[str] = set()
+        index = 2
+        while index < len(argv):
+            option = argv[index]
+            if option not in {"--evidence-offset", "--evidence-limit"}:
+                raise ControlError(
+                    "ENVIRONMENT_AUTHORITY_DENIED",
+                    "campaign-state exposes only bounded evidence page arguments",
+                    details={"allowed": ["--evidence-offset", "--evidence-limit"]},
+                )
+            key = option.removeprefix("--evidence-")
+            if key in seen or index + 1 >= len(argv):
+                raise ControlError(
+                    "ENVIRONMENT_RPC_INVALID_REQUEST",
+                    f"{option} must be supplied once with an integer value",
+                )
+            raw_value = argv[index + 1]
+            if not re.fullmatch(r"[0-9]{1,10}", raw_value):
+                raise ControlError(
+                    "ENVIRONMENT_RPC_INVALID_REQUEST",
+                    f"{option} must be a nonnegative integer",
+                )
+            value = int(raw_value)
+            if key == "limit" and not 1 <= value <= MAX_CAMPAIGN_EVIDENCE_PAGE:
+                raise ControlError(
+                    "ENVIRONMENT_RPC_INVALID_REQUEST",
+                    f"--evidence-limit must be between 1 and {MAX_CAMPAIGN_EVIDENCE_PAGE}",
+                )
+            seen.add(key)
+            index += 2
 
     def _authorize_scope_grant_argv(
         self, argv: list[str], cwd: Path, record: _GrantRecord,
@@ -1113,7 +1168,7 @@ class EnvironmentRPCServer:
                 argv[argv.index("--repository") + 1]
             )
             argv.extend(["--execution-root", str(repository)])
-        if command in {"inspect", "context", "resume", "health", "capabilities", "checkpoint", "handoff", "accept", "claims", "complete", "retire", "store", "scope-grant", "invoke"}:
+        if command in {"inspect", "context", "resume", "health", "capabilities", "checkpoint", "handoff", "accept", "claims", "complete", "retire", "store", "scope-grant", "invoke", "campaign-state"}:
             try:
                 command_index = argv.index(command)
                 if command == "scope-grant":
