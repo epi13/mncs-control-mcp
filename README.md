@@ -277,8 +277,13 @@ Both continuation surfaces accept an optional `task_identity` (or
 `--task-identity`) to resolve an existing Environment-owned task-selector
 binding for the authenticated principal and exact Environment definition and
 workspace. An unbound selector returns project campaign choices without
-selecting or adopting one; binding an existing campaign remains an explicit
-Environment entry operation.
+selecting or adopting one. Binding an existing session with
+`env_campaign_task_bind` (or protected CLI `mncs-env campaign-bind`) requires
+an exact campaign, session, and task identity; Environment derives selector
+scope from the saved session, and Control verifies the authenticated principal
+and project link. A resolved binding selects that exact saved context even when
+the project default has changed; sibling contexts remain visible, and project
+claims and lifecycle checks still apply.
 
 The Journal Context surface consists of `journal_context_status`,
 `journal_context_collect`, and `journal_context_get`. It creates an immutable,

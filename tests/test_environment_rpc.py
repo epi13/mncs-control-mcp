@@ -2649,3 +2649,106 @@ def test_campaign_task_bind_rpc_selects_one_exact_project_session(tmp_path: Path
     }, peer_uid=0)
     assert malformed["error"]["code"] == "ENVIRONMENT_RPC_INVALID_REQUEST"
     assert len(calls) == 1
+
+
+def test_task_selector_selects_saved_project_context_over_current_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "projects"
+    project = workspace / "mncs-control-mcp"
+    project.mkdir(parents=True)
+    server = EnvironmentRPCServer(
+        ControlConfig(
+            workspace_root=workspace,
+            sandbox_home=tmp_path / "home",
+            environment_rpc_socket=tmp_path / "rpc" / "environment.sock",
+        ),
+        environment_service=SimpleNamespace(state_dir=tmp_path / "state"),
+        policy=object(),
+    )
+    record = _GrantRecord(
+        grant_id="task-selector-context-grant",
+        principal_id="principal-test",
+        host_root=project,
+        sandbox_root="/workspace/mncs-control-mcp",
+        scope="project",
+        uid=0,
+        expires_at=time.monotonic() + 60,
+        token_file=tmp_path / "grant",
+    )
+    monkeypatch.setattr(
+        server,
+        "_project_environment_identity",
+        lambda *_args: (_ for _ in ()).throw(
+            AssertionError("resolved task selector must take precedence over the current default")
+        ),
+    )
+    capsule = {
+        "schema_version": "mncs.control.campaign-continuation/1",
+        "repository": "mncs-control-mcp",
+        "status": "context-conflict",
+        "campaign_id": "cmp_context_precedence",
+        "task_selector": {
+            "status": "resolved",
+            "campaign_id": "cmp_context_precedence",
+            "session_id": "ses_saved_context",
+            "definition_id": "env_saved_context",
+            "workspace_root": str(workspace),
+        },
+        "continuations_count": 3,
+        "continuations_truncated": False,
+        "continuations": [
+            {
+                "session_id": "ses_saved_context",
+                "definition_id": "env_saved_context",
+                "workspace_root": str(workspace),
+                "lifecycle": "active",
+                "project_reference": {"status": "linked"},
+                "claim_ids": [],
+                "claims": [],
+            },
+            {
+                "session_id": "ses_saved_context_duplicate",
+                "definition_id": "env_saved_context",
+                "workspace_root": str(workspace),
+                "lifecycle": "active",
+                "project_reference": {"status": "linked"},
+                "claim_ids": [],
+                "claims": [],
+            },
+            {
+                "session_id": "ses_current_default",
+                "definition_id": "env_current_default",
+                "workspace_root": str(workspace),
+                "lifecycle": "active",
+                "project_reference": {"status": "linked"},
+                "claim_ids": [],
+                "claims": [],
+            },
+        ],
+    }
+
+    selected = server._select_project_campaign_context(
+        capsule, record, "mncs-control-mcp",
+    )
+    assert selected["status"] == "ready"
+    assert selected["selected_session_id"] == "ses_saved_context"
+    assert selected["selection_basis"] == "authenticated-task-selector"
+    assert selected["context_conflict_status"] == "context-conflict"
+    assert selected["unselected_sessions_count"] == 2
+
+    server.environment_service = SimpleNamespace(
+        authenticated_principal_id="principal-test",
+        campaign_continuation=lambda *_args: json.loads(json.dumps(capsule)),
+    )
+    response = server._campaign_continuation(
+        record,
+        ["continuation", "--task-identity", "stable-task-selector"],
+        "req_task_selector_context_route",
+    )
+    assert response["ok"] is True
+    projected = json.loads(response["result"]["stdout"])
+    assert projected["status"] == "ready"
+    assert projected["selected_session_id"] == "ses_saved_context"
+    assert projected["selection_basis"] == "authenticated-task-selector"
+    assert record.bound_session_id == "ses_saved_context"

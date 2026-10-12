@@ -1960,6 +1960,25 @@ class EnvironmentRPCServer:
         if record.scope != "project":
             return capsule
         selector = project_context
+        task_selector = capsule.get("task_selector")
+        task_selector_session_id = None
+        selection_basis = "authenticated-project-environment-definition"
+        if selector is None and isinstance(task_selector, dict):
+            task_definition = task_selector.get("definition_id")
+            task_workspace = task_selector.get("workspace_root")
+            candidate_session_id = task_selector.get("session_id")
+            if (
+                task_selector.get("status") == "resolved"
+                and isinstance(task_definition, str)
+                and task_definition.startswith("env_")
+                and isinstance(task_workspace, str)
+                and task_workspace
+                and isinstance(candidate_session_id, str)
+                and re.fullmatch(r"ses_[A-Za-z0-9_-]{1,120}", candidate_session_id)
+            ):
+                selector = (task_definition, task_workspace)
+                task_selector_session_id = candidate_session_id
+                selection_basis = "authenticated-task-selector"
         if selector is None and derive_project_context:
             selector = self._project_environment_identity(record, repository)
         if selector is None:
@@ -1990,6 +2009,11 @@ class EnvironmentRPCServer:
             if row.get("definition_id") == definition_id
             and row.get("workspace_root") == workspace_root
         ]
+        if task_selector_session_id is not None:
+            exact_context_rows = [
+                row for row in exact_context_rows
+                if row.get("session_id") == task_selector_session_id
+            ]
         if not exact_context_rows:
             capsule["project_selection"] = {
                 "status": "unmatched",
@@ -2116,7 +2140,7 @@ class EnvironmentRPCServer:
             "definition_id": definition_id,
             "workspace_root": workspace_root,
         }
-        capsule["selection_basis"] = "authenticated-project-environment-definition"
+        capsule["selection_basis"] = selection_basis
         capsule["unselected_contexts"] = [
             {
                 "definition_id": context[0] or None,
@@ -2336,8 +2360,10 @@ class EnvironmentRPCServer:
                 "reconcile the task-selector target with the project's exact Environment session; Control did not select either session"
             )
         if (capsule.get("status") == "ready"
-                and capsule.get("selection_basis")
-                == "authenticated-project-environment-definition"
+                and capsule.get("selection_basis") in {
+                    "authenticated-project-environment-definition",
+                    "authenticated-task-selector",
+                }
                 and isinstance(selected_session, str)
                 and re.fullmatch(r"ses_[A-Za-z0-9_-]{1,120}", selected_session)):
             record.bound_session_id = selected_session
