@@ -1,0 +1,64 @@
+{
+  "continuation": {
+    "campaign_id": "cmp_mncs_continuity_20261010",
+    "fresh_protected_process": true,
+    "operation": "continuation --task-identity <durable-task-key>",
+    "resume_result": {
+      "lifecycle": "active",
+      "session_id": "ses_7226fbcfe65820f7"
+    },
+    "selected_environment_definition_id": "env_f31ee034e8e1fdcb",
+    "selected_session_id": "ses_7226fbcfe65820f7",
+    "selection_basis": "authenticated-task-selector",
+    "status": "ready",
+    "task_selector_status": "resolved",
+    "unselected_same_campaign_sessions": 1
+  },
+  "environment_implementation_commit": "ca72a41268442d371e75ba043c218a40e9a192ea",
+  "identity": "ev_control_project_task_selector_continuity_20261012",
+  "implementation_commits": [
+    "57b9b7dc0ee682d17fa8d88490f5159bbe99df9c",
+    "5fcf13a4655d4d34ea3558dfd543d746d1b73688"
+  ],
+  "limitations": [
+    "The resolved selector selects the exact saved definition and session while retaining other same-campaign contexts; competing project claims continue to block selection.",
+    "This proves canonical task-binding publication and protected fresh-process continuation, not owner-service restart recovery or claim-transfer crash recovery."
+  ],
+  "owner": "mncs-control-mcp",
+  "ownership": {
+    "claim_transfer_performed": false,
+    "compiler_and_forge_repositories_touched": false,
+    "duplicate_environment_context_adopted": false
+  },
+  "persistence_boundary": {
+    "canonical_store_path_directly_writable_by_caller": false,
+    "canonical_store_path_visible_to_caller": false,
+    "owner_publication_and_later_readback": "succeeded",
+    "sandbox_backend": "bwrap",
+    "transport": "authenticated Environment RPC"
+  },
+  "publication": {
+    "authority_effect": "lookup-only",
+    "campaign_id": "cmp_mncs_continuity_20261010",
+    "operation": "campaign-bind",
+    "project_grant": "mncs-control-mcp",
+    "project_scope_basis": [
+      "campaign.repository_refs",
+      "snapshot.selected_checkouts",
+      "snapshot.repo_facts",
+      "active_claim.repository"
+    ],
+    "request_id": "req_3d20434c93058392ebe6b2bfc242bd9abc8877fb",
+    "result": "bound",
+    "selector_identity": "tsel_920b2f0196bbc4f7d12e1a0926f8e8d944178948580e33ff8d3d48ba95144446",
+    "session_id": "ses_7226fbcfe65820f7"
+  },
+  "recorded_at": "2026-10-12T21:49:47+00:00",
+  "schema_version": "mncs.control.project-task-selector-continuity/1",
+  "verification": {
+    "environment_service_tests": "3 passed for project-link, stable request identity, and fresh Environment service lookup",
+    "mcp_schema_test": "1 passed",
+    "rpc_tests": "2 passed for exact-session binding and task-selector context precedence",
+    "tool_manifest_tests": "17 passed"
+  }
+}
