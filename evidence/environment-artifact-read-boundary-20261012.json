@@ -1,0 +1,78 @@
+{
+  "schema_version": "mncs.control.environment-artifact-read-boundary/1",
+  "evidence_id": "ev_control_environment_artifact_read_boundary_20261012",
+  "owner": "mncs-control-mcp",
+  "campaign_id": "cmp_mncs_continuity_20261010",
+  "session_id": "ses_7226fbcfe65820f7",
+  "source_identity": {
+    "repository": "mncs-control-mcp",
+    "branch": "main",
+    "commit": "12e11253849570159cf0e0da229c288ec7ec9ede",
+    "remote_ref": "origin/main"
+  },
+  "integration_contract": {
+    "transport_owner": "mncs-control-mcp",
+    "domain_authority_owner": "mncs-environment",
+    "persistence_owner": "mncs-store",
+    "grant_lifetime": "one protected project execution",
+    "session_selection": "authenticated Environment continuation capsule with ready status and project selection basis",
+    "read_scope": {
+      "project": "mncs-environment",
+      "capability": "mncs-system-monitor:system-resource-sample",
+      "binding_id_format": "cap_ plus 16 lowercase hexadecimal characters",
+      "file": "system-resource-sample.json"
+    },
+    "authorization": [
+      "selected session must match the continuation result bound to the current grant",
+      "Environment rechecks the current session principal and read-only binding authority",
+      "cached artifact reads recheck current grant selection and authenticated session principal"
+    ],
+    "response_bound": "one file up to 1 MiB; Control preserves the base64 response under its 2 MiB RPC frame limit",
+    "filesystem_access": "sandbox receives no Store path or file descriptor"
+  },
+  "verification": {
+    "rpc_tests": {
+      "command": ".venv/bin/pytest -q tests/test_environment_rpc.py",
+      "result": "32 passed",
+      "coverage": [
+        "artifact read denied before session selection",
+        "foreign session and wrong capability, binding syntax, or path denied",
+        "selected session is bound to the grant",
+        "reselection fences replay of an earlier session artifact response",
+        "bounded base64 response larger than the default stdout limit is preserved"
+      ]
+    },
+    "lint_and_diff": "ruff checks and git diff --check passed",
+    "service": {
+      "unit": "mncs-control-tunnel.service",
+      "restarted_after_delivery": true,
+      "state_at_live_read": "active",
+      "sandbox_backend": "bwrap",
+      "protect_home": "read-only",
+      "protect_system": "strict",
+      "no_new_privileges": true,
+      "canonical_store_write_path": "host Control service only, as configured by the authorized ReadWritePaths entry"
+    },
+    "environment_owner_evidence": {
+      "repository": "mncs-environment",
+      "path": "evidence/protected-store-artifact-read-20261012.json",
+      "commit": "f1c29db0c4589c9b890da51a56fe21ee02645d56",
+      "sha256": "a9ce5dd5f87bcaec347822b00bd2b3a830f12f93fc137e9a8e264600ef0a3069"
+    }
+  },
+  "readiness": {
+    "narrow_authorized_artifact_read": "implemented, tested, restarted, and proven through protected Environment RPC",
+    "general_store_path_access": "not exposed",
+    "full_compiler_resource_feedback_loop": "pending a real Forge execution receipt and subsequent Automation decision",
+    "overall_campaign": "partial"
+  },
+  "protected_claims": [
+    {"repository": "mncs-compiler", "claim_id": "claim:mncs-compiler", "version": 63, "owner_session": "ses_d2537acde8b8a875", "candidate": "2b6f381", "status": "held; no work performed"},
+    {"repository": "mncs-forge", "claim_id": "claim:mncs-forge", "version": 28, "owner_session": "ses_95c3aa35b8544042", "candidate": "608334b", "status": "held; no work performed"},
+    {"repository": "mncs-reference-studies", "claim_id": "claim:mncs-reference-studies", "version": 7, "owner_session": "ses_95c3aa35b8544042", "status": "held; no work performed"}
+  ],
+  "next_work": [
+    "Wait for the user's promised Environment handoffs before testing, modifying, or merging Compiler and Forge candidates.",
+    "Use the verified Store artifact read path to feed the future Forge receipt and Monitor observation integration."
+  ]
+}
