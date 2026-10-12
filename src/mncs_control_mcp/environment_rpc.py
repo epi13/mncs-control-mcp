@@ -39,6 +39,7 @@ ALLOWED_COMMANDS = frozenset({
 ALLOWED_INVOKE_CAPABILITIES = frozenset({
     "mncs-environment:ambient-projection-coherence",
     "mncs-environment:projection-evidence-inspection",
+    "mncs-environment:campaign-state-inspection",
 })
 RPC_SANDBOX_SOCKET = "/run/mncs-environment-rpc/environment.sock"
 LOGGER = logging.getLogger(__name__)

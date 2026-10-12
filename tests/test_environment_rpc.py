@@ -1202,6 +1202,8 @@ def test_project_rpc_exposes_session_authorized_read_operations_and_reports_unkn
         stdout = (
             '{"providers":[{"provider_id":"forge","status":"unknown"}]}\n'
             if "capabilities" in argv else
+            '{"evidence_count":3,"delivery":{"status":"delivered"}}\n'
+            if any("campaign-state-inspection" in arg for arg in argv) else
             '{"capability":"mncs-environment:ambient-projection-coherence",'
             '"status":"ok","returncode":0}\n'
             if "invoke" in argv else
@@ -1288,11 +1290,25 @@ def test_project_rpc_exposes_session_authorized_read_operations_and_reports_unkn
     assert calls[4][1]["env"]["MNCS_ENV_AUTH_PRINCIPAL_ID"] == "principal-agent"
     assert calls[4][1]["env"]["MNCS_ENV_RPC_REQUEST_ID"] == "req_project_projection_evidence_read"
 
+    campaign_state_read = server.dispatch({
+        **request,
+        "request_id": "req_project_campaign_state_read",
+        "argv": ["invoke", "ses_health",
+                 "mncs-environment:campaign-state-inspection"],
+    }, peer_uid=0)
+    assert campaign_state_read["ok"] is True
+    assert json.loads(campaign_state_read["result"]["stdout"])["evidence_count"] == 3
+    assert calls[5][0][-3:] == [
+        "invoke", "ses_health", "mncs-environment:campaign-state-inspection",
+    ]
+    assert calls[5][1]["env"]["MNCS_ENV_AUTH_PRINCIPAL_ID"] == "principal-agent"
+    assert calls[5][1]["env"]["MNCS_ENV_RPC_REQUEST_ID"] == "req_project_campaign_state_read"
+
     # A retry with the same stable identity returns the admitted result and
     # does not invoke the capability twice within one Control process.
     replay = server.dispatch(invocation_request, peer_uid=0)
     assert replay == invocation
-    assert len(calls) == 5
+    assert len(calls) == 6
 
     unsupported = server.dispatch({
         **request,
@@ -1301,7 +1317,7 @@ def test_project_rpc_exposes_session_authorized_read_operations_and_reports_unkn
     }, peer_uid=0)
     assert unsupported["error"]["code"] == "ENVIRONMENT_OPERATION_UNAVAILABLE"
     assert unsupported["error"]["details"]["status"] == "unknown"
-    assert len(calls) == 5
+    assert len(calls) == 6
 
     unbounded_invocation = server.dispatch({
         **request,
@@ -1311,7 +1327,7 @@ def test_project_rpc_exposes_session_authorized_read_operations_and_reports_unkn
                  "--cwd", "/workspace/project"],
     }, peer_uid=0)
     assert unbounded_invocation["error"]["code"] == "ENVIRONMENT_AUTHORITY_DENIED"
-    assert len(calls) == 5
+    assert len(calls) == 6
 
     other_root = tmp_path / "other"
     other_root.mkdir()
@@ -1333,7 +1349,7 @@ def test_project_rpc_exposes_session_authorized_read_operations_and_reports_unkn
         "cwd": "/workspace/other",
     }, peer_uid=0)
     assert other_project_invocation["error"]["code"] == "ENVIRONMENT_AUTHORITY_DENIED"
-    assert len(calls) == 5
+    assert len(calls) == 6
 
     snapshot["authenticated_principal_id"] = "different-principal"
     foreign_invocation = server.dispatch({
@@ -1343,7 +1359,7 @@ def test_project_rpc_exposes_session_authorized_read_operations_and_reports_unkn
                  "mncs-environment:ambient-projection-coherence"],
     }, peer_uid=0)
     assert foreign_invocation["error"]["code"] == "ENVIRONMENT_AUTHORITY_DENIED"
-    assert len(calls) == 5
+    assert len(calls) == 6
 
     foreign = server.dispatch({
         **request,
@@ -1351,7 +1367,7 @@ def test_project_rpc_exposes_session_authorized_read_operations_and_reports_unkn
         "argv": ["complete", "ses_health", "--outcome", "done"],
     }, peer_uid=0)
     assert foreign["error"]["code"] == "ENVIRONMENT_AUTHORITY_DENIED"
-    assert len(calls) == 5
+    assert len(calls) == 6
 
     unsupported = server.dispatch({
         **request,
@@ -1361,7 +1377,7 @@ def test_project_rpc_exposes_session_authorized_read_operations_and_reports_unkn
     assert unsupported["error"]["code"] == "ENVIRONMENT_OPERATION_UNAVAILABLE"
     assert unsupported["error"]["details"]["status"] == "unknown"
     assert unsupported["error"]["details"]["operation"] == "doctor"
-    assert len(calls) == 5
+    assert len(calls) == 6
 
 
 def test_store_verify_rpc_is_session_bound_and_read_only(
