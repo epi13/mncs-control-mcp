@@ -595,9 +595,40 @@ def build_server(config: ControlConfig | None = None) -> Any:
             }
         return invoke("env_status", view)  # type: ignore[return-value]
 
-    @server.tool(name="env_enter", description="Resolve an environment definition and enter or continue its durable campaign: tri-state authority, rights gate, and lifecycle to active. An explicit campaign_id selects durable campaign identity.", annotations=mutate, structured_output=True)
-    def env_enter(definition: dict[str, object], consumer: str, workspace: str | None = None, consumer_kind: str = "agent", campaign_id: str | None = None) -> dict[str, object]:
-        return invoke("env_enter", environment_sessions.enter, definition, consumer, workspace=workspace, consumer_kind=consumer_kind, campaign_id=campaign_id, audit_metadata={"consumer": consumer, "campaign_id": campaign_id})  # type: ignore[return-value]
+    @server.tool(
+        name="env_enter",
+        description=(
+            "Resolve an environment definition and enter or continue its durable "
+            "campaign. An explicit campaign_id selects durable identity; an "
+            "authenticated task_identity binds a stable task selector and keeps "
+            "ambiguous campaigns explicit."
+        ),
+        annotations=mutate,
+        structured_output=True,
+    )
+    def env_enter(
+        definition: dict[str, object],
+        consumer: str,
+        workspace: str | None = None,
+        consumer_kind: str = "agent",
+        campaign_id: str | None = None,
+        task_identity: str | None = None,
+    ) -> dict[str, object]:
+        return invoke(
+            "env_enter",
+            environment_sessions.enter,
+            definition,
+            consumer,
+            workspace=workspace,
+            consumer_kind=consumer_kind,
+            campaign_id=campaign_id,
+            task_identity=task_identity,
+            audit_metadata={
+                "consumer": consumer,
+                "campaign_id": campaign_id,
+                "task_identity_present": task_identity is not None,
+            },
+        )  # type: ignore[return-value]
 
     @server.tool(name="env_campaign_continuation", description="Discover authenticated campaign continuations for one project, or select one campaign identity. Returns persisted session facts plus a fresh, read-only Environment Git observation; duplicate sessions and campaigns remain explicit for selection.", annotations=ro, structured_output=True)
     def env_campaign_continuation(repository: str, campaign_id: str | None = None) -> dict[str, object]:

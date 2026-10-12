@@ -620,9 +620,40 @@ def test_enter_forwards_explicit_campaign_identity(tmp_path: Path) -> None:
     )
 
     assert service.enter(
-        {"name": "continuity"}, "consumer-new", campaign_id="campaign-1"
+        {"name": "continuity"}, "consumer-new", campaign_id="campaign-1",
+        task_identity="Continue MNCS Store and compiler campaign",
     ) == {"ok": True}
     assert captured["campaign_id"] == "campaign-1"
+    assert captured["task_identity"] == "Continue MNCS Store and compiler campaign"
+
+
+def test_enter_preserves_task_selector_ambiguity_details(tmp_path: Path) -> None:
+    service = EnvironmentService(_config(tmp_path))
+
+    class EntryFailure(Exception):
+        diagnostics = {
+            "code": "campaign-continuation-ambiguous",
+            "campaigns": ["campaign-a", "campaign-b"],
+            "next": "select the intended campaign identity",
+        }
+
+    def fail_entry(**_kwargs):
+        raise EntryFailure("multiple durable campaigns match this task selector")
+
+    service._pkg = lambda: SimpleNamespace(
+        entry=SimpleNamespace(enter=fail_entry)
+    )
+
+    with pytest.raises(ControlError) as raised:
+        service.enter(
+            {"name": "continuity"},
+            "consumer-new",
+            task_identity="same durable task",
+        )
+
+    assert raised.value.code == "ENVIRONMENT_ENTER_FAILED"
+    assert raised.value.details["code"] == "campaign-continuation-ambiguous"
+    assert raised.value.details["campaigns"] == ["campaign-a", "campaign-b"]
 
 
 def test_projection_evidence_reads_authenticated_session_without_mutating_it(

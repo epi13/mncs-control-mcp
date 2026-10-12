@@ -158,6 +158,7 @@ class EnvironmentService:
         workspace: str | None = None,
         consumer_kind: str = "agent",
         campaign_id: str | None = None,
+        task_identity: str | None = None,
     ) -> dict[str, Any]:
         pkg = self._pkg()
         workspace_root = self._resolve_workspace(workspace)
@@ -172,6 +173,7 @@ class EnvironmentService:
                 consumer_kind=consumer_kind,
                 authenticated_principal_id=self.authenticated_principal_id,
                 campaign_id=campaign_id,
+                task_identity=task_identity,
             )
         except ControlError:
             raise
@@ -180,7 +182,12 @@ class EnvironmentService:
                 raise ControlError("ENVIRONMENT_ENTER_DENIED", str(exc)) from exc
             if type(exc).__name__ == "AuthorityDenied":
                 raise ControlError("ENVIRONMENT_AUTHORITY_DENIED", str(exc)) from exc
-            raise ControlError("ENVIRONMENT_ENTER_FAILED", str(exc)) from exc
+            diagnostics = getattr(exc, "diagnostics", None)
+            raise ControlError(
+                "ENVIRONMENT_ENTER_FAILED",
+                str(exc),
+                details=diagnostics if isinstance(diagnostics, dict) else None,
+            ) from exc
 
     def campaign_continuation(
         self, repository: str, campaign_id: str | None = None,

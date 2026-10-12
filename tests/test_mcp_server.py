@@ -171,6 +171,9 @@ environment_rpc_socket = {str(environment_rpc_socket)!r}
         continuation_tool = next(item for item in tools if item["name"] == "env_campaign_continuation")
         assert "repository" in continuation_tool["inputSchema"]["required"]
         assert "campaign_id" not in continuation_tool["inputSchema"].get("required", [])
+        enter_tool = next(item for item in tools if item["name"] == "env_enter")
+        assert "task_identity" in enter_tool["inputSchema"]["properties"]
+        assert "task_identity" not in enter_tool["inputSchema"].get("required", [])
         projection_evidence_tool = next(
             item for item in tools if item["name"] == "env_projection_evidence"
         )
