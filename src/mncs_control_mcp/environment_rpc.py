@@ -38,6 +38,7 @@ ALLOWED_COMMANDS = frozenset({
 })
 ALLOWED_INVOKE_CAPABILITIES = frozenset({
     "mncs-environment:ambient-projection-coherence",
+    "mncs-environment:projection-evidence-inspection",
 })
 RPC_SANDBOX_SOCKET = "/run/mncs-environment-rpc/environment.sock"
 LOGGER = logging.getLogger(__name__)
@@ -556,8 +557,7 @@ class EnvironmentRPCServer:
                     "ENVIRONMENT_AUTHORITY_DENIED",
                     "Control exposes this capability only with its session-bound declared invocation",
                     details={"required": [
-                        "invoke", "<authorized-session>",
-                        "mncs-environment:ambient-projection-coherence",
+                        "invoke", "<authorized-session>", argv[2],
                     ]},
                 )
             environment_project = self.config.repositories.get(

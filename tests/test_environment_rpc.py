@@ -1274,11 +1274,25 @@ def test_project_rpc_exposes_session_authorized_read_operations_and_reports_unkn
     assert calls[3][1]["env"]["MNCS_ENV_AUTH_PRINCIPAL_ID"] == "principal-agent"
     assert calls[3][1]["env"]["MNCS_ENV_RPC_REQUEST_ID"] == "req_project_projection_invoke"
 
+    evidence_read = server.dispatch({
+        **request,
+        "request_id": "req_project_projection_evidence_read",
+        "argv": ["invoke", "ses_health",
+                 "mncs-environment:projection-evidence-inspection"],
+    }, peer_uid=0)
+    assert evidence_read["ok"] is True
+    assert json.loads(evidence_read["result"]["stdout"])["status"] == "ok"
+    assert calls[4][0][-3:] == [
+        "invoke", "ses_health", "mncs-environment:projection-evidence-inspection",
+    ]
+    assert calls[4][1]["env"]["MNCS_ENV_AUTH_PRINCIPAL_ID"] == "principal-agent"
+    assert calls[4][1]["env"]["MNCS_ENV_RPC_REQUEST_ID"] == "req_project_projection_evidence_read"
+
     # A retry with the same stable identity returns the admitted result and
     # does not invoke the capability twice within one Control process.
     replay = server.dispatch(invocation_request, peer_uid=0)
     assert replay == invocation
-    assert len(calls) == 4
+    assert len(calls) == 5
 
     unsupported = server.dispatch({
         **request,
@@ -1287,7 +1301,7 @@ def test_project_rpc_exposes_session_authorized_read_operations_and_reports_unkn
     }, peer_uid=0)
     assert unsupported["error"]["code"] == "ENVIRONMENT_OPERATION_UNAVAILABLE"
     assert unsupported["error"]["details"]["status"] == "unknown"
-    assert len(calls) == 4
+    assert len(calls) == 5
 
     unbounded_invocation = server.dispatch({
         **request,
@@ -1297,7 +1311,7 @@ def test_project_rpc_exposes_session_authorized_read_operations_and_reports_unkn
                  "--cwd", "/workspace/project"],
     }, peer_uid=0)
     assert unbounded_invocation["error"]["code"] == "ENVIRONMENT_AUTHORITY_DENIED"
-    assert len(calls) == 4
+    assert len(calls) == 5
 
     other_root = tmp_path / "other"
     other_root.mkdir()
@@ -1319,7 +1333,7 @@ def test_project_rpc_exposes_session_authorized_read_operations_and_reports_unkn
         "cwd": "/workspace/other",
     }, peer_uid=0)
     assert other_project_invocation["error"]["code"] == "ENVIRONMENT_AUTHORITY_DENIED"
-    assert len(calls) == 4
+    assert len(calls) == 5
 
     snapshot["authenticated_principal_id"] = "different-principal"
     foreign_invocation = server.dispatch({
@@ -1329,7 +1343,7 @@ def test_project_rpc_exposes_session_authorized_read_operations_and_reports_unkn
                  "mncs-environment:ambient-projection-coherence"],
     }, peer_uid=0)
     assert foreign_invocation["error"]["code"] == "ENVIRONMENT_AUTHORITY_DENIED"
-    assert len(calls) == 4
+    assert len(calls) == 5
 
     foreign = server.dispatch({
         **request,
@@ -1337,7 +1351,7 @@ def test_project_rpc_exposes_session_authorized_read_operations_and_reports_unkn
         "argv": ["complete", "ses_health", "--outcome", "done"],
     }, peer_uid=0)
     assert foreign["error"]["code"] == "ENVIRONMENT_AUTHORITY_DENIED"
-    assert len(calls) == 4
+    assert len(calls) == 5
 
     unsupported = server.dispatch({
         **request,
@@ -1347,7 +1361,7 @@ def test_project_rpc_exposes_session_authorized_read_operations_and_reports_unkn
     assert unsupported["error"]["code"] == "ENVIRONMENT_OPERATION_UNAVAILABLE"
     assert unsupported["error"]["details"]["status"] == "unknown"
     assert unsupported["error"]["details"]["operation"] == "doctor"
-    assert len(calls) == 4
+    assert len(calls) == 5
 
 
 def test_store_verify_rpc_is_session_bound_and_read_only(
