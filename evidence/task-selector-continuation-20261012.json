@@ -90,6 +90,10 @@
     "handoff_status": "none observed at that readback; revalidate before any work in either repository"
   },
   "delivery": {
-    "status": "validated; feature branch pending merge to main and push"
+    "status": "merged to main and pushed",
+    "feature_commit": "660032a9bb0fb4ecdc0eacd562e66b1fb162727d",
+    "main_revision": "660032a9bb0fb4ecdc0eacd562e66b1fb162727d",
+    "remote": "origin",
+    "merge": "fast-forward"
   }
 }
