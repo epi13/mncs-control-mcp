@@ -1,0 +1,95 @@
+{
+  "schema_version": "mncs.control.project-continuation-live-capsule/1",
+  "identity": "ev_control_project_continuation_live_capsule_20261012",
+  "recorded_at_utc": "2026-10-12T19:12:14Z",
+  "owner": "mncs-control-mcp",
+  "source": {
+    "control_repository": "mncs-control-mcp",
+    "control_commit": "4d9ae974bcb407945c74f414dd3379382e294676",
+    "environment_repository": "mncs-environment",
+    "environment_commit": "60ef3c7df12a13a3d7759b660286c91ac45a67cc"
+  },
+  "execution": {
+    "transport": "authenticated MNCS Control Environment RPC",
+    "backend": "bwrap",
+    "scope": "project",
+    "project": "mncs-control-mcp",
+    "network": false,
+    "operation": "read-only continuation lookup",
+    "request_id": "req_continuation_capsule_refresh_20261012_1910",
+    "request_process": "fresh protected terminal process",
+    "caller_supplied_session_id": false,
+    "authorization": "per-execution Control grant and Unix peer credentials",
+    "observed_window_utc": [
+      "2026-10-12T19:11:00.146913Z",
+      "2026-10-12T19:11:10.677071Z"
+    ]
+  },
+  "result": {
+    "campaign_identity": "cmp_mncs_continuity_20261010",
+    "capsule_status": "context-conflict",
+    "contexts_count": 2,
+    "continuations_count": 2,
+    "selected_project_session": {
+      "session_id": "ses_7226fbcfe65820f7",
+      "lifecycle": "active",
+      "consumer_id": "local-agent",
+      "definition_id": "env_f31ee034e8e1fdcb",
+      "project_reference": "linked",
+      "current_checkout": {
+        "repository": "mncs-control-mcp",
+        "branch": "campaign/live-project-continuation-evidence-20261012",
+        "head": "4d9ae974bcb407945c74f414dd3379382e294676",
+        "clean": true,
+        "observation": "current"
+      },
+      "claims": [
+        {
+          "claim_id": "claim:mncs-control-mcp",
+          "version": 9,
+          "status": "held",
+          "exclusive": true
+        }
+      ]
+    },
+    "other_same_campaign_context": {
+      "session_id": "ses_b4b2d283542220b0",
+      "lifecycle": "active",
+      "project_reference": "same_campaign_only",
+      "claims": [],
+      "selected": false,
+      "mutation": "none"
+    },
+    "ownership_result": "Environment recovered the existing session linked to this project. The other active same-campaign context remained unselected; this operation performed no claim adoption, ownership transfer, or handoff acceptance."
+  },
+  "current_control_status": {
+    "observed_window_utc": [
+      "2026-10-12T19:11:27Z",
+      "2026-10-12T19:12:11Z"
+    ],
+    "runtime_revision": "4d9ae974bcb407945c74f414dd3379382e294676",
+    "source_revision": "4d9ae974bcb407945c74f414dd3379382e294676",
+    "restart_required": false,
+    "environment_rpc": {
+      "provider": "mncs-control-environment-rpc",
+      "state": "ready",
+      "authorization": "per-execution-grant-and-peer-credentials",
+      "store_mutation": "owner-write-path-available"
+    },
+    "limitation": "System status does not expose the service PID or start timestamp; matching runtime/source revisions do not prove a daemon restart."
+  },
+  "related_store_boundary_evidence": {
+    "repository": "mncs-control-mcp",
+    "commit": "ccd83e2c79df9919ae7aef35954d8a50b084f5f2",
+    "path": "evidence/canonical-store-rpc-path-acceptance-20261010.json",
+    "unit_path": "deploy/systemd/mncs-control-tunnel.service",
+    "unit_sha256": "b1b56bf1eea0c16c40b48200361c98fc77d0a1dc6c35d18d2bbfc8e29064a285",
+    "includes_installed_unit_match_and_canonical_rpc_round_trip": true
+  },
+  "readiness": "partial",
+  "unresolved": [
+    "A second active same-campaign context remains unselected pending authenticated owner resolution.",
+    "No Compiler or Forge handoff was accepted by these operations.",
+    "This evidence records process continuation and live service capability, not daemon restart proof."
+  ]
+}
