@@ -22,7 +22,7 @@ import sys
 import threading
 import time
 from collections import OrderedDict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -33,7 +33,7 @@ MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 MAX_ARGUMENT_BYTES = 48 * 1024
 ALLOWED_COMMANDS = frozenset({
     "enter", "inspect", "context", "resume", "health", "capabilities", "checkpoint", "handoff", "accept", "claims",
-    "complete", "store", "invoke", "campaign-state",
+    "complete", "store", "invoke", "artifact-read", "campaign-state",
     "retire", "continuation", "scope-grant",
 })
 MAX_CAMPAIGN_EVIDENCE_PAGE = 128
@@ -65,6 +65,8 @@ class _GrantRecord:
     uid: int
     expires_at: float
     token_file: Path
+    bound_session_id: str | None = None
+    selection_lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
 
 
 class EnvironmentRPCServer:
@@ -540,6 +542,37 @@ class EnvironmentRPCServer:
                 )
         if command == "campaign-state":
             self._authorize_campaign_state_argv(argv, record)
+        if command == "artifact-read":
+            if (len(argv) != 5
+                    or not re.fullmatch(r"ses_[A-Za-z0-9_-]{1,120}", argv[1])
+                    or argv[2] != "mncs-system-monitor:system-resource-sample"
+                    or not re.fullmatch(r"cap_[0-9a-f]{64}", argv[3])
+                    or argv[4] != "system-resource-sample.json"):
+                raise ControlError(
+                    "ENVIRONMENT_AUTHORITY_DENIED",
+                    "Control exposes only the bounded System Monitor sample artifact",
+                    details={"required": [
+                        "artifact-read", "<selected-session>",
+                        "mncs-system-monitor:system-resource-sample",
+                        "<capability-binding-id>", "system-resource-sample.json",
+                    ]},
+                )
+            environment_project = self.config.repositories.get(
+                "environment", "mncs-environment"
+            )
+            if (record.scope != "project"
+                    or self._project_repository(record) != environment_project):
+                raise ControlError(
+                    "ENVIRONMENT_AUTHORITY_DENIED",
+                    "capability artifact reads require the Environment project grant",
+                    details={"required_project": environment_project},
+                )
+            if record.bound_session_id != argv[1]:
+                raise ControlError(
+                    "ENVIRONMENT_AUTHORITY_DENIED",
+                    "artifact reads require the session selected by this grant's authenticated continuation",
+                    details={"next": "run project continuation and use its selected session"},
+                )
         if command == "invoke":
             if (len(argv) < 3
                     or not re.fullmatch(r"ses_[A-Za-z0-9_-]{1,120}", argv[1])):
@@ -1065,6 +1098,19 @@ class EnvironmentRPCServer:
                         raise ControlError("ENVIRONMENT_RPC_REQUEST_CONFLICT",
                                            "request identity is already bound to another operation")
                     self._request_records.move_to_end(request_id)
+                    prior_argv = request.get("argv")
+                    if (isinstance(prior_argv, list) and prior_argv
+                            and prior_argv[0] == "artifact-read"):
+                        with grant.selection_lock:
+                            if (len(prior_argv) < 2
+                                    or grant.bound_session_id != prior_argv[1]):
+                                raise ControlError(
+                                    "ENVIRONMENT_AUTHORITY_DENIED",
+                                    "cached artifact read no longer matches this grant's selected session",
+                                    details={"next": "select the session again through Environment continuation"},
+                                )
+                            self._authorize_session(prior_argv[1], grant.principal_id)
+                            return response
                     return response
                 self._active_requests.add(request_id)
             argv = request.get("argv")
@@ -1085,7 +1131,19 @@ class EnvironmentRPCServer:
                 with self._lock:
                     lock = self._session_locks.setdefault(session_id, threading.RLock())
             try:
-                if lock is None:
+                command = argv[0] if isinstance(argv, list) and argv else None
+                selection_lock = (
+                    grant.selection_lock
+                    if command in {"continuation", "artifact-read"} else None
+                )
+                if selection_lock is not None:
+                    with selection_lock:
+                        if lock is None:
+                            response = self._dispatch_once(request, peer_uid=peer_uid)
+                        else:
+                            with lock:
+                                response = self._dispatch_once(request, peer_uid=peer_uid)
+                elif lock is None:
                     response = self._dispatch_once(request, peer_uid=peer_uid)
                 else:
                     with lock:
@@ -1169,7 +1227,7 @@ class EnvironmentRPCServer:
                 argv[argv.index("--repository") + 1]
             )
             argv.extend(["--execution-root", str(repository)])
-        if command in {"inspect", "context", "resume", "health", "capabilities", "checkpoint", "handoff", "accept", "claims", "complete", "retire", "store", "scope-grant", "invoke", "campaign-state"}:
+        if command in {"inspect", "context", "resume", "health", "capabilities", "checkpoint", "handoff", "accept", "claims", "complete", "retire", "store", "scope-grant", "invoke", "artifact-read", "campaign-state"}:
             try:
                 command_index = argv.index(command)
                 if command == "scope-grant":
@@ -1234,7 +1292,11 @@ class EnvironmentRPCServer:
         except subprocess.TimeoutExpired as error:
             raise ControlError("ENVIRONMENT_PUBLICATION_AMBIGUOUS",
                                "Environment operation exceeded its response window; retry with the same request") from error
-        output_limit = MAX_RESPONSE_BYTES // 2
+        output_limit = (
+            MAX_RESPONSE_BYTES - 64 * 1024
+            if command == "artifact-read"
+            else MAX_RESPONSE_BYTES // 2
+        )
         stdout = completed.stdout[:output_limit]
         stderr = completed.stderr[:output_limit]
         if command == "enter" and completed.returncode in {0, 5}:
@@ -1939,6 +2001,7 @@ class EnvironmentRPCServer:
         capsule is compact; callers needing every bounded evidence reference
         can use Control's typed environment.campaign-continuation capability.
         """
+        record.bound_session_id = None
         project = self._project_repository(record)
         campaign_id: str | None = None
         index = 1
@@ -1988,6 +2051,13 @@ class EnvironmentRPCServer:
         if not isinstance(capsule, dict):
             raise TypeError("Environment returned a non-object continuation capsule")
         capsule = self._select_project_campaign_context(capsule, record, project)
+        selected_session = capsule.get("selected_session_id")
+        if (capsule.get("status") == "ready"
+                and capsule.get("selection_basis")
+                == "authenticated-project-environment-definition"
+                and isinstance(selected_session, str)
+                and re.fullmatch(r"ses_[A-Za-z0-9_-]{1,120}", selected_session)):
+            record.bound_session_id = selected_session
         capsule = self._compact_entry_continuation(capsule)
         capsule["schema_version"] = "mncs.control.campaign-continuation/2"
         return {"ok": True, "result": {

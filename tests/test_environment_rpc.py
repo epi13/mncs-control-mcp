@@ -18,6 +18,7 @@ from mncs_control_mcp import environment_rpc as environment_rpc_module
 from mncs_control_mcp.config import ControlConfig
 from mncs_control_mcp.environment_rpc import (
     MAX_ARGUMENT_BYTES,
+    MAX_RESPONSE_BYTES,
     EnvironmentRPCServer,
     _GrantRecord,
 )
@@ -509,6 +510,151 @@ def test_project_grant_returns_authenticated_campaign_capsule(tmp_path: Path) ->
     }, peer_uid=0)
     assert json.loads(selected["result"]["stdout"])["campaign_id"] == "cmp_test"
     assert calls == [("mncs-environment", None), ("mncs-environment", "cmp_test")]
+
+
+def test_artifact_read_is_bound_to_environment_selected_project_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "projects"
+    project = workspace / "mncs-environment"
+    project.mkdir(parents=True)
+    authorized_sessions: list[tuple[str, str]] = []
+
+    class Environment:
+        state_dir = tmp_path / "state"
+        environment_path = tmp_path / "environment"
+        authenticated_principal_id = "principal-agent"
+
+        def campaign_continuation(self, repository: str, campaign_id: str | None = None):
+            assert repository == "mncs-environment"
+            assert campaign_id == "cmp_test"
+            return {"status": "ready", "campaign_id": campaign_id}
+
+    server = EnvironmentRPCServer(
+        ControlConfig(
+            workspace_root=workspace,
+            repositories={"environment": "mncs-environment"},
+            sandbox_home=tmp_path / "home",
+            environment_rpc_socket=tmp_path / "rpc" / "environment.sock",
+        ),
+        environment_service=Environment(),
+        policy=object(),
+    )
+    token = "artifact-read-session-bound-grant"
+    record = _GrantRecord(
+        grant_id="artifact-read-session-bound-grant",
+        principal_id="principal-agent",
+        host_root=project,
+        sandbox_root="/workspace/mncs-environment",
+        scope="project",
+        uid=0,
+        expires_at=time.monotonic() + 60,
+        token_file=tmp_path / "grant",
+    )
+    server._grants[hashlib.sha256(token.encode()).hexdigest()] = record
+    selected_session = ["ses_selected"]
+    monkeypatch.setattr(
+        server, "_select_project_campaign_context",
+        lambda _capsule, _record, _project: {
+            "status": "ready",
+            "campaign_id": "cmp_test",
+            "selected_session_id": selected_session[0],
+            "selection_basis": "authenticated-project-environment-definition",
+        },
+    )
+    monkeypatch.setattr(
+        server, "_authorize_session",
+        lambda session_id, principal_id: authorized_sessions.append(
+            (session_id, principal_id)
+        ),
+    )
+    calls = []
+    monkeypatch.setattr(
+        "mncs_control_mcp.environment_rpc.subprocess.run",
+        lambda argv, **kwargs: calls.append((argv, kwargs)) or SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps({"content_base64": "A" * 1_398_104}) + "\n",
+            stderr="",
+        ),
+    )
+    base = {
+        "grant": token,
+        "cwd": "/workspace/mncs-environment",
+    }
+    capability = "mncs-system-monitor:system-resource-sample"
+    binding_id = "cap_" + "a" * 64
+    before_selection = server.dispatch({
+        **base,
+        "request_id": "req_artifact_read_before_selection",
+        "argv": ["artifact-read", "ses_selected", capability, binding_id,
+                 "system-resource-sample.json"],
+    }, peer_uid=0)
+    assert before_selection["error"]["code"] == "ENVIRONMENT_AUTHORITY_DENIED"
+    assert not calls
+
+    continuation = server.dispatch({
+        **base,
+        "request_id": "req_artifact_read_select_session",
+        "argv": ["continuation", "--campaign-id=cmp_test"],
+    }, peer_uid=0)
+    assert continuation["ok"] is True
+    assert record.bound_session_id == "ses_selected"
+    assert authorized_sessions == []
+
+    wrong_session = server.dispatch({
+        **base,
+        "request_id": "req_artifact_read_wrong_session",
+        "argv": ["artifact-read", "ses_other", capability, binding_id,
+                 "system-resource-sample.json"],
+    }, peer_uid=0)
+    assert wrong_session["error"]["code"] == "ENVIRONMENT_AUTHORITY_DENIED"
+    assert not calls
+
+    read_result = server.dispatch({
+        **base,
+        "request_id": "req_artifact_read_selected_session",
+        "argv": ["artifact-read", "ses_selected", capability, binding_id,
+                 "system-resource-sample.json"],
+    }, peer_uid=0)
+    assert read_result["ok"] is True
+    assert read_result["result"]["exit_code"] == 0
+    assert len(read_result["result"]["stdout"].encode()) > MAX_RESPONSE_BYTES // 2
+    assert len(json.dumps(read_result, separators=(",", ":")).encode()) < MAX_RESPONSE_BYTES
+    assert calls[0][0][-5:] == [
+        "artifact-read", "ses_selected", capability, binding_id,
+        "system-resource-sample.json",
+    ]
+    assert authorized_sessions[-1] == ("ses_selected", "principal-agent")
+
+    selected_session[0] = "ses_other"
+    server.dispatch({
+        **base,
+        "request_id": "req_artifact_read_reselect_session",
+        "argv": ["continuation", "--campaign-id=cmp_test"],
+    }, peer_uid=0)
+    assert record.bound_session_id == "ses_other"
+    stale_replay = server.dispatch({
+        **base,
+        "request_id": "req_artifact_read_selected_session",
+        "argv": ["artifact-read", "ses_selected", capability, binding_id,
+                 "system-resource-sample.json"],
+    }, peer_uid=0)
+    assert stale_replay["error"]["code"] == "ENVIRONMENT_AUTHORITY_DENIED"
+
+    for index, argv in enumerate((
+        ["artifact-read", "ses_selected", capability, binding_id, "../secret"],
+        ["artifact-read", "ses_selected", "mncs-language:compile", binding_id,
+         "system-resource-sample.json"],
+        ["artifact-read", "ses_selected", capability, "not-a-binding",
+         "system-resource-sample.json"],
+    )):
+        rejected = server.dispatch({
+            **base,
+            "request_id": f"req_artifact_read_invalid_{index}",
+            "argv": argv,
+        }, peer_uid=0)
+        assert rejected["error"]["code"] == "ENVIRONMENT_AUTHORITY_DENIED"
+    assert len(calls) == 1
 
 
 def test_project_entry_returns_campaign_capsule_without_changing_entry_authority(
