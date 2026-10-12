@@ -694,6 +694,118 @@ def test_enter_preserves_task_selector_ambiguity_details(tmp_path: Path) -> None
     assert raised.value.details["campaigns"] == ["campaign-a", "campaign-b"]
 
 
+def test_campaign_continuation_resolves_only_an_authenticated_task_selector(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = EnvironmentService(_config(tmp_path))
+    service.authenticated_principal_id = "principal-task-continuation"
+    project = service._config.workspace_root / "mncs-control-mcp"
+    project.mkdir()
+    workspace_root = str(service._config.workspace_root.resolve())
+    definition_id = "env_1111111111111111"
+    task_identity = "durable-control-campaign-20261012"
+    campaign_id = "cmp_task_continuation_fixture"
+    snapshot = {
+        "session_id": "ses_task_continuation_fixture",
+        "snapshot_sequence": 7,
+        "lifecycle": "checkpointed",
+        "consumer_id": "consumer-before-restart",
+        "consumer_kind": "agent",
+        "authenticated_principal_id": service.authenticated_principal_id,
+        "provenance": {"definition_id": definition_id},
+        "workspace": {"root": workspace_root},
+        "intent": {"identity": "intent-task-continuation"},
+        "campaign": {
+            "identity": campaign_id,
+            "work_intent": {
+                "goal": "continue the protected task-selector campaign",
+                "repositories": ["mncs-control-mcp"],
+            },
+            "delivery": {"status": "partial"},
+        },
+    }
+
+    class Store:
+        def __init__(self) -> None:
+            self.evidence: dict[str, dict[str, object]] = {}
+
+        def list_sessions(self):
+            return [snapshot["session_id"]]
+
+        def load_snapshot(self, session_id: str):
+            return snapshot if session_id == snapshot["session_id"] else None
+
+        def read_claims(self):
+            return []
+
+        def read_evidence(self, evidence_id: str):
+            return self.evidence.get(evidence_id)
+
+        def write_evidence(self, evidence_id: str, record: dict[str, object]):
+            self.evidence[evidence_id] = record
+            return record
+
+        def close(self):
+            pass
+
+    class Session:
+        @staticmethod
+        def open(**_kwargs):
+            return SimpleNamespace(context=lambda: {"continuation": {}})
+
+    store = Store()
+    package = service._pkg()
+    selector = package.campaign_selector.selector_identity(
+        task_identity,
+        authenticated_principal_id=service.authenticated_principal_id,
+        definition_id=definition_id,
+        workspace_root=workspace_root,
+    )
+    package.campaign_selector.bind(
+        store,
+        selector=selector,
+        authenticated_principal_id=service.authenticated_principal_id,
+        definition_id=definition_id,
+        workspace_root=workspace_root,
+        campaign_id=campaign_id,
+        session_id=snapshot["session_id"],
+        request_id="req_task_continuation_binding",
+    )
+    monkeypatch.setattr(package.sessions, "Session", Session)
+    monkeypatch.setattr(package.claims, "active_claims", lambda _claims: {})
+    service._pkg = lambda: package
+    service._store = lambda _package: store
+
+    resumed = service.campaign_continuation(
+        "mncs-control-mcp", task_identity=task_identity,
+    )
+    assert resumed["status"] == "ready"
+    assert resumed["campaign_id"] == campaign_id
+    assert resumed["continuations"][0]["session_id"] == snapshot["session_id"]
+    assert resumed["task_selector"] == {
+        "status": "resolved",
+        "campaign_id": campaign_id,
+        "session_id": snapshot["session_id"],
+        "definition_id": definition_id,
+        "workspace_root": workspace_root,
+    }
+
+    unbound = service.campaign_continuation(
+        "mncs-control-mcp", task_identity="different-unbound-task",
+    )
+    assert unbound["status"] == "task-selector-unbound"
+    assert unbound["campaigns"] == [campaign_id]
+    assert "continuations" not in unbound
+
+    with pytest.raises(ControlError) as conflict:
+        service.campaign_continuation(
+            "mncs-control-mcp",
+            "cmp_other_task",
+            task_identity=task_identity,
+        )
+    assert conflict.value.code == "ENVIRONMENT_TASK_SELECTOR_CONFLICT"
+
+
 def test_projection_evidence_reads_authenticated_session_without_mutating_it(
     tmp_path: Path,
 ) -> None:
@@ -877,6 +989,7 @@ def test_campaign_continuation_reads_real_isolated_store(tmp_path: Path) -> None
 
     service = EnvironmentService(_config(tmp_path))
     service.authenticated_principal_id = "principal-isolated-test"
+    task_identity = "control-isolated-store-campaign-task"
     entered = service.enter(
         {
             "name": "continuity-test",
@@ -887,7 +1000,8 @@ def test_campaign_continuation_reads_real_isolated_store(tmp_path: Path) -> None
         },
         "continuity-test-consumer",
         workspace=".",
-        campaign_id="campaign-isolated-test",
+        campaign_id="cmp_isolated_test",
+        task_identity=task_identity,
     )
     recorded_head = subprocess.run(
         ["git", "-C", str(checkout), "rev-parse", "HEAD"],
@@ -931,7 +1045,7 @@ def test_campaign_continuation_reads_real_isolated_store(tmp_path: Path) -> None
         state_dir=service.state_dir,
         environment=environment,
         consumer_id="continuity-test-restarted-process",
-        campaign_id="campaign-isolated-test",
+        campaign_id="cmp_isolated_test",
         authenticated_principal_id=service.authenticated_principal_id,
         store=store,
     )
@@ -941,7 +1055,7 @@ def test_campaign_continuation_reads_real_isolated_store(tmp_path: Path) -> None
     duplicate_session_id = duplicate.session_id
     store.close()
 
-    result = service.campaign_continuation(repository, "campaign-isolated-test")
+    result = service.campaign_continuation(repository, "cmp_isolated_test")
 
     assert result["status"] == "ambiguous"
     assert {item["session_id"] for item in result["continuations"]} == {
@@ -966,6 +1080,17 @@ def test_campaign_continuation_reads_real_isolated_store(tmp_path: Path) -> None
     assert comparison["status"] == "checkout_head_changed"
     assert comparison["recorded_head"] == recorded_head
     assert comparison["live_head"] == live_head
+    task_capsule = service.campaign_continuation(
+        repository, task_identity=task_identity,
+    )
+    assert task_capsule["status"] == "ambiguous"
+    assert task_capsule["task_selector"] == {
+        "status": "resolved",
+        "campaign_id": "cmp_isolated_test",
+        "session_id": entered["session_id"],
+        "definition_id": recorded["provenance"]["definition_id"],
+        "workspace_root": str(tmp_path / "projects"),
+    }
     assert observation["worktree_registrations"][0]["physical_checkout_status"].startswith(
         "not_checked"
     )
@@ -976,20 +1101,23 @@ from pathlib import Path
 from mncs_control_mcp.config import ControlConfig
 from mncs_control_mcp.environment_sessions import EnvironmentService
 
-root, state, environment, session_id, duplicate_id = sys.argv[1:]
+root, state, environment, session_id, duplicate_id, task_identity = sys.argv[1:]
 service = EnvironmentService(ControlConfig(
     workspace_root=Path(root),
     repositories={"environment": environment},
     environment_state_dir=Path(state),
 ))
 service.authenticated_principal_id = "principal-isolated-test"
-capsule = service.campaign_continuation("mncs-control-mcp", "campaign-isolated-test")
+capsule = service.campaign_continuation(
+    "mncs-control-mcp", task_identity=task_identity,
+)
 selected = next(item for item in capsule["continuations"]
                 if item["session_id"] == session_id)
 resumed = service.resume(selected["session_id"])
 print(json.dumps({
     "status": capsule["status"],
     "candidate_ids": sorted(item["session_id"] for item in capsule["continuations"]),
+    "task_selector": capsule["task_selector"],
     "resumed_session_id": resumed["session_id"],
     "expected_ids": sorted((session_id, duplicate_id)),
 }))
@@ -997,7 +1125,7 @@ print(json.dumps({
     child = subprocess.run(
         [sys.executable, "-c", child_script,
          str(tmp_path / "projects"), str(tmp_path / "env-state"), str(ENVIRONMENT),
-         entered["session_id"], duplicate_session_id],
+         entered["session_id"], duplicate_session_id, task_identity],
         cwd=Path(__file__).parents[1],
         env={**os.environ,
              "PYTHONPATH": str(Path(__file__).parents[1] / "src")},
@@ -1009,8 +1137,10 @@ print(json.dumps({
     continued = json.loads(child.stdout)
     assert continued["status"] == "ambiguous"
     assert continued["candidate_ids"] == continued["expected_ids"]
+    assert continued["task_selector"]["status"] == "resolved"
+    assert continued["task_selector"]["session_id"] == entered["session_id"]
     assert continued["resumed_session_id"] == entered["session_id"]
-    resumed_capsule = service.campaign_continuation(repository, "campaign-isolated-test")
+    resumed_capsule = service.campaign_continuation(repository, "cmp_isolated_test")
     assert resumed_capsule["status"] == "ambiguous"
     assert {item["session_id"] for item in resumed_capsule["continuations"]} == {
         entered["session_id"], duplicate_session_id,

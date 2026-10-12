@@ -630,14 +630,23 @@ def build_server(config: ControlConfig | None = None) -> Any:
             },
         )  # type: ignore[return-value]
 
-    @server.tool(name="env_campaign_continuation", description="Discover authenticated campaign continuations for one project, or select one campaign identity. Returns persisted session facts plus a fresh, read-only Environment Git observation; duplicate sessions and campaigns remain explicit for selection.", annotations=ro, structured_output=True)
-    def env_campaign_continuation(repository: str, campaign_id: str | None = None) -> dict[str, object]:
+    @server.tool(name="env_campaign_continuation", description="Discover authenticated campaign continuations for one project, select one campaign identity, or resolve a previously bound task identity. Task identity lookup is principal, Environment definition, and workspace scoped; unbound selectors never adopt work.", annotations=ro, structured_output=True)
+    def env_campaign_continuation(
+        repository: str,
+        campaign_id: str | None = None,
+        task_identity: str | None = None,
+    ) -> dict[str, object]:
         return invoke(
             "env_campaign_continuation",
             environment_sessions.campaign_continuation,
             repository,
             campaign_id,
-            audit_metadata={"campaign_id": campaign_id, "repository": repository},
+            task_identity,
+            audit_metadata={
+                "campaign_id": campaign_id,
+                "task_identity_present": task_identity is not None,
+                "repository": repository,
+            },
         )  # type: ignore[return-value]
 
     @server.tool(name="env_inspect", description="Read-only inspection of one environment session: lifecycle, authority, rights, claims, bindings, recent events.", annotations=ro, structured_output=True)

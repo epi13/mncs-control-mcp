@@ -1840,8 +1840,9 @@ class EnvironmentRPCServer:
                 "continuations_count", len(continuations)
             ),
         }
-        for key in ("campaign_id", "contexts", "contexts_count", "contexts_truncated",
-                    "campaigns_truncated", "continuations_truncated",
+        for key in ("campaign_id", "task_selector", "campaigns", "campaigns_count",
+                    "campaigns_truncated", "contexts", "contexts_count", "contexts_truncated",
+                    "continuations_truncated",
                     "selected_session_id", "selected_context", "selection_basis",
                     "context_conflict_status", "unselected_contexts",
                     "unselected_contexts_count", "unselected_sessions_count",
@@ -2146,34 +2147,59 @@ class EnvironmentRPCServer:
         record.bound_session_id = None
         project = self._project_repository(record)
         campaign_id: str | None = None
+        task_identity: str | None = None
         index = 1
         while index < len(argv):
             item = argv[index]
-            if item == "--campaign-id":
-                if campaign_id is not None or index + 1 >= len(argv):
+            if item in {"--campaign-id", "--task-identity"}:
+                option = item
+                if index + 1 >= len(argv):
                     raise ControlError(
                         "ENVIRONMENT_RPC_INVALID_REQUEST",
-                        "continuation accepts at most one nonempty --campaign-id",
+                        f"{option} needs a value",
                     )
-                campaign_id = argv[index + 1]
-                if campaign_id.startswith("--"):
+                value = argv[index + 1]
+                if value.startswith("--"):
                     raise ControlError(
                         "ENVIRONMENT_RPC_INVALID_REQUEST",
-                        "--campaign-id needs a value, not another option",
+                        f"{option} needs a value, not another option",
                     )
+                if option == "--campaign-id":
+                    if campaign_id is not None:
+                        raise ControlError(
+                            "ENVIRONMENT_RPC_INVALID_REQUEST",
+                            "continuation accepts at most one --campaign-id",
+                        )
+                    campaign_id = value
+                else:
+                    if task_identity is not None:
+                        raise ControlError(
+                            "ENVIRONMENT_RPC_INVALID_REQUEST",
+                            "continuation accepts at most one --task-identity",
+                        )
+                    task_identity = value
                 index += 2
-            elif item.startswith("--campaign-id="):
-                if campaign_id is not None:
-                    raise ControlError(
-                        "ENVIRONMENT_RPC_INVALID_REQUEST",
-                        "continuation accepts at most one --campaign-id",
-                    )
-                campaign_id = item.partition("=")[2]
+            elif item.startswith("--campaign-id=") or item.startswith("--task-identity="):
+                option, _, value = item.partition("=")
+                if option == "--campaign-id":
+                    if campaign_id is not None:
+                        raise ControlError(
+                            "ENVIRONMENT_RPC_INVALID_REQUEST",
+                            "continuation accepts at most one --campaign-id",
+                        )
+                    campaign_id = value
+                else:
+                    if task_identity is not None:
+                        raise ControlError(
+                            "ENVIRONMENT_RPC_INVALID_REQUEST",
+                            "continuation accepts at most one --task-identity",
+                        )
+                    task_identity = value
                 index += 1
             else:
                 raise ControlError(
                     "ENVIRONMENT_RPC_INVALID_REQUEST",
-                    "continuation accepts only an optional --campaign-id",
+                    "continuation accepts optional --campaign-id and --task-identity",
                 )
         if campaign_id is not None and (
             not campaign_id.strip() or campaign_id.startswith("--")
@@ -2183,17 +2209,48 @@ class EnvironmentRPCServer:
                 "ENVIRONMENT_CAMPAIGN_ID_INVALID",
                 "campaign identity must be bounded nonempty text when supplied",
             )
+        if task_identity is not None and (
+            not task_identity.strip() or len(task_identity) > 256 or "\x00" in task_identity
+        ):
+            raise ControlError(
+                "ENVIRONMENT_TASK_IDENTITY_INVALID",
+                "task identity must be bounded nonempty text when supplied",
+            )
 
         if getattr(self.environment_service, "authenticated_principal_id", None) != record.principal_id:
             raise ControlError(
                 "ENVIRONMENT_AUTHORITY_DENIED",
                 "campaign continuation is not bound to the Control-authenticated principal",
             )
-        capsule = self.environment_service.campaign_continuation(project, campaign_id)
+        if task_identity is None:
+            capsule = self.environment_service.campaign_continuation(project, campaign_id)
+        else:
+            capsule = self.environment_service.campaign_continuation(
+                project, campaign_id, task_identity,
+            )
         if not isinstance(capsule, dict):
             raise TypeError("Environment returned a non-object continuation capsule")
         capsule = self._select_project_campaign_context(capsule, record, project)
         selected_session = capsule.get("selected_session_id")
+        task_selector = capsule.get("task_selector")
+        if (
+            task_identity is not None
+            and isinstance(task_selector, dict)
+            and task_selector.get("status") == "resolved"
+            and capsule.get("status") == "ready"
+            and selected_session != task_selector.get("session_id")
+        ):
+            capsule["status"] = "task-selector-session-mismatch"
+            capsule.pop("selected_session_id", None)
+            capsule["project_selection"] = {
+                "status": "blocked",
+                "reason": "selected-project-session-does-not-match-task-selector",
+                "task_selector_session_id": task_selector.get("session_id"),
+                "project_session_id": selected_session,
+            }
+            capsule["next"] = (
+                "reconcile the task-selector target with the project's exact Environment session; Control did not select either session"
+            )
         if (capsule.get("status") == "ready"
                 and capsule.get("selection_basis")
                 == "authenticated-project-environment-definition"

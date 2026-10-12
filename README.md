@@ -273,6 +273,12 @@ projection: it keeps duplicate session identities, project-link facts, claims,
 the latest checkpoint, current checkout observation, and the six newest
 evidence references. Use the typed `env_campaign_continuation` capability when
 the complete bounded evidence-reference list is needed.
+Both continuation surfaces accept an optional `task_identity` (or
+`--task-identity`) to resolve an existing Environment-owned task-selector
+binding for the authenticated principal and exact Environment definition and
+workspace. An unbound selector returns project campaign choices without
+selecting or adopting one; binding an existing campaign remains an explicit
+Environment entry operation.
 
 The Journal Context surface consists of `journal_context_status`,
 `journal_context_collect`, and `journal_context_get`. It creates an immutable,

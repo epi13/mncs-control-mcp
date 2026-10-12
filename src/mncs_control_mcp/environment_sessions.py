@@ -99,7 +99,8 @@ class EnvironmentService:
     def _pkg(self) -> Any:
         try:
             return _load_flat_package(PACKAGE, self.environment_path,
-                                      ("sessions", "session_store", "entry", "claims"))
+                                      ("sessions", "session_store", "entry", "claims",
+                                       "campaign_selector"))
         except ControlError:
             raise
         except Exception as exc:
@@ -192,6 +193,7 @@ class EnvironmentService:
 
     def campaign_continuation(
         self, repository: str, campaign_id: str | None = None,
+        task_identity: str | None = None,
     ) -> dict[str, Any]:
         """Return an authenticated, repository-scoped continuation capsule.
 
@@ -200,14 +202,24 @@ class EnvironmentService:
         Session object for its compact context, and returns only sessions that
         share Control's authenticated principal. Without a campaign identity,
         it discovers same-principal campaigns from the requested repository.
-        The repository selector must already occur in a campaign's intent,
-        checkout facts, repository references, or live claim.
+        When a task identity is supplied, the Environment-owned selector
+        validator resolves only an existing binding for the exact principal,
+        definition, and workspace. The repository selector must already occur
+        in a campaign's intent, checkout facts, repository references, or live
+        claim; a selector never grants ownership or adopts a campaign.
         """
         if (campaign_id is not None
                 and (not isinstance(campaign_id, str) or not campaign_id.strip()
                      or len(campaign_id) > _CAMPAIGN_ID_MAX or "\x00" in campaign_id)):
             raise ControlError("ENVIRONMENT_CAMPAIGN_ID_INVALID",
                                "campaign identity must be bounded nonempty text when supplied")
+        if (task_identity is not None
+                and (not isinstance(task_identity, str) or not task_identity.strip()
+                     or len(task_identity) > 256 or "\x00" in task_identity)):
+            raise ControlError(
+                "ENVIRONMENT_TASK_IDENTITY_INVALID",
+                "task identity must be bounded nonempty text when supplied",
+            )
         if self.authenticated_principal_id is None:
             raise ControlError("ENVIRONMENT_AUTHORITY_DENIED",
                                "campaign lookup requires a Control-authenticated principal")
@@ -272,6 +284,234 @@ class EnvironmentService:
                              "next": "request an explicit handoff from the recorded owner"},
                 )
 
+            task_selector_projection: dict[str, Any] | None = None
+            if task_identity is not None:
+                selector_api = getattr(pkg, "campaign_selector", None)
+                selector_identity = getattr(selector_api, "selector_identity", None)
+                read_binding = getattr(selector_api, "read_binding", None)
+                if not callable(selector_identity) or not callable(read_binding):
+                    raise ControlError(
+                        "ENVIRONMENT_PERSISTENCE_UNAVAILABLE",
+                        "Environment task-selector lookup is unavailable",
+                    )
+
+                # Task selectors are scoped by Environment to principal,
+                # definition, and workspace. Recompute those exact scoped
+                # keys from same-principal campaign snapshots and ask the
+                # Environment-owned validator to read each immutable binding.
+                # The selector never grants ownership; the ordinary campaign,
+                # lifecycle, and claim checks below still apply.
+                contexts: dict[tuple[str, str], dict[str, Any] | None] = {}
+                bindings: list[dict[str, Any]] = []
+                relevant_campaigns = set(project_campaigns)
+                # An explicit campaign argument narrows the result projection,
+                # but it must not hide a conflicting selector binding in a
+                # different campaign that is already linked to this project.
+                for candidate_session_id in session_ids:
+                    candidate_snapshot = store.load_snapshot(candidate_session_id)
+                    if (not isinstance(candidate_snapshot, dict)
+                            or candidate_snapshot.get("authenticated_principal_id")
+                            != self.authenticated_principal_id):
+                        continue
+                    candidate_campaign = candidate_snapshot.get("campaign")
+                    candidate_identity = (
+                        candidate_campaign.get("identity")
+                        if isinstance(candidate_campaign, dict) else None
+                    )
+                    if (isinstance(candidate_identity, str)
+                            and self._snapshot_references_repository(
+                                candidate_snapshot, repository,
+                                claims_by_session.get(candidate_session_id, []),
+                            )):
+                        relevant_campaigns.add(candidate_identity)
+                if campaign_id is not None:
+                    relevant_campaigns.add(campaign_id)
+                for session_id in session_ids:
+                    snapshot = store.load_snapshot(session_id)
+                    if not isinstance(snapshot, dict):
+                        continue
+                    campaign = snapshot.get("campaign")
+                    identity = campaign.get("identity") if isinstance(campaign, dict) else None
+                    if identity not in relevant_campaigns:
+                        continue
+                    if snapshot.get("authenticated_principal_id") != self.authenticated_principal_id:
+                        continue
+                    provenance = snapshot.get("provenance")
+                    workspace = snapshot.get("workspace")
+                    definition_id = (
+                        provenance.get("definition_id") if isinstance(provenance, dict) else None
+                    )
+                    workspace_root = workspace.get("root") if isinstance(workspace, dict) else None
+                    if (not isinstance(definition_id, str)
+                            or not isinstance(workspace_root, str)):
+                        continue
+                    context_key = (definition_id, workspace_root)
+                    if context_key not in contexts:
+                        try:
+                            selector = selector_identity(
+                                task_identity,
+                                authenticated_principal_id=self.authenticated_principal_id,
+                                definition_id=definition_id,
+                                workspace_root=workspace_root,
+                            )
+                            contexts[context_key] = read_binding(store, selector)
+                        except Exception as error:
+                            code = getattr(error, "code", None)
+                            code_name = getattr(code, "name", code)
+                            if code_name == "store-corruption":
+                                raise ControlError(
+                                    "ENVIRONMENT_STORE_CORRUPTION", str(error)
+                                ) from error
+                            if code_name == "persistence-service-unavailable":
+                                raise ControlError(
+                                    "ENVIRONMENT_PERSISTENCE_UNAVAILABLE", str(error)
+                                ) from error
+                            raise ControlError(
+                                "ENVIRONMENT_TASK_SELECTOR_LOOKUP_FAILED", str(error)
+                            ) from error
+                    binding = contexts[context_key]
+                    if binding is None:
+                        continue
+                    if (binding.get("authenticated_principal_id")
+                            != self.authenticated_principal_id
+                            or binding.get("definition_id") != definition_id
+                            or binding.get("workspace_root") != workspace_root):
+                        raise ControlError(
+                            "ENVIRONMENT_STORE_CORRUPTION",
+                            "task-selector binding does not match its authenticated Environment scope",
+                        )
+                    bound_session_id = binding.get("session_id")
+                    bound_snapshot = (
+                        store.load_snapshot(bound_session_id)
+                        if isinstance(bound_session_id, str) else None
+                    )
+                    bound_campaign = (
+                        bound_snapshot.get("campaign")
+                        if isinstance(bound_snapshot, dict) else None
+                    )
+                    bound_provenance = (
+                        bound_snapshot.get("provenance")
+                        if isinstance(bound_snapshot, dict) else None
+                    )
+                    bound_workspace = (
+                        bound_snapshot.get("workspace")
+                        if isinstance(bound_snapshot, dict) else None
+                    )
+                    if (
+                        not isinstance(bound_snapshot, dict)
+                        or bound_snapshot.get("authenticated_principal_id")
+                        != self.authenticated_principal_id
+                        or not isinstance(bound_campaign, dict)
+                        or bound_campaign.get("identity") != binding.get("campaign_id")
+                        or not isinstance(bound_provenance, dict)
+                        or bound_provenance.get("definition_id") != definition_id
+                        or not isinstance(bound_workspace, dict)
+                        or bound_workspace.get("root") != workspace_root
+                    ):
+                        raise ControlError(
+                            "ENVIRONMENT_TASK_SELECTOR_TARGET_UNAVAILABLE",
+                            "task-selector target no longer matches its recorded Environment owner and context",
+                        )
+                    bindings.append({
+                        "campaign_id": binding["campaign_id"],
+                        "session_id": bound_session_id,
+                        "definition_id": definition_id,
+                        "workspace_root": workspace_root,
+                        "lifecycle": bound_snapshot.get("lifecycle"),
+                        "references_repository": self._snapshot_references_repository(
+                            bound_snapshot, repository,
+                            claims_by_session.get(str(bound_session_id), []),
+                        ),
+                    })
+
+                distinct_bindings = {
+                    (item["campaign_id"], item["session_id"],
+                     item["definition_id"], item["workspace_root"]): item
+                    for item in bindings
+                }
+                binding_rows = list(distinct_bindings.values())
+                if campaign_id is not None and binding_rows:
+                    matching_campaign = [
+                        item for item in binding_rows
+                        if item["campaign_id"] == campaign_id
+                    ]
+                    if not matching_campaign:
+                        raise ControlError(
+                            "ENVIRONMENT_TASK_SELECTOR_CONFLICT",
+                            "explicit campaign identity conflicts with its durable task selector",
+                        )
+                    binding_rows = matching_campaign
+
+                project_bindings = [
+                    item for item in binding_rows
+                    if item["campaign_id"] in project_campaigns
+                    or item["references_repository"]
+                ]
+                if len(project_bindings) > 1:
+                    contexts_out = [{
+                        "campaign_id": item["campaign_id"],
+                        "session_id": item["session_id"],
+                        "definition_id": item["definition_id"],
+                        "workspace_root": item["workspace_root"],
+                    } for item in sorted(
+                        project_bindings,
+                        key=lambda row: (row["campaign_id"], row["definition_id"],
+                                         row["workspace_root"], row["session_id"]),
+                    )[:16]]
+                    return {
+                        "schema_version": "mncs.control.campaign-continuation/1",
+                        "repository": repository,
+                        "status": "ambiguous-task-selector-contexts",
+                        "task_selector": {"status": "ambiguous", "contexts": contexts_out,
+                                          "contexts_count": len(project_bindings),
+                                          "contexts_truncated": len(project_bindings) > 16},
+                        "next": "select the exact Environment campaign context; Control will not choose between task-selector bindings",
+                    }
+                if not project_bindings:
+                    if binding_rows:
+                        return {
+                            "schema_version": "mncs.control.campaign-continuation/1",
+                            "repository": repository,
+                            "status": "task-selector-not-linked-to-project",
+                            "task_selector": {"status": "not-linked"},
+                            "next": "inspect this project's continuation capsule; the task selector does not authorize another repository",
+                        }
+                    return {
+                        "schema_version": "mncs.control.campaign-continuation/1",
+                        "repository": repository,
+                        "status": "task-selector-unbound",
+                        "campaigns": sorted(project_campaigns)[:16],
+                        "campaigns_count": len(project_campaigns),
+                        "campaigns_truncated": len(project_campaigns) > 16,
+                        "next": (
+                            "no campaign was adopted; inspect the project capsule, then enter once with the selected campaign ID and this task identity, or start a new task with this identity"
+                        ),
+                    }
+
+                selected_binding = project_bindings[0]
+                campaign_id = selected_binding["campaign_id"]
+                if selected_binding["lifecycle"] in _TERMINAL_LIFECYCLES:
+                    return {
+                        "schema_version": "mncs.control.campaign-continuation/1",
+                        "campaign_id": campaign_id,
+                        "repository": repository,
+                        "status": "task-selector-target-terminal",
+                        "task_selector": {
+                            "status": "terminal",
+                            "session_id": selected_binding["session_id"],
+                            "definition_id": selected_binding["definition_id"],
+                            "workspace_root": selected_binding["workspace_root"],
+                        },
+                        "next": "the task selector resolves to a terminal Environment session; do not create a replacement implicitly",
+                    }
+                task_selector_projection = {
+                    "status": "resolved",
+                    "campaign_id": campaign_id,
+                    "session_id": selected_binding["session_id"],
+                    "definition_id": selected_binding["definition_id"],
+                    "workspace_root": selected_binding["workspace_root"],
+                }
+
             candidate_campaigns = (
                 [campaign_id] if campaign_id is not None
                 else sorted(project_campaigns)
@@ -282,6 +522,8 @@ class EnvironmentService:
                     "campaign_id": campaign_id,
                     "repository": repository,
                     "status": "not-found",
+                    **({"task_selector": task_selector_projection}
+                       if task_selector_projection is not None else {}),
                     "continuations": [],
                     "next": "verify the campaign identity and that this repository belongs to its recorded work intent",
                 }
@@ -389,12 +631,17 @@ class EnvironmentService:
                     "campaign_id": campaign_id,
                     "repository": repository,
                     "status": "not-found",
+                    **({"task_selector": task_selector_projection}
+                       if task_selector_projection is not None else {}),
                     "continuations": [],
                     "next": "verify the campaign identity and that this repository belongs to its recorded work intent",
                 }
             if campaign_id is not None or len(results) == 1:
-                return results[0]
-            return {
+                result = results[0]
+                if task_selector_projection is not None:
+                    result["task_selector"] = task_selector_projection
+                return result
+            result = {
                 "schema_version": "mncs.control.campaign-continuation/1",
                 "repository": repository,
                 "status": "ambiguous-campaigns",
@@ -402,6 +649,9 @@ class EnvironmentService:
                 "campaigns_truncated": len(results) > 16,
                 "next": "select the intended campaign identity; Control will not choose between campaigns",
             }
+            if task_selector_projection is not None:
+                result["task_selector"] = task_selector_projection
+            return result
         except ControlError:
             raise
         except Exception as exc:

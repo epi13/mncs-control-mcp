@@ -1,0 +1,95 @@
+{
+  "schema_version": "mncs.control.task-selector-continuation-evidence/1",
+  "recorded_at": "2026-10-12T16:40:11Z",
+  "owner": "mncs-control-mcp",
+  "campaign": "cmp_mncs_continuity_20261010",
+  "implementation": {
+    "base_revision": "bd1f7d0b64fbf57225bebfb6e696370878a79725",
+    "branch": "campaign/control-task-selector-continuation-20261012",
+    "behavior": [
+      "Read-only Control continuation accepts a durable task identity and asks Environment's campaign-selector module to validate its scoped immutable binding.",
+      "Selector lookup is scoped by the authenticated principal, Environment definition, and workspace recorded in session snapshots; it also validates the bound target session and campaign.",
+      "An unbound identity reports project choices without selecting or adopting a campaign. A conflicting explicit campaign is rejected.",
+      "Protected CLI continuation and the typed Control capability expose task-selector lookup; audit metadata records only whether the identity was supplied."
+    ],
+    "source_sha256": {
+      "README.md": "0cc10002cde68ebe77057eecc6e771a5775ab59f7758ac25673a0d96a9bd9952",
+      "src/mncs_control_mcp/environment_rpc.py": "242a8549b2dd7c70a4d978f290df5803da860133d9ae9e3a8db48f4b88e19270",
+      "src/mncs_control_mcp/environment_sessions.py": "7111ca75028508620b0d6b88e9446eb4a0b883e0b68c53accd23cd2f9174f1c7",
+      "src/mncs_control_mcp/server.py": "ef29f892dc3737871493518f8b93c640a1825bbb986a572ae1f999a469a3ced3",
+      "tests/test_environment_rpc.py": "608b49a88e8da98e0df4dbaa68012628ff9d3a916f3e70489e9a5a7b0d952109",
+      "tests/test_environment_sessions.py": "bb3a38ff1907e60a95ffc9e007e0c066f3d79c61e2e447807b11e88c7e83f98d",
+      "tests/test_mcp_server.py": "733a81c6907907788482164d0ade59d86b6daf5e0da53fdf1ca86b2addd49775"
+    }
+  },
+  "validation": {
+    "focused_protected_suite": {
+      "command": "python3 -m pytest -q tests/test_environment_sessions.py tests/test_environment_rpc.py -k 'campaign_continuation or task_selector or project_grant_returns_authenticated_campaign_capsule or project_continuation'",
+      "result": "passed",
+      "passed": 16,
+      "sandbox_backend": "bwrap",
+      "scope": "workspace",
+      "network": false,
+      "includes": [
+        "real isolated Store task-selector publication and lookup",
+        "fresh-process task-selector continuation lookup",
+        "unbound-selector non-adoption and explicit-campaign conflict",
+        "project-grant CLI argument and bounded capsule projection"
+      ]
+    },
+    "ordinary_control_suite": {
+      "command": "python3 -m pytest -q -m 'not requires_bwrap_namespace'",
+      "result": "passed",
+      "sandbox_backend": "bwrap",
+      "scope": "workspace",
+      "network": false,
+      "skipped": 3
+    },
+    "mcp_surface": {
+      "command": "python3 -m pytest -q tests/test_mcp_server.py::test_stdio_mcp_end_to_end_developer_workspace",
+      "result": "passed",
+      "passed": 1,
+      "sandbox_backend": "bwrap",
+      "network": false
+    },
+    "static": {
+      "changed_file_ruff": "passed",
+      "py_compile": "passed",
+      "git_diff_check": "passed",
+      "repository_ruff": {
+        "result": "failed",
+        "diagnostic": "One unrelated pre-existing import-order error in tests/test_git_and_projects.py; no changed file was reported."
+      }
+    },
+    "nested_sandbox_suite": {
+      "command": "python3 -m pytest -q",
+      "result": "failed",
+      "diagnostic": "13 sandbox integration cases attempted nested bwrap namespaces from the already restricted workspace runner and hit namespace nesting ENOSPC. The non-nested suite and focused project/workspace sandbox runs passed."
+    }
+  },
+  "readiness": {
+    "task_selector_continuation": "implemented and tested with a test-owned isolated Store",
+    "canonical_store_task_selector_lookup": "not independently proven in this milestone",
+    "canonical_store_checkpoint_and_claim_rpc": "previously proven through the authenticated Control transport; see canonical-claim-rpc-acceptance-20261012.json",
+    "compiler_and_forge": "not inspected or changed; waiting for owner-issued Environment handoffs"
+  },
+  "ownership_at_last_verified_readback": {
+    "readback_at": "2026-10-12T16:23:04Z",
+    "compiler_claim": {
+      "claim_id": "clm_5871ad9917e5210d",
+      "version": 63,
+      "session_id": "ses_d2537acde8b8a875",
+      "status": "held"
+    },
+    "forge_claim": {
+      "claim_id": "clm_16b820b3293d873b",
+      "version": 28,
+      "session_id": "ses_95c3aa35b8544042",
+      "status": "held"
+    },
+    "handoff_status": "none observed at that readback; revalidate before any work in either repository"
+  },
+  "delivery": {
+    "status": "validated; feature branch pending merge to main and push"
+  }
+}

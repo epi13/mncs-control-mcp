@@ -444,20 +444,29 @@ def test_project_grant_returns_authenticated_campaign_capsule(tmp_path: Path) ->
     workspace = tmp_path / "projects"
     project = workspace / "mncs-environment"
     project.mkdir(parents=True)
-    calls: list[tuple[str, str | None]] = []
+    calls: list[tuple[str, str | None, str | None]] = []
 
     class Environment:
         state_dir = tmp_path / "state"
         environment_path = tmp_path / "environment"
         authenticated_principal_id = "principal-test"
 
-        def campaign_continuation(self, repository: str, campaign_id: str | None = None):
-            calls.append((repository, campaign_id))
+        def campaign_continuation(
+            self, repository: str, campaign_id: str | None = None,
+            task_identity: str | None = None,
+        ):
+            calls.append((repository, campaign_id, task_identity))
             return {
                 "schema_version": "mncs.control.campaign-continuation/1",
                 "repository": repository,
                 "campaign_id": campaign_id,
-                "status": "ambiguous",
+                "status": "ready" if task_identity is not None else "ambiguous",
+                **({"task_selector": {"status": "resolved",
+                                      "campaign_id": "cmp_test",
+                                      "session_id": "ses_one"},
+                    "selected_session_id": "ses_two",
+                    "selection_basis": "authenticated-project-environment-definition"}
+                   if task_identity is not None else {}),
                 "continuations": [
                     {"session_id": "ses_one", "campaign_id": "cmp_test"},
                     {"session_id": "ses_two", "campaign_id": "cmp_test"},
@@ -502,7 +511,7 @@ def test_project_grant_returns_authenticated_campaign_capsule(tmp_path: Path) ->
     assert [item["session_id"] for item in capsule["continuations"]] == [
         "ses_one", "ses_two",
     ]
-    assert calls == [("mncs-environment", None)]
+    assert calls == [("mncs-environment", None, None)]
 
     selected = server.dispatch({
         **request,
@@ -510,7 +519,26 @@ def test_project_grant_returns_authenticated_campaign_capsule(tmp_path: Path) ->
         "argv": ["continuation", "--campaign-id=cmp_test"],
     }, peer_uid=0)
     assert json.loads(selected["result"]["stdout"])["campaign_id"] == "cmp_test"
-    assert calls == [("mncs-environment", None), ("mncs-environment", "cmp_test")]
+    assert calls == [
+        ("mncs-environment", None, None),
+        ("mncs-environment", "cmp_test", None),
+    ]
+
+    selected_by_task = server.dispatch({
+        **request,
+        "request_id": "req_project_campaign_task_selector",
+        "argv": ["continuation", "--task-identity=durable-task-key"],
+    }, peer_uid=0)
+    assert selected_by_task["ok"] is True
+    task_capsule = json.loads(selected_by_task["result"]["stdout"])
+    assert task_capsule["status"] == "task-selector-session-mismatch"
+    assert "selected_session_id" not in task_capsule
+    assert task_capsule["task_selector"] == {
+        "status": "resolved",
+        "campaign_id": "cmp_test",
+        "session_id": "ses_one",
+    }
+    assert calls[-1] == ("mncs-environment", None, "durable-task-key")
 
 
 def test_artifact_read_is_bound_to_environment_selected_project_session(
