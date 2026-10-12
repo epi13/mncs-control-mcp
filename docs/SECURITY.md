@@ -106,12 +106,17 @@ belongs to the grant's authenticated principal, fixes the configured state
 directory and Store persistence provider, and forwards no Store path or file
 handle. Bare Store inspection, alternate persistence roots, and other Store
 operations remain unavailable through this endpoint.
-The bridge additionally exposes Environment's retirement inventory only in
-`--inventory --dry-run` mode. It requires the authenticated session principal,
-maps the repository through the current execution grant, rejects branch,
-worktree, and prune mutation targets, and supplies the grant root as the
-inspection boundary. Registered checkouts outside that root are reported as
-out of scope without probing their paths.
+The bridge exposes read-only retirement inventory across immediate configured
+workspace repositories through `--inventory --dry-run`; registered checkouts
+outside the mapped execution root remain unprobed. Its separate local mutation
+path accepts only explicit branch or worktree targets. A mutation requires an
+exact project grant, a repository equal to that grant's checkout, and the exact
+session selected by Environment continuation within the same protected
+execution. Worktree paths are mapped under that project before forwarding.
+Environment independently requires declared write intent and a live claim
+covering the requested scope, then rechecks Git safety before deletion. Control
+does not expose metadata pruning, arbitrary repository paths, or a general Git
+proxy.
 
 The typed `env_campaign_continuation` operation is a read-only projection over
 canonical Environment snapshots. It requires Control's authenticated

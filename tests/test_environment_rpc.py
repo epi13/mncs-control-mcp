@@ -11,6 +11,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 import pytest
 
@@ -1711,7 +1712,7 @@ def test_store_verify_rpc_is_session_bound_and_read_only(
     assert len(calls) == 1
 
 
-def test_retire_rpc_exposes_only_scoped_read_only_inventory(tmp_path: Path) -> None:
+def test_retire_rpc_scopes_inventory_and_project_mutation(tmp_path: Path) -> None:
     projects = tmp_path / "projects"
     projects.mkdir()
     host_root = projects / "mncs-environment"
@@ -1739,7 +1740,7 @@ def test_retire_rpc_exposes_only_scoped_read_only_inventory(tmp_path: Path) -> N
         grant_id="grant-retire-test",
         principal_id="principal-test",
         host_root=host_root,
-        sandbox_root="/workspace/project",
+        sandbox_root="/workspace/mncs-environment",
         scope="project",
         uid=0,
         expires_at=time.monotonic() + 60,
@@ -1775,10 +1776,58 @@ def test_retire_rpc_exposes_only_scoped_read_only_inventory(tmp_path: Path) -> N
         "--inventory", "--dry-run",
     ]
 
+    scoped_worktree = server._translate_argv(
+        ["retire", "ses_test", "--repository", "/workspace/mncs-environment",
+         "--worktree", "/workspace/mncs-environment/.worktrees/reviewed",
+         "--canonical", "origin/main"],
+        host_root,
+        grant,
+    )
+    assert scoped_worktree == [
+        "retire", "ses_test", "--repository", str(host_root),
+        "--worktree", str(host_root / ".worktrees" / "reviewed"),
+        "--canonical", "origin/main",
+    ]
+    scoped_branch = server._translate_argv(
+        ["retire", "ses_test", "--repository=mncs-environment",
+         "--branch=campaign/finished", "--dry-run"],
+        host_root,
+        grant,
+    )
+    assert scoped_branch == [
+        "retire", "ses_test", "--repository=" + str(host_root),
+        "--branch=campaign/finished", "--dry-run",
+    ]
+
+    for argv in (
+        ["retire", "ses_test", "--repository", "mncs-compiler",
+         "--branch", "campaign/foreign"],
+        ["retire", "ses_test", "--repository", "mncs-environment", "--prune"],
+        ["retire", "ses_test", "--repository", "mncs-environment",
+         "--worktree", "/tmp/foreign-worktree"],
+        ["retire", "ses_test", "--repository", "mncs-environment",
+         "--worktree", "../outside"],
+        ["retire", "ses_test", "--repository", "mncs-environment",
+         "--branch", "campaign/finished", "--dry-run=false"],
+    ):
+        with pytest.raises(ControlError):
+            server._translate_argv(argv, host_root, grant)
+
+    workspace_grant = _GrantRecord(
+        grant_id="workspace-retire-test", principal_id="principal-test",
+        host_root=projects, sandbox_root="/workspace", scope="workspace", uid=0,
+        expires_at=time.monotonic() + 60, token_file=tmp_path / "workspace-grant",
+    )
+    with pytest.raises(ControlError):
+        server._translate_argv(
+            ["retire", "ses_test", "--repository", "mncs-environment",
+             "--branch", "campaign/finished"],
+            host_root,
+            workspace_grant,
+        )
+
     for argv in (
         ["retire", "ses_test", "--repository", "/workspace/mncs-environment", "--inventory"],
-        ["retire", "ses_test", "--repository", "/workspace/mncs-environment",
-         "--inventory", "--dry-run", "--branch", "main"],
         ["retire", "ses_test", "--repository", "/workspace/mncs-environment",
          "--inventory", "--dry-run", "--execution-root", "/"],
         ["retire", "ses_test", "--repository", "/workspace/mncs-environment",
@@ -1803,6 +1852,62 @@ def test_retire_rpc_exposes_only_scoped_read_only_inventory(tmp_path: Path) -> N
                 host_root,
                 grant,
             )
+
+
+def test_retire_rpc_requires_continuation_selected_session_before_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    projects = tmp_path / "projects"
+    projects.mkdir()
+    host_root = projects / "mncs-environment"
+    host_root.mkdir()
+    (host_root / ".git").mkdir()
+    server = EnvironmentRPCServer(
+        ControlConfig(
+            workspace_root=projects,
+            sandbox_home=tmp_path / "home",
+            environment_rpc_socket=tmp_path / "rpc" / "environment.sock",
+        ),
+        environment_service=SimpleNamespace(
+            state_dir=tmp_path / "state", environment_path=tmp_path / "environment-source",
+        ),
+        policy=object(),
+    )
+    token = "retire-selection-fence"
+    grant = _GrantRecord(
+        grant_id="retire-selection-grant", principal_id="principal-test",
+        host_root=host_root, sandbox_root="/workspace/mncs-environment",
+        scope="project", uid=0, expires_at=time.monotonic() + 60,
+        token_file=tmp_path / "grant",
+    )
+    server._grants[hashlib.sha256(token.encode()).hexdigest()] = grant
+    monkeypatch.setattr(server, "_authorize_session", lambda *_args: None)
+    run = mock.Mock(return_value=subprocess.CompletedProcess(
+        args=[], returncode=0, stdout="{}\n", stderr="",
+    ))
+    monkeypatch.setattr(environment_rpc_module.subprocess, "run", run)
+
+    def request(identity: str):
+        return server.dispatch({
+            "grant": token,
+            "request_id": identity,
+            "argv": ["retire", "ses_test", "--repository", "mncs-environment",
+                     "--branch", "campaign/finished"],
+            "cwd": "/workspace/mncs-environment",
+        }, peer_uid=0)
+
+    unselected = request("req_retire_unselected")
+    assert unselected["error"]["code"] == "ENVIRONMENT_AUTHORITY_DENIED"
+    assert run.call_count == 0
+
+    grant.bound_session_id = "ses_test"
+    selected = request("req_retire_selected")
+    assert selected["ok"] is True
+    assert selected["result"]["exit_code"] == 0
+    assert run.call_count == 1
+    forwarded = run.call_args.args[0]
+    assert "--execution-root" in forwarded
+    assert str(host_root) in forwarded
 
 
 def test_entry_preserves_and_bounds_configured_workspace_root(tmp_path: Path) -> None:

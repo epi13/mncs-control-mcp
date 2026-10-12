@@ -450,12 +450,11 @@ class EnvironmentRPCServer:
         return host_path
 
     def _map_retirement_repository(self, value: str) -> Path:
-        """Resolve one workspace checkout for the read-only inventory operation.
+        """Resolve one immediate configured checkout for retirement operations.
 
-        Project-scoped Bwrap exposes the configured workspace read-only and
-        overlays only the granted project as writable. Retirement inventory
-        has no mutation flags, so it may name one immediate workspace child;
-        the resulting host operation is still fenced to that checkout.
+        Read-only inventory may name any immediate configured repository.
+        Mutation admission separately requires that this is the project's
+        exact grant root before Environment sees the operation.
         """
         if not isinstance(value, str) or not value or "\x00" in value:
             raise ControlError(
@@ -782,48 +781,160 @@ class EnvironmentRPCServer:
             for option in ("--worktree",):
                 map_path_option(option)
         elif command == "retire":
-            flags = set(argv)
-            mutation_targets = any(
-                item == "--prune" or item.startswith("--prune=")
-                or item == "--branch" or item.startswith("--branch=")
-                or item == "--worktree" or item.startswith("--worktree=")
+            has_inventory = any(item == "--inventory"
+                                or item.startswith("--inventory=") for item in argv)
+            has_prune = any(item == "--prune" or item.startswith("--prune=")
+                            for item in argv)
+            has_targets = any(
+                item in {"--branch", "--worktree"}
+                or item.startswith("--branch=") or item.startswith("--worktree=")
                 for item in argv
             )
-            if "--inventory" not in flags or "--dry-run" not in flags or mutation_targets:
+            has_dry_run = "--dry-run" in argv
+            if (argv.count("--dry-run") > 1
+                    or any(item.startswith("--dry-run=") for item in argv)):
+                raise ControlError(
+                    "ENVIRONMENT_RPC_INVALID_REQUEST",
+                    "--dry-run is a flag and may appear at most once",
+                )
+            canonical_values: list[str] = []
+            repository_values: list[str] = []
+            branch_values: list[str] = []
+            worktree_values: list[str] = []
+            if has_inventory:
+                mutation_targets = has_prune or has_targets
+                if (argv.count("--inventory") != 1 or not has_dry_run or mutation_targets
+                        or any(item.startswith("--inventory=") for item in argv)):
+                    raise ControlError(
+                        "ENVIRONMENT_AUTHORITY_DENIED",
+                        "retirement inventory remains read-only and requires --dry-run",
+                        details={"required": ["--inventory", "--dry-run"]},
+                    )
+                allowed = {"--repository", "--canonical", "--inventory", "--dry-run"}
+            else:
+                if has_prune:
+                    raise ControlError(
+                        "ENVIRONMENT_AUTHORITY_DENIED",
+                        "Control does not expose worktree metadata pruning",
+                    )
+                if not has_targets:
+                    raise ControlError(
+                        "ENVIRONMENT_RPC_INVALID_REQUEST",
+                        "retirement requires one or more branch or worktree targets",
+                    )
+                if record.scope != "project":
+                    raise ControlError(
+                        "ENVIRONMENT_AUTHORITY_DENIED",
+                        "retirement mutations require an exact project grant",
+                    )
+                allowed = {"--repository", "--canonical", "--branch", "--worktree", "--dry-run"}
+
+            index = 2
+            if (len(argv) < 2
+                    or not re.fullmatch(r"ses_[A-Za-z0-9_-]{1,120}", argv[1])):
+                raise ControlError(
+                    "ENVIRONMENT_RPC_INVALID_REQUEST",
+                    "retirement requires one Environment session identity",
+                )
+            while index < len(argv):
+                item = argv[index]
+                if item in {"--dry-run", "--inventory"}:
+                    index += 1
+                    continue
+                option = item.split("=", 1)[0] if item.startswith("--") else ""
+                if option in {"--dry-run", "--inventory"}:
+                    raise ControlError(
+                        "ENVIRONMENT_RPC_INVALID_REQUEST",
+                        f"{option} does not accept a value",
+                    )
+                if option not in allowed:
+                    raise ControlError(
+                        "ENVIRONMENT_AUTHORITY_DENIED",
+                        "retirement arguments exceed the exposed operation contract",
+                    )
+                if "=" in item:
+                    value = item.split("=", 1)[1]
+                    index += 1
+                else:
+                    if index + 1 >= len(argv):
+                        raise ControlError(
+                            "ENVIRONMENT_RPC_INVALID_REQUEST", f"{option} needs a value"
+                        )
+                    value = argv[index + 1]
+                    index += 2
+                if not value or value.startswith("--") or "\x00" in value:
+                    raise ControlError(
+                        "ENVIRONMENT_RPC_INVALID_REQUEST", f"{option} has an invalid value"
+                    )
+                {
+                    "--repository": repository_values,
+                    "--canonical": canonical_values,
+                    "--branch": branch_values,
+                    "--worktree": worktree_values,
+                }[option].append(value)
+
+            if len(repository_values) != 1 or len(canonical_values) > 1:
+                raise ControlError(
+                    "ENVIRONMENT_RPC_INVALID_REQUEST",
+                    "retirement requires one repository and at most one canonical ref",
+                )
+            if len(branch_values) + len(worktree_values) > 16:
+                raise ControlError(
+                    "ENVIRONMENT_RPC_INVALID_REQUEST",
+                    "retirement target count exceeds the bounded limit of 16",
+                )
+            if any(value.startswith("-") for value in branch_values + worktree_values):
+                raise ControlError(
+                    "ENVIRONMENT_RPC_INVALID_REQUEST",
+                    "retirement target values cannot be command options",
+                )
+
+            canonical = canonical_values[0] if canonical_values else "origin/main"
+            if canonical not in {"origin/main", "origin/master", "main", "master"}:
                 raise ControlError(
                     "ENVIRONMENT_AUTHORITY_DENIED",
-                    "Control exposes only read-only retirement inventory",
-                    details={"required": ["--inventory", "--dry-run"]},
+                    "retirement canonical ref is not exposed",
                 )
-            canonical = "origin/main"
-            for index, item in enumerate(translated):
-                if item == "--canonical" and index + 1 < len(translated):
-                    canonical = translated[index + 1]
-                    break
-                if item.startswith("--canonical="):
-                    canonical = item.split("=", 1)[1]
-                    break
-            if canonical not in {"origin/main", "origin/master", "main", "master"}:
-                raise ControlError("ENVIRONMENT_AUTHORITY_DENIED",
-                                   "retirement inventory canonical ref is not exposed")
+
+            repository = self._map_retirement_repository(repository_values[0])
+            if not has_inventory:
+                scoped_repository = record.host_root.expanduser().resolve(strict=True)
+                if repository != scoped_repository:
+                    raise ControlError(
+                        "ENVIRONMENT_AUTHORITY_DENIED",
+                        "retirement mutation must target the repository granted to this execution",
+                        details={"repository": scoped_repository.name},
+                    )
+                map_path_option("--worktree")
+                worktree_paths: list[Path] = []
+                index = 0
+                while index < len(translated):
+                    item = translated[index]
+                    if item == "--worktree" and index + 1 < len(translated):
+                        worktree_paths.append(Path(translated[index + 1]).resolve(strict=False))
+                        index += 2
+                        continue
+                    if item.startswith("--worktree="):
+                        worktree_paths.append(
+                            Path(item.split("=", 1)[1]).resolve(strict=False)
+                        )
+                    index += 1
+                for path in worktree_paths:
+                    if path != scoped_repository and scoped_repository not in path.parents:
+                        raise ControlError(
+                            "ENVIRONMENT_WORKSPACE_ESCAPE",
+                            "retirement worktree must remain inside the granted project",
+                        )
+
             index = 0
             while index < len(translated):
                 item = translated[index]
                 if item == "--repository":
-                    if index + 1 >= len(translated):
-                        raise ControlError(
-                            "ENVIRONMENT_RPC_INVALID_REQUEST",
-                            "--repository needs a value",
-                        )
-                    translated[index + 1] = str(
-                        self._map_retirement_repository(translated[index + 1])
-                    )
+                    translated[index + 1] = str(repository)
                     index += 2
                     continue
                 if item.startswith("--repository="):
-                    translated[index] = "--repository=" + str(
-                        self._map_retirement_repository(item.split("=", 1)[1])
-                    )
+                    translated[index] = "--repository=" + str(repository)
                 index += 1
         return translated
 
@@ -1134,7 +1245,7 @@ class EnvironmentRPCServer:
                 command = argv[0] if isinstance(argv, list) and argv else None
                 selection_lock = (
                     grant.selection_lock
-                    if command in {"continuation", "artifact-read"} else None
+                    if command in {"continuation", "artifact-read", "retire"} else None
                 )
                 if selection_lock is not None:
                     with selection_lock:
@@ -1265,6 +1376,23 @@ class EnvironmentRPCServer:
                 )
             else:
                 self._authorize_session(session_id, record.principal_id)
+                if command == "retire":
+                    has_targets = any(
+                        item in {"--branch", "--worktree"}
+                        or item.startswith("--branch=")
+                        or item.startswith("--worktree=")
+                        for item in argv
+                    )
+                    mutation = has_targets and "--dry-run" not in argv
+                    if mutation and record.bound_session_id != session_id:
+                        raise ControlError(
+                            "ENVIRONMENT_AUTHORITY_DENIED",
+                            "retirement requires the exact session selected by Environment continuation in this execution",
+                            details={
+                                "session_id": session_id,
+                                "next": "run project continuation in this protected execution and use its selected session",
+                            },
+                        )
             if command == "claims" and "--transfer-to" in argv:
                 try:
                     target = argv[argv.index("--transfer-to") + 1]
