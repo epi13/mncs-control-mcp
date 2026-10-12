@@ -546,7 +546,7 @@ class EnvironmentRPCServer:
             if (len(argv) != 5
                     or not re.fullmatch(r"ses_[A-Za-z0-9_-]{1,120}", argv[1])
                     or argv[2] != "mncs-system-monitor:system-resource-sample"
-                    or not re.fullmatch(r"cap_[0-9a-f]{64}", argv[3])
+                    or not re.fullmatch(r"cap_[0-9a-f]{16}", argv[3])
                     or argv[4] != "system-resource-sample.json"):
                 raise ControlError(
                     "ENVIRONMENT_AUTHORITY_DENIED",

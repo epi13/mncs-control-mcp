@@ -582,7 +582,7 @@ def test_artifact_read_is_bound_to_environment_selected_project_session(
         "cwd": "/workspace/mncs-environment",
     }
     capability = "mncs-system-monitor:system-resource-sample"
-    binding_id = "cap_" + "a" * 64
+    binding_id = "cap_" + "a" * 16
     before_selection = server.dispatch({
         **base,
         "request_id": "req_artifact_read_before_selection",
