@@ -1177,6 +1177,8 @@ def test_project_rpc_exposes_session_authorized_read_operations_and_reports_unkn
 
     server = EnvironmentRPCServer(
         ControlConfig(
+            workspace_root=tmp_path,
+            repositories={"environment": "project"},
             sandbox_home=tmp_path / "home",
             environment_rpc_socket=tmp_path / "rpc" / "environment.sock",
         ),
@@ -1200,6 +1202,9 @@ def test_project_rpc_exposes_session_authorized_read_operations_and_reports_unkn
         stdout = (
             '{"providers":[{"provider_id":"forge","status":"unknown"}]}\n'
             if "capabilities" in argv else
+            '{"capability":"mncs-environment:ambient-projection-coherence",'
+            '"status":"ok","returncode":0}\n'
+            if "invoke" in argv else
             '{"outcome":"done","claims_released":[]}\n'
             if "complete" in argv else
             '{"overall":"unknown","providers":{"forge":"unknown"}}\n'
@@ -1254,14 +1259,85 @@ def test_project_rpc_exposes_session_authorized_read_operations_and_reports_unkn
     assert calls[2][1]["env"]["MNCS_ENV_AUTH_PRINCIPAL_ID"] == "principal-agent"
     assert calls[2][1]["env"]["MNCS_ENV_RPC_REQUEST_ID"] == "req_project_complete"
 
+    invocation_request = {
+        **request,
+        "request_id": "req_project_projection_invoke",
+        "argv": ["invoke", "ses_health",
+                 "mncs-environment:ambient-projection-coherence"],
+    }
+    invocation = server.dispatch(invocation_request, peer_uid=0)
+    assert invocation["ok"] is True
+    assert json.loads(invocation["result"]["stdout"])["status"] == "ok"
+    assert calls[3][0][-3:] == [
+        "invoke", "ses_health", "mncs-environment:ambient-projection-coherence",
+    ]
+    assert calls[3][1]["env"]["MNCS_ENV_AUTH_PRINCIPAL_ID"] == "principal-agent"
+    assert calls[3][1]["env"]["MNCS_ENV_RPC_REQUEST_ID"] == "req_project_projection_invoke"
+
+    # A retry with the same stable identity returns the admitted result and
+    # does not invoke the capability twice within one Control process.
+    replay = server.dispatch(invocation_request, peer_uid=0)
+    assert replay == invocation
+    assert len(calls) == 4
+
+    unsupported = server.dispatch({
+        **request,
+        "request_id": "req_project_unknown_capability",
+        "argv": ["invoke", "ses_health", "mncs-language:compile"],
+    }, peer_uid=0)
+    assert unsupported["error"]["code"] == "ENVIRONMENT_OPERATION_UNAVAILABLE"
+    assert unsupported["error"]["details"]["status"] == "unknown"
+    assert len(calls) == 4
+
+    unbounded_invocation = server.dispatch({
+        **request,
+        "request_id": "req_project_projection_invoke_args",
+        "argv": ["invoke", "ses_health",
+                 "mncs-environment:ambient-projection-coherence",
+                 "--cwd", "/workspace/project"],
+    }, peer_uid=0)
+    assert unbounded_invocation["error"]["code"] == "ENVIRONMENT_AUTHORITY_DENIED"
+    assert len(calls) == 4
+
+    other_root = tmp_path / "other"
+    other_root.mkdir()
+    other_token = "other-project-invocation"
+    server._grants[hashlib.sha256(other_token.encode()).hexdigest()] = _GrantRecord(
+        grant_id="other-project-grant",
+        principal_id="principal-agent",
+        host_root=other_root,
+        sandbox_root="/workspace/other",
+        scope="project",
+        uid=0,
+        expires_at=time.monotonic() + 60,
+        token_file=tmp_path / "other-grant",
+    )
+    other_project_invocation = server.dispatch({
+        **invocation_request,
+        "grant": other_token,
+        "request_id": "req_other_project_invoke",
+        "cwd": "/workspace/other",
+    }, peer_uid=0)
+    assert other_project_invocation["error"]["code"] == "ENVIRONMENT_AUTHORITY_DENIED"
+    assert len(calls) == 4
+
     snapshot["authenticated_principal_id"] = "different-principal"
+    foreign_invocation = server.dispatch({
+        **request,
+        "request_id": "req_project_invoke_foreign",
+        "argv": ["invoke", "ses_health",
+                 "mncs-environment:ambient-projection-coherence"],
+    }, peer_uid=0)
+    assert foreign_invocation["error"]["code"] == "ENVIRONMENT_AUTHORITY_DENIED"
+    assert len(calls) == 4
+
     foreign = server.dispatch({
         **request,
         "request_id": "req_project_health_foreign",
         "argv": ["complete", "ses_health", "--outcome", "done"],
     }, peer_uid=0)
     assert foreign["error"]["code"] == "ENVIRONMENT_AUTHORITY_DENIED"
-    assert len(calls) == 3
+    assert len(calls) == 4
 
     unsupported = server.dispatch({
         **request,
@@ -1271,7 +1347,7 @@ def test_project_rpc_exposes_session_authorized_read_operations_and_reports_unkn
     assert unsupported["error"]["code"] == "ENVIRONMENT_OPERATION_UNAVAILABLE"
     assert unsupported["error"]["details"]["status"] == "unknown"
     assert unsupported["error"]["details"]["operation"] == "doctor"
-    assert len(calls) == 3
+    assert len(calls) == 4
 
 
 def test_store_verify_rpc_is_session_bound_and_read_only(

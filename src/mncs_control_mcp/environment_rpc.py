@@ -33,8 +33,11 @@ MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 MAX_ARGUMENT_BYTES = 32 * 1024
 ALLOWED_COMMANDS = frozenset({
     "enter", "inspect", "context", "resume", "health", "capabilities", "checkpoint", "handoff", "accept", "claims",
-    "complete", "store",
+    "complete", "store", "invoke",
     "retire", "continuation", "scope-grant",
+})
+ALLOWED_INVOKE_CAPABILITIES = frozenset({
+    "mncs-environment:ambient-projection-coherence",
 })
 RPC_SANDBOX_SOCKET = "/run/mncs-environment-rpc/environment.sock"
 LOGGER = logging.getLogger(__name__)
@@ -531,6 +534,48 @@ class EnvironmentRPCServer:
                         "store", "--session", "<authorized-session>", "--verify",
                     ]},
                 )
+        if command == "invoke":
+            if (len(argv) < 3
+                    or not re.fullmatch(r"ses_[A-Za-z0-9_-]{1,120}", argv[1])):
+                raise ControlError(
+                    "ENVIRONMENT_RPC_INVALID_REQUEST",
+                    "capability invocation requires one Environment session identity and capability",
+                )
+            if argv[2] not in ALLOWED_INVOKE_CAPABILITIES:
+                raise ControlError(
+                    "ENVIRONMENT_OPERATION_UNAVAILABLE",
+                    "Control does not expose this Environment capability",
+                    details={
+                        "operation": argv[2],
+                        "status": "unknown",
+                        "next": "inspect the session capability inventory and extend the Control operation contract",
+                    },
+                )
+            if len(argv) != 3:
+                raise ControlError(
+                    "ENVIRONMENT_AUTHORITY_DENIED",
+                    "Control exposes this capability only with its session-bound declared invocation",
+                    details={"required": [
+                        "invoke", "<authorized-session>",
+                        "mncs-environment:ambient-projection-coherence",
+                    ]},
+                )
+            environment_project = self.config.repositories.get(
+                "environment", "mncs-environment"
+            )
+            if record.scope != "project":
+                raise ControlError(
+                    "ENVIRONMENT_AUTHORITY_DENIED",
+                    "this Environment capability is exposed only through the Environment project grant",
+                    details={"required_project": environment_project},
+                )
+            selected_project = self._project_repository(record)
+            if selected_project != environment_project:
+                raise ControlError(
+                    "ENVIRONMENT_AUTHORITY_DENIED",
+                    "this Environment capability is exposed only through the Environment project grant",
+                    details={"required_project": environment_project},
+                )
         translated = list(argv)
 
         if command == "scope-grant":
@@ -968,7 +1013,7 @@ class EnvironmentRPCServer:
             argv = request.get("argv")
             session_id = None
             if isinstance(argv, list) and argv and argv[0] in {
-                "inspect", "context", "resume", "health", "capabilities", "checkpoint", "handoff", "accept", "claims",
+                "inspect", "context", "resume", "health", "capabilities", "checkpoint", "handoff", "accept", "claims", "invoke",
                 "retire", "store",
             }:
                 if argv[0] == "accept":
@@ -1067,7 +1112,7 @@ class EnvironmentRPCServer:
                 argv[argv.index("--repository") + 1]
             )
             argv.extend(["--execution-root", str(repository)])
-        if command in {"inspect", "context", "resume", "health", "capabilities", "checkpoint", "handoff", "accept", "claims", "complete", "retire", "store", "scope-grant"}:
+        if command in {"inspect", "context", "resume", "health", "capabilities", "checkpoint", "handoff", "accept", "claims", "complete", "retire", "store", "scope-grant", "invoke"}:
             try:
                 command_index = argv.index(command)
                 if command == "scope-grant":
