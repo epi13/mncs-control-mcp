@@ -52,6 +52,7 @@ def _config(tmp_path: Path, **overrides) -> ControlConfig:
 def _campaign_charter_result(
     tmp_path: Path, *, referenced_digest: str | None = None,
     charter_campaign: str = "campaign-1", evidence_prefix: int = 0,
+    evidence_suffix: int = 0,
 ) -> dict:
     workspace = tmp_path / "projects"
     control_project = workspace / "mncs-control-mcp"
@@ -91,7 +92,13 @@ def _campaign_charter_result(
         "commit": commit,
         "path": "evidence/campaign-charter-test.json",
         "sha256": referenced_digest or digest,
-    }]
+    }] + [{
+        "identity": f"ev_test_after_charter_{index:02d}",
+        "repository": "mncs-environment",
+        "commit": commit,
+        "path": f"evidence/after-charter-{index:02d}.json",
+        "sha256": digest,
+    } for index in range(evidence_suffix)]
     snapshot = {
         "session_id": "ses_test",
         "snapshot_sequence": 3,
@@ -125,7 +132,19 @@ def _campaign_charter_result(
     class Session:
         @staticmethod
         def open(**_kwargs):
-            return SimpleNamespace(context=lambda: {"continuation": {"evidence": evidence}})
+            return SimpleNamespace(
+                context=lambda: {"continuation": {
+                    "campaign_state_checkpoint_id": "chk_test",
+                    "evidence": evidence[-32:],
+                    "evidence_count": len(evidence),
+                    "evidence_truncated": len(evidence) > 32,
+                }},
+                campaign_state=lambda: {
+                    "campaign_identity": "campaign-1",
+                    "checkpoint_id": "chk_test",
+                    "evidence": evidence,
+                },
+            )
 
     service = EnvironmentService(_config(tmp_path))
     service.authenticated_principal_id = "principal-test"
@@ -463,7 +482,26 @@ def test_campaign_continuation_verifies_charter_in_presented_evidence_window(
     capsule = result["continuations"][0]
     assert capsule["evidence_count"] == 35
     assert len(capsule["evidence"]) == 32
+    assert capsule["evidence_truncated"] is True
     assert capsule["evidence"][-1]["identity"] == "ev_env_campaign_charter_test"
+    assert capsule["campaign_charter"]["status"] == "verified"
+    assert capsule["campaign_charter"]["evidence_identity"] == "ev_env_campaign_charter_test"
+
+
+def test_campaign_continuation_verifies_old_charter_without_emitting_old_evidence(
+    tmp_path: Path,
+) -> None:
+    result = _campaign_charter_result(tmp_path, evidence_suffix=40)
+
+    assert result["status"] == "ready"
+    capsule = result["continuations"][0]
+    assert capsule["evidence_count"] == 41
+    assert len(capsule["evidence"]) == 32
+    assert capsule["evidence_truncated"] is True
+    assert all(
+        item["identity"] != "ev_env_campaign_charter_test"
+        for item in capsule["evidence"]
+    )
     assert capsule["campaign_charter"]["status"] == "verified"
     assert capsule["campaign_charter"]["evidence_identity"] == "ev_env_campaign_charter_test"
 

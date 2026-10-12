@@ -35,6 +35,7 @@ _CAMPAIGN_REPOSITORY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _CAMPAIGN_CHARTER_SCHEMA = "mncs.environment.campaign-charter/1"
 _CAMPAIGN_CHARTER_MAX_BYTES = 64 * 1024
 _CAMPAIGN_CAPSULE_EVIDENCE_MAX = 32
+_CAMPAIGN_CHARTER_EVIDENCE_SEARCH_MAX = 128
 _GIT_OBJECT_ID = re.compile(r"^(?:[a-f0-9]{40}|[a-f0-9]{64})$")
 _SHA256 = re.compile(r"^[a-f0-9]{64}$")
 _CONTINUABLE_LIFECYCLES = frozenset({
@@ -802,9 +803,34 @@ class EnvironmentService:
             ),
         }
         campaign_identity = campaign.get("identity")
+        charter_evidence = campaign_evidence
+        campaign_state_checkpoint_id = continuation.get(
+            "campaign_state_checkpoint_id"
+        )
+        campaign_state_reader = getattr(session, "campaign_state", None)
+        if isinstance(campaign_state_checkpoint_id, str) and callable(
+            campaign_state_reader
+        ):
+            campaign_state = campaign_state_reader()
+            if (
+                not isinstance(campaign_state, dict)
+                or campaign_state.get("campaign_identity") != campaign_identity
+                or campaign_state.get("checkpoint_id")
+                != campaign_state_checkpoint_id
+                or not isinstance(campaign_state.get("evidence"), list)
+            ):
+                raise ControlError(
+                    "ENVIRONMENT_CAMPAIGN_STATE_CONFLICT",
+                    "campaign checkpoint changed while building the continuation capsule",
+                )
+            # Search the owner-validated full ledger for the charter pointer,
+            # while keeping the emitted context capsule on its bounded recent
+            # evidence window.
+            charter_evidence = campaign_state["evidence"]
         verified_charter = self._verified_campaign_charter(
             campaign_identity if isinstance(campaign_identity, str) else None,
-            campaign_evidence, evidence_limit=evidence_limit,
+            charter_evidence,
+            evidence_limit=_CAMPAIGN_CHARTER_EVIDENCE_SEARCH_MAX,
         )
         if verified_charter is not None:
             capsule["campaign_charter"] = verified_charter
@@ -823,7 +849,7 @@ class EnvironmentService:
 
     def _verified_campaign_charter(
         self, campaign_identity: str | None, evidence: Any,
-        *, evidence_limit: int = _CAMPAIGN_CAPSULE_EVIDENCE_MAX,
+        *, evidence_limit: int = _CAMPAIGN_CHARTER_EVIDENCE_SEARCH_MAX,
     ) -> dict[str, Any] | None:
         """Project a charter only when its Environment evidence link verifies.
 
@@ -844,8 +870,8 @@ class EnvironmentService:
         if not _CAMPAIGN_REPOSITORY.fullmatch(configured_name):
             return None
         if (type(evidence_limit) is not int or evidence_limit < 1
-                or evidence_limit > _CAMPAIGN_CAPSULE_EVIDENCE_MAX):
-            evidence_limit = _CAMPAIGN_CAPSULE_EVIDENCE_MAX
+                or evidence_limit > _CAMPAIGN_CHARTER_EVIDENCE_SEARCH_MAX):
+            evidence_limit = _CAMPAIGN_CHARTER_EVIDENCE_SEARCH_MAX
         candidates = [
             item for item in evidence[-evidence_limit:]
             if isinstance(item, dict)
