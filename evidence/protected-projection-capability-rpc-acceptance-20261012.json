@@ -1,0 +1,99 @@
+{
+  "schema_version": "mncs.control.protected-projection-capability-rpc-acceptance/1",
+  "identity": "ev_control_projection_capability_rpc_20261012",
+  "recorded_at": "2026-10-12T03:32:00Z",
+  "campaign_identity": "cmp_mncs_continuity_20261010",
+  "environment_session_id": "ses_7226fbcfe65820f7",
+  "source": {
+    "repository": "mncs-control-mcp",
+    "implementation_revision": "6f9e78bc7aa3b1204daf8024e3ee6a7b5cfaaf92",
+    "files": [
+      "src/mncs_control_mcp/environment_rpc.py",
+      "tests/test_environment_rpc.py"
+    ],
+    "environment_acceptance_revision": "23b8262033ca7c6ea68d82dad5b417e912b63200",
+    "environment_acceptance_path": "evidence/protected-projection-capability-rpc-acceptance-20261012.json",
+    "environment_acceptance_sha256": "ab0c61bb60b3d99daf55bd66549d030d206008cb5a264f6def4312c6976b5c89"
+  },
+  "rpc_contract": {
+    "transport": "Control-owned authenticated AF_UNIX Environment RPC",
+    "grant": "per-execution project grant plus peer credentials",
+    "session_authorization": "canonical session authenticated principal must match the Control principal before Environment CLI execution",
+    "project_fence": "invoke is exposed only through the configured mncs-environment project grant",
+    "allowed_capabilities": [
+      "mncs-environment:ambient-projection-coherence",
+      "mncs-environment:projection-evidence-inspection"
+    ],
+    "caller_provider_arguments": "rejected; Environment executes each declaration's session-bound fixed invocation",
+    "other_capabilities": "structured ENVIRONMENT_OPERATION_UNAVAILABLE with status UNKNOWN",
+    "store_path_or_file_descriptor_exposed": false
+  },
+  "protected_execution": {
+    "tool": "mncs_control_terminal_exec and mncs_control_terminal_start",
+    "sandbox_backend": "bwrap",
+    "scope": "project",
+    "project": "mncs-environment",
+    "network": false,
+    "direct_canonical_store_write_probe": "test ! -w /home/epi13/.local/share/mncs-environment/store",
+    "direct_canonical_store_write_access": false,
+    "persistence_owner": "MNCS Control Environment RPC and canonical Store backend"
+  },
+  "publication_and_readback": {
+    "write_request_id": "req_projection_provenance_20261012_0330",
+    "provider_request_id": "req_d5d8c4eaefc13622352426aeefe4099b7b665e5fd2e55bfc",
+    "write_capability": "mncs-environment:ambient-projection-coherence",
+    "write_exit_code": 0,
+    "write_status": "ok",
+    "write_summary": {
+      "blockers": 0,
+      "epoch_reused": false,
+      "pending": 3,
+      "persisted": true,
+      "reconciled": 0
+    },
+    "store_evidence_reference": "mncs-store:ses_7226fbcfe65820f7:projections:1c6a9053eca6310d0aeee119d6a245b34a39674916fd6a9ca1f89df5f60fa0bc",
+    "session_result_readback": {
+      "status": "ok",
+      "parent_request_id": "req_projection_provenance_20261012_0330",
+      "provider_request_id": "req_d5d8c4eaefc13622352426aeefe4099b7b665e5fd2e55bfc"
+    },
+    "read_request_id": "req_projection_evidence_readback_20261012_0350",
+    "read_terminal_job_id": "term-27caffbf28a60d8e5fa4f3ff",
+    "read_capability": "mncs-environment:projection-evidence-inspection",
+    "read_exit_code": 0,
+    "readback_schema": "mncs.environment.projections/1",
+    "readback_finished_at": "2026-10-12T03:25:05+00:00",
+    "readback_summary": {
+      "blockers": 0,
+      "current": 0,
+      "degraded": 0,
+      "epoch_reused": false,
+      "pending": 3,
+      "reconciled": 0
+    },
+    "history_contains_write_reference": true
+  },
+  "validation": {
+    "rpc_tests": {
+      "command": "python -m pytest -q tests/test_environment_rpc.py",
+      "result": "PASS; 31 tests"
+    },
+    "focused_project_rpc_test": {
+      "command": "python -m pytest -q tests/test_environment_rpc.py::test_project_rpc_exposes_session_authorized_read_operations_and_reports_unknown_operations",
+      "result": "PASS"
+    },
+    "full_control_suite": {
+      "revision": "4046b68d00cfd04f8a8f0b3bbe6c2807539c7641",
+      "command": "python -m pytest -q",
+      "result": "PASS; exit code 0 and suite reached 100%"
+    },
+    "static_checks": [
+      "compileall passed for changed Python files",
+      "git diff --check passed"
+    ]
+  },
+  "limitations": [
+    "The protected projection pass deferred three projections because their inputs were unreadable; it recorded no reconciled projections.",
+    "This checkpoint proves Control RPC invocation, canonical Store publication, and immutable evidence readback. It does not prove compiler Stage-1 or Stage-2 succession or the compiler resource-feedback loop."
+  ]
+}
