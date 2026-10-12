@@ -241,14 +241,14 @@ def test_rpc_accepts_bounded_campaign_metadata_and_rejects_oversized_arguments(
                 "identity": f"ev_rpc_{index:02d}",
                 "repository": "mncs-environment",
                 "commit": f"{index + 1:040x}",
-                "path": f"tests/{'x' * 80}_evidence_{index:02d}.json",
+                "path": f"tests/{'x' * 120}_evidence_{index:03d}.json",
                 "sha256": f"{index + 1:064x}",
             }
-            for index in range(64)
+            for index in range(100)
         ],
         separators=(",", ":"),
     )
-    assert 8192 < len(evidence.encode("utf-8")) <= MAX_ARGUMENT_BYTES
+    assert 32 * 1024 < len(evidence.encode("utf-8")) <= MAX_ARGUMENT_BYTES
 
     translated = server._translate_argv(
         ["checkpoint", "ses_test", "--campaign-evidence-json", evidence],

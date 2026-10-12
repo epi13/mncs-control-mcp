@@ -30,7 +30,7 @@ from .errors import ControlError
 
 MAX_REQUEST_BYTES = 256 * 1024
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
-MAX_ARGUMENT_BYTES = 32 * 1024
+MAX_ARGUMENT_BYTES = 48 * 1024
 ALLOWED_COMMANDS = frozenset({
     "enter", "inspect", "context", "resume", "health", "capabilities", "checkpoint", "handoff", "accept", "claims",
     "complete", "store", "invoke",
