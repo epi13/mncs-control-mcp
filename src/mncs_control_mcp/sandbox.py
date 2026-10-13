@@ -86,6 +86,62 @@ class Sandbox:
         except OSError:
             pass
 
+    def _environment_store_mask(self) -> Path:
+        """Overlay the sandbox-home Store shadow with an empty read-only directory.
+
+        The writable sandbox home can retain legacy Environment objects from
+        earlier local CLI runs. Keep those host bytes intact while preventing
+        protected agents from reading or extending a second persistence root.
+        """
+        sandbox_home = self.config.sandbox_home.expanduser().resolve(strict=True)
+        store_parent = sandbox_home
+        for component in (".local", "share", "mncs-environment"):
+            store_parent = store_parent / component
+            try:
+                store_parent.mkdir(mode=0o700)
+            except FileExistsError:
+                pass
+            entry = os.lstat(store_parent)
+            if not stat.S_ISDIR(entry.st_mode) or entry.st_uid != os.getuid():
+                raise ControlError(
+                    "SANDBOX_MOUNTPOINT_UNSAFE",
+                    "sandbox Environment Store parent must be a real user-owned directory",
+                )
+
+        store_target = store_parent / "store"
+        try:
+            entry = os.lstat(store_target)
+        except FileNotFoundError:
+            store_target.mkdir(mode=0o700)
+        else:
+            if not stat.S_ISDIR(entry.st_mode) or entry.st_uid != os.getuid():
+                raise ControlError(
+                    "SANDBOX_MOUNTPOINT_UNSAFE",
+                    "sandbox Environment Store shadow must be a real user-owned directory",
+                )
+
+        state_root = self.config.job_state_path.expanduser().parent.resolve()
+        if _is_relative_to(state_root, sandbox_home):
+            raise ControlError(
+                "SANDBOX_MASK_UNAVAILABLE",
+                "Environment Store mask source must remain outside the writable sandbox home",
+            )
+        mask_source = state_root / "sandbox-empty-environment-store"
+        try:
+            mask_source.mkdir(mode=0o700, parents=True)
+        except FileExistsError:
+            pass
+        mask_entry = os.lstat(mask_source)
+        if (not stat.S_ISDIR(mask_entry.st_mode)
+                or mask_entry.st_uid != os.getuid()
+                or mask_entry.st_mode & 0o077
+                or next(mask_source.iterdir(), None) is not None):
+            raise ControlError(
+                "SANDBOX_MASK_UNAVAILABLE",
+                "Environment Store mask source must be an empty private directory",
+            )
+        return mask_source
+
     @property
     def available(self) -> bool:
         return self.executable is not None
@@ -338,6 +394,15 @@ class Sandbox:
             str(self.config.sandbox_home),
             "/home/developer",
         ]
+        store_mask = self._environment_store_mask()
+        argv.extend((
+            "--ro-bind", str(store_mask),
+            "/home/developer/.local/share/mncs-environment/store",
+        ))
+        # A missing or unavailable Control grant must not fall back to a
+        # sandbox-home Store shadow. Environment's RPC client returns a
+        # structured unavailable result when socket or grant data is absent.
+        safe_overrides["MNCS_ENV_PERSISTENCE_TRANSPORT"] = "control-rpc"
         argv.extend(self._workspace_host_alias_args())
         if environment_rpc_grant is not None:
             if self.environment_rpc is None:

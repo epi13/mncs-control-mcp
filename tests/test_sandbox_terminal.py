@@ -29,6 +29,60 @@ def _sandbox(config) -> tuple[WorkspacePolicy, Sandbox]:
 
 
 @pytest.mark.requires_bwrap_namespace
+def test_bwrap_masks_sandbox_home_environment_store_and_requires_control_rpc(config) -> None:
+    project = config.workspace_root / "fixture-repo"
+    project.mkdir()
+    shadow_store = (
+        config.sandbox_home / ".local" / "share" / "mncs-environment" / "store"
+    )
+    legacy_object = shadow_store / "chunks" / "legacy.chunk"
+    legacy_object.parent.mkdir(parents=True)
+    legacy_object.write_text("preserved outside the sandbox\n", encoding="utf-8")
+
+    policy, sandbox = _sandbox(config)
+    command = "python3 - <<'PY'\n" + "\n".join((
+        "import json, os",
+        "from pathlib import Path",
+        "store = Path.home() / '.local/share/mncs-environment/store'",
+        "try:",
+        "    (store / 'agent-write-probe').write_text('must fail', encoding='utf-8')",
+        "    write_blocked = False",
+        "except OSError:",
+        "    write_blocked = True",
+        "print(json.dumps({",
+        "    'store_visible': store.is_dir(),",
+        "    'store_entries': sorted(item.name for item in store.iterdir()),",
+        "    'write_blocked': write_blocked,",
+        "    'transport': os.environ.get('MNCS_ENV_PERSISTENCE_TRANSPORT'),",
+        "    'rpc_socket_configured': bool(os.environ.get('MNCS_ENV_RPC_SOCKET')),",
+        "    'rpc_grant_configured': bool(os.environ.get('MNCS_ENV_RPC_GRANT_FILE')),",
+        "}))",
+        "PY",
+    ))
+    result = sandbox.run(
+        command,
+        scope="project",
+        project="fixture-repo",
+        cwd=".",
+        timeout_seconds=20,
+        network=False,
+    )
+
+    assert result.exit_code == 0, result.stderr
+    observed = json.loads(result.stdout)
+    assert observed == {
+        "store_visible": True,
+        "store_entries": [],
+        "write_blocked": True,
+        "transport": "control-rpc",
+        "rpc_socket_configured": False,
+        "rpc_grant_configured": False,
+    }
+    assert legacy_object.read_text(encoding="utf-8") == "preserved outside the sandbox\n"
+    assert not (shadow_store / "agent-write-probe").exists()
+
+
+@pytest.mark.requires_bwrap_namespace
 def test_real_bwrap_blocks_home_and_project_sibling_mutation(config) -> None:
     (config.workspace_root / "alpha").mkdir()
     (config.workspace_root / "beta").mkdir()
@@ -220,7 +274,7 @@ def test_project_bwrap_reconciles_checkpoint_after_control_rpc_restart(config) -
     try:
         entry = run_client(
             first_sandbox, first_grant,
-            "test ! -e /home/developer/.local/share/mncs-environment/store "
+            "test ! -w /home/developer/.local/share/mncs-environment/store "
             "&& MNCS_ENV_RPC_REQUEST_ID=req_restart_entry "
             "python3 -B -m mncs_env.cli enter "
             "--definition tests/fixtures/control-rpc-entry.json "
@@ -337,7 +391,7 @@ def test_project_bwrap_reads_campaign_capsule_through_environment_rpc(config) ->
     grant = rpc.issue_grant(resolution)
     try:
         argv, _enabled = sandbox.command_argv(
-            "test ! -e /home/developer/.local/share/mncs-environment/store "
+            "test ! -w /home/developer/.local/share/mncs-environment/store "
             "&& python3 -B -m mncs_env.cli continuation",
             resolution,
             network=False,
@@ -531,7 +585,7 @@ def test_workspace_bwrap_entry_reuses_session_and_attaches_project_capsule(confi
             f"--consumer {consumer} --campaign-id cmp_workspace_entry"
         )
         argv, _enabled = sandbox.command_argv(
-            "test ! -e /home/developer/.local/share/mncs-environment/store && " + command,
+            "test ! -w /home/developer/.local/share/mncs-environment/store && " + command,
             resolution,
             network=False,
             environment_rpc_grant=grant,
