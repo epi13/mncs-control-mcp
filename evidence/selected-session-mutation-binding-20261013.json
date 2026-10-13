@@ -1,0 +1,86 @@
+{
+  "schema_version": "mncs.control.selected-session-mutation-binding/1",
+  "identity": "ev_control_selected_session_mutation_binding_20261013",
+  "recorded_at": "2026-10-13T18:52:56Z",
+  "campaign_identity": "cmp_mncs_continuity_20261010",
+  "environment_session_id": "ses_7226fbcfe65820f7",
+  "source": {
+    "repository": "mncs-control-mcp",
+    "implementation_revision": "c62a619d481141c157a485f345498c8d94a2a7ea",
+    "files": [
+      {
+        "path": "src/mncs_control_mcp/environment_rpc.py",
+        "sha256": "92542e7bcf2ef4a36efc92ea9db3b104527bf450d3756f71cce2adeaaa567bd8"
+      },
+      {
+        "path": "tests/test_environment_rpc.py",
+        "sha256": "dfc692716ab2b35b854dc35ccbb04a871f83e76c8f2ad814421e57b27089f4c0"
+      },
+      {
+        "path": "tests/test_sandbox_terminal.py",
+        "sha256": "6f01b4e4456e6058cd850e997a0bd105aeb15756e1c854767ff27c85feaf9715"
+      }
+    ]
+  },
+  "rpc_contract": {
+    "session_selection": "Mutations require the exact session selected by authenticated project or workspace continuation in the current execution. Entry and continuation invalidate prior selection; a ready exact capsule, owner-issued handoff acceptance, or authenticated campaign task binding can establish the session binding.",
+    "workspace_fence": "Workspace continuation resolves the protected cwd to one immediate configured Git checkout through its Git common directory and validates that checkout's one-repository Environment definition.",
+    "mutations": [
+      "resume",
+      "checkpoint",
+      "handoff",
+      "complete",
+      "scope-grant",
+      "invoke",
+      "claim acquire",
+      "claim release",
+      "claim transfer",
+      "branch or worktree retirement"
+    ],
+    "claim_transfer_target": "Both separated and equals-form --transfer-to arguments are parsed and the recipient session is checked against the authenticated Control principal.",
+    "system_monitor_capability": {
+      "name": "mncs-system-monitor:system-observability",
+      "present_in_main_since": "c229919a2f73b34f24fcfa8e10140c46f8bd1f73",
+      "current_revision": "c62a619d481141c157a485f345498c8d94a2a7ea",
+      "authorization": "User explicitly approved this exact allowlist binding and protected allowed, wrong-session, and extra-argument tests.",
+      "session_binding": "requires the selected Environment session",
+      "invocation_shape": "exactly three arguments"
+    },
+    "store_path_or_file_descriptor_exposed": false
+  },
+  "validation": {
+    "environment_rpc_tests": {
+      "command": ".venv/bin/pytest tests/test_environment_rpc.py -q",
+      "result": "PASS; 39 tests"
+    },
+    "protected_bwrap_tests": {
+      "command": ".venv/bin/pytest tests/test_sandbox_terminal.py::test_project_bwrap_reconciles_checkpoint_after_control_rpc_restart tests/test_sandbox_terminal.py::test_workspace_bwrap_entry_reuses_session_and_attaches_project_capsule -q",
+      "result": "PASS; 2 tests",
+      "backend": "bwrap",
+      "scope": "project and workspace"
+    },
+    "static_checks": {
+      "command": ".venv/bin/ruff check src/mncs_control_mcp/environment_rpc.py tests/test_environment_rpc.py tests/test_sandbox_terminal.py",
+      "result": "PASS"
+    },
+    "restart_reconciliation": "The protected test drops the checkpoint response after publication, restarts Control, selects the exact session through authenticated continuation, retries the same request identity, and reads back one checkpoint.",
+    "workspace_selection": "The protected workspace entry test reuses its Environment session and attaches the bounded continuation capsule. Separate RPC tests prove exact repository selection, selected-session checkpoint and claim operations, and cross-session rejection."
+  },
+  "unexpected_immutable_record": {
+    "session_id": "ses_b4b2d283542220b0",
+    "checkpoint_id": "chk_8408334b648675c5",
+    "request_id": "req_7f48905d8480bbf17f02a5601f0e3680dd92ad7e",
+    "progress": "must be rejected: unselected context",
+    "cause": "A negative probe found that the prior Control revision authorized checkpoint mutation without checking the session selected by continuation.",
+    "handling": "Immutable checkpoint is disclosed and preserved. The unselected session was not modified again; no rollback or deletion was attempted."
+  },
+  "limitations": [
+    "The Bubblewrap integration tests use an isolated test-owned Environment Store and prove the Control authorization and restart path under confinement. They do not replace the separate canonical Store acceptance proof.",
+    "Compiler and Forge remain protected by the prior consumers' exclusive claims. No tests, merges, or worktree retirement were performed for those repositories."
+  ],
+  "delivery": {
+    "branch": "main",
+    "revision": "c62a619d481141c157a485f345498c8d94a2a7ea",
+    "status": "pushed"
+  }
+}
