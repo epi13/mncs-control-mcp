@@ -533,12 +533,14 @@ class EnvironmentRPCServer:
             )
         if command == "store":
             if (len(argv) != 4 or argv[1] != "--session"
-                    or not argv[2].startswith("ses_") or argv[3] != "--verify"):
+                    or not argv[2].startswith("ses_")
+                    or argv[3] not in ("--verify", "--generation")):
                 raise ControlError(
                     "ENVIRONMENT_AUTHORITY_DENIED",
-                    "Control exposes only session-authorized read-only Store verification",
-                    details={"required": [
-                        "store", "--session", "<authorized-session>", "--verify",
+                    "Control exposes only session-authorized read-only Store verification and generation queries",
+                    details={"required_forms": [
+                        ["store", "--session", "<authorized-session>", "--verify"],
+                        ["store", "--session", "<authorized-session>", "--generation"],
                     ]},
                 )
         if command == "campaign-state":

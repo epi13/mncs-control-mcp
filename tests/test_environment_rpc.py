@@ -1821,9 +1821,14 @@ def test_store_verify_rpc_is_session_bound_and_read_only(
 
     def run(argv, **kwargs):
         calls.append((argv, kwargs))
+        stdout = (
+            '{"generation":7}\n'
+            if argv[-1] == "--generation"
+            else '{"generation":7,"objects_verified":43000}\n'
+        )
         return SimpleNamespace(
             returncode=0,
-            stdout='{"generation":7,"objects_verified":43000}\n',
+            stdout=stdout,
             stderr="",
         )
 
@@ -1853,12 +1858,32 @@ def test_store_verify_rpc_is_session_bound_and_read_only(
     assert calls[0][1]["env"]["MNCS_ENV_AUTH_PRINCIPAL_ID"] == "principal-agent"
     assert calls[0][1]["env"]["MNCS_ENV_RPC_REQUEST_ID"] == "req_store_verify_authorized"
 
+    generation_query = server.dispatch({
+        **request,
+        "request_id": "req_store_generation_authorized",
+        "argv": ["store", "--session", "ses_store_verify", "--generation"],
+    }, peer_uid=0)
+    assert generation_query["ok"] is True
+    assert generation_query["result"]["exit_code"] == 0
+    assert json.loads(generation_query["result"]["stdout"]) == {
+        "generation": 7,
+    }
+    assert len(calls) == 2
+    assert calls[1][0][-4:] == [
+        "store", "--session", "ses_store_verify", "--generation",
+    ]
+    assert calls[1][1]["env"]["MNCS_ENV_RPC_REQUEST_ID"] == (
+        "req_store_generation_authorized"
+    )
+
     for index, argv in enumerate((
         ["store"],
         ["store", "--verify"],
         ["store", "--session=ses_store_verify", "--verify"],
         ["store", "--session", "not-a-session", "--verify"],
         ["store", "--session", "ses_store_verify", "--verify", "--write"],
+        ["store", "--session", "ses_store_verify", "--generation", "--write"],
+        ["store", "--session", "ses_store_verify", "--generation", "--verify"],
         ["store", "--session", "ses_store_verify", "--verify",
          "--state-dir", str(tmp_path / "other-store")],
     )):
@@ -1868,7 +1893,7 @@ def test_store_verify_rpc_is_session_bound_and_read_only(
             "argv": argv,
         }, peer_uid=0)
         assert rejected["error"]["code"] == "ENVIRONMENT_AUTHORITY_DENIED"
-    assert len(calls) == 1
+    assert len(calls) == 2
 
     snapshot["authenticated_principal_id"] = "different-principal"
     foreign = server.dispatch({
@@ -1877,7 +1902,15 @@ def test_store_verify_rpc_is_session_bound_and_read_only(
         "argv": ["store", "--session", "ses_foreign", "--verify"],
     }, peer_uid=0)
     assert foreign["error"]["code"] == "ENVIRONMENT_AUTHORITY_DENIED"
-    assert len(calls) == 1
+    assert len(calls) == 2
+
+    foreign_generation = server.dispatch({
+        **request,
+        "request_id": "req_store_generation_foreign_session",
+        "argv": ["store", "--session", "ses_foreign", "--generation"],
+    }, peer_uid=0)
+    assert foreign_generation["error"]["code"] == "ENVIRONMENT_AUTHORITY_DENIED"
+    assert len(calls) == 2
 
 
 def test_retire_rpc_scopes_inventory_and_project_mutation(tmp_path: Path) -> None:
