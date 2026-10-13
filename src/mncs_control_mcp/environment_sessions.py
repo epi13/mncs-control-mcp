@@ -1228,11 +1228,16 @@ class EnvironmentService:
                 if isinstance(continuation.get("unresolved_pressures", []), list) else []
             ),
         }
-        campaign_identity = campaign.get("identity")
-        charter_evidence = campaign_evidence
         campaign_state_checkpoint_id = continuation.get(
             "campaign_state_checkpoint_id"
         )
+        if isinstance(campaign_state_checkpoint_id, str) and campaign_state_checkpoint_id:
+            # This is the CAS base for the next campaign metadata update. Keep
+            # it distinct from latest_checkpoint, which is only a session
+            # progress checkpoint and may have a different identity.
+            capsule["campaign_state_checkpoint_id"] = campaign_state_checkpoint_id
+        campaign_identity = campaign.get("identity")
+        charter_evidence = campaign_evidence
         campaign_state_reader = getattr(session, "campaign_state", None)
         if isinstance(campaign_state_checkpoint_id, str) and callable(
             campaign_state_reader

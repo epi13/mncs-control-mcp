@@ -362,6 +362,9 @@ def test_campaign_continuation_returns_project_scoped_duplicate_capsules(tmp_pat
                     "clean": True,
                 }]),
                 "checkpoint_ids": ["chk_latest"],
+                "campaign_state_checkpoint_id": (
+                    "chk_campaign_state" if self.session_id == "ses_first" else None
+                ),
                 "evidence": [
                     {"identity": f"evidence-{index}"} for index in range(12)
                 ],
@@ -401,6 +404,10 @@ def test_campaign_continuation_returns_project_scoped_duplicate_capsules(tmp_pat
     ]
     assert result["continuations"][0]["snapshot_version"] == 7
     assert result["continuations"][0]["claim_ids"] == ["claim-control"]
+    assert result["continuations"][0]["campaign_state_checkpoint_id"] == (
+        "chk_campaign_state"
+    )
+    assert "campaign_state_checkpoint_id" not in result["continuations"][1]
     assert result["continuations"][0]["project_reference"] == {
         "status": "linked",
         "basis": [
