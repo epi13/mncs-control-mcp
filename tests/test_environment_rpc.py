@@ -154,6 +154,7 @@ def test_scope_grant_rpc_requires_exact_campaign_approval_and_environment_projec
         uid=0,
         expires_at=time.monotonic() + 60,
         token_file=tmp_path / "grant",
+        bound_session_id="ses_scope_test",
     )
     args = [
         "scope-grant", "ses_scope_test",
@@ -705,6 +706,153 @@ def test_artifact_read_is_bound_to_environment_selected_project_session(
     assert len(calls) == 2
 
 
+def test_project_session_mutations_require_exact_continuation_selection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "projects"
+    project = workspace / "mncs-environment"
+    project.mkdir(parents=True)
+    capsule = {
+        "schema_version": "mncs.control.campaign-continuation/1",
+        "campaign_id": "cmp_mutation_binding",
+        "repository": "mncs-environment",
+        "status": "context-conflict",
+        "contexts_count": 2,
+        "continuations_count": 2,
+        "contexts_truncated": False,
+        "continuations_truncated": False,
+        "continuations": [
+            {
+                "session_id": "ses_selected",
+                "definition_id": "env_selected",
+                "workspace_root": str(workspace),
+                "lifecycle": "active",
+                "project_reference": {"status": "linked"},
+                "claim_ids": [],
+                "claims": [],
+            },
+            {
+                "session_id": "ses_other_context",
+                "definition_id": "env_other",
+                "workspace_root": str(workspace),
+                "lifecycle": "active",
+                "project_reference": {"status": "same_campaign_only"},
+                "claim_ids": [],
+                "claims": [],
+            },
+        ],
+    }
+
+    class Environment:
+        state_dir = tmp_path / "state"
+        environment_path = tmp_path / "environment"
+        authenticated_principal_id = "principal-test"
+
+        def campaign_continuation(self, repository: str, campaign_id: str | None = None):
+            assert repository == "mncs-environment"
+            assert campaign_id == "cmp_mutation_binding"
+            return capsule
+
+    server = EnvironmentRPCServer(
+        ControlConfig(
+            workspace_root=workspace,
+            sandbox_home=tmp_path / "home",
+            environment_rpc_socket=tmp_path / "rpc" / "environment.sock",
+        ),
+        environment_service=Environment(),
+        policy=object(),
+    )
+    token = "project-session-mutation-grant"
+    record = _GrantRecord(
+        grant_id="project-session-mutation-grant",
+        principal_id="principal-test",
+        host_root=project,
+        sandbox_root="/workspace/mncs-environment",
+        scope="project",
+        uid=0,
+        expires_at=time.monotonic() + 60,
+        token_file=tmp_path / "grant",
+    )
+    server._grants[hashlib.sha256(token.encode()).hexdigest()] = record
+    monkeypatch.setattr(
+        server, "_project_environment_identity",
+        lambda _record, _repository: ("env_selected", str(workspace)),
+    )
+    authorized_sessions: list[str] = []
+    monkeypatch.setattr(
+        server, "_authorize_session",
+        lambda session_id, _principal: authorized_sessions.append(session_id),
+    )
+    calls: list[tuple[list[str], dict[str, object]]] = []
+    monkeypatch.setattr(
+        "mncs_control_mcp.environment_rpc.subprocess.run",
+        lambda argv, **kwargs: calls.append((argv, kwargs)) or SimpleNamespace(
+            returncode=0, stdout='{"identity":"chk_selected"}\n', stderr="",
+        ),
+    )
+
+    def request(request_id: str, argv: list[str]) -> dict[str, object]:
+        return server.dispatch({
+            "grant": token,
+            "request_id": request_id,
+            "argv": argv,
+            "cwd": "/workspace/mncs-environment",
+        }, peer_uid=0)
+
+    unselected = request(
+        "req_mutation_binding_before_selection",
+        ["checkpoint", "ses_selected", "--progress=before-selection"],
+    )
+    assert unselected["error"]["code"] == "ENVIRONMENT_AUTHORITY_DENIED"
+    assert calls == []
+
+    selected = request(
+        "req_mutation_binding_select",
+        ["continuation", "--campaign-id", "cmp_mutation_binding"],
+    )
+    assert selected["ok"] is True
+    assert record.bound_session_id == "ses_selected"
+
+    allowed = request(
+        "req_mutation_binding_allowed",
+        ["checkpoint", "ses_selected", "--progress=selected"],
+    )
+    assert allowed["ok"] is True
+
+    acquired = request(
+        "req_mutation_binding_claim_acquire",
+        ["claims", "ses_selected", "--acquire=mncs-environment"],
+    )
+    assert acquired["ok"] is True
+    released = request(
+        "req_mutation_binding_claim_release",
+        ["claims", "ses_selected", "--release=mncs-environment"],
+    )
+    assert released["ok"] is True
+    assert len(calls) == 3
+    assert authorized_sessions == ["ses_selected"] * 4
+    transferred = request(
+        "req_mutation_binding_claim_transfer_equals",
+        ["claims", "ses_selected", "--claim-id=claim-test",
+         "--transfer-to=ses_transfer_recipient"],
+    )
+    assert transferred["ok"] is True
+    assert authorized_sessions[-2:] == ["ses_selected", "ses_transfer_recipient"]
+    assert len(calls) == 4
+
+    for index, argv in enumerate((
+        ["checkpoint", "ses_other_context", "--progress=unselected"],
+        ["resume", "ses_other_context"],
+        ["claims", "ses_other_context", "--acquire=mncs-other-project"],
+    )):
+        rejected = request(f"req_mutation_binding_wrong_{index}", argv)
+        assert rejected["error"]["code"] == "ENVIRONMENT_AUTHORITY_DENIED"
+        assert rejected["error"]["details"]["selected_session_id"] == "ses_selected"
+        assert rejected["error"]["details"]["session_id"] == "ses_other_context"
+
+    assert len(calls) == 4
+
+
 def test_project_entry_returns_campaign_capsule_without_changing_entry_authority(
     tmp_path: Path, monkeypatch,
 ) -> None:
@@ -770,7 +918,7 @@ def test_project_entry_returns_campaign_capsule_without_changing_entry_authority
         policy=object(),
     )
     token = "project-entry-continuation"
-    server._grants[hashlib.sha256(token.encode()).hexdigest()] = _GrantRecord(
+    record = _GrantRecord(
         grant_id="project-entry-grant",
         principal_id="principal-test",
         host_root=project,
@@ -780,6 +928,7 @@ def test_project_entry_returns_campaign_capsule_without_changing_entry_authority
         expires_at=time.monotonic() + 60,
         token_file=tmp_path / "grant",
     )
+    server._grants[hashlib.sha256(token.encode()).hexdigest()] = record
 
     def run(argv, **_kwargs):
         assert argv[-2:] == ["--workspace", str(workspace)]
@@ -811,6 +960,7 @@ def test_project_entry_returns_campaign_capsule_without_changing_entry_authority
     assert result["control_project_continuation"]["selection_basis"] == (
         "authenticated-project-environment-definition"
     )
+    assert record.bound_session_id == "ses_selected"
     assert result["control_project_continuation"] == capsule
     assert [item["session_id"] for item in
             result["control_project_continuation"]["continuations"]] == [
@@ -986,12 +1136,14 @@ def test_campaign_capsule_rejects_wider_or_unbound_requests(tmp_path: Path) -> N
         token_file=tmp_path / "grant",
     )
 
-    def request(identity: str, argv: list[str]):
+    def request(
+        identity: str, argv: list[str], *, cwd: str = "/workspace/mncs-environment",
+    ):
         return server.dispatch({
             "grant": token,
             "request_id": identity,
             "argv": argv,
-            "cwd": "/workspace/mncs-environment",
+            "cwd": cwd,
         }, peer_uid=0)
 
     wider = request("req_continuation_wider", ["continuation", "--repository", "another-project"])
@@ -1004,6 +1156,7 @@ def test_campaign_capsule_rejects_wider_or_unbound_requests(tmp_path: Path) -> N
     assert environment.calls == 0
 
     environment.authenticated_principal_id = "principal-test"
+    subprocess.run(["git", "init", "--quiet", str(project)], check=True)
     server._grants[hashlib.sha256(token.encode()).hexdigest()] = _GrantRecord(
         grant_id="workspace-continuation-grant",
         principal_id="principal-test",
@@ -1015,8 +1168,139 @@ def test_campaign_capsule_rejects_wider_or_unbound_requests(tmp_path: Path) -> N
         token_file=tmp_path / "grant",
     )
     broad_scope = request("req_continuation_workspace_scope", ["continuation"])
-    assert broad_scope["error"]["code"] == "ENVIRONMENT_AUTHORITY_DENIED"
-    assert environment.calls == 0
+    assert broad_scope["ok"] is True
+    assert environment.calls == 1
+    assert request(
+        "req_continuation_workspace_root_only", ["continuation"], cwd="/workspace",
+    )["error"]["code"] == "ENVIRONMENT_PROJECT_UNKNOWN"
+    assert environment.calls == 1
+
+
+def test_workspace_continuation_binds_one_repository_session_for_mutations(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "projects"
+    project = workspace / "mncs-environment"
+    definition_dir = project / ".mncs"
+    definition_dir.mkdir(parents=True)
+    (definition_dir / "project-environment.json").write_text(json.dumps({
+        "workspace_scope": {"repositories": ["mncs-environment"]},
+    }), encoding="utf-8")
+    subprocess.run(["git", "init", "--quiet", str(project)], check=True)
+    workspace_root = str(workspace.resolve())
+    capsule = {
+        "schema_version": "mncs.control.campaign-continuation/1",
+        "campaign_id": "cmp_workspace_binding",
+        "repository": "mncs-environment",
+        "status": "context-conflict",
+        "continuations_count": 1,
+        "continuations_truncated": False,
+        "contexts_truncated": False,
+        "continuations": [{
+            "session_id": "ses_workspace_selected",
+            "definition_id": "env_workspace_definition",
+            "workspace_root": workspace_root,
+            "lifecycle": "active",
+            "project_reference": {"status": "linked"},
+            "claim_ids": [],
+            "claims": [],
+        }],
+    }
+
+    class Environment:
+        state_dir = tmp_path / "state"
+        environment_path = tmp_path / "environment"
+        authenticated_principal_id = "principal-workspace"
+
+        @staticmethod
+        def _pkg():
+            return SimpleNamespace(identity=SimpleNamespace(
+                environment_id=lambda definition: (
+                    "env_workspace_definition"
+                    if definition["workspace_scope"]["repositories"]
+                    == ["mncs-environment"] else "env_unexpected"
+                ),
+            ))
+
+        def campaign_continuation(self, repository: str, campaign_id: str | None = None):
+            assert repository == "mncs-environment"
+            assert campaign_id == "cmp_workspace_binding"
+            return json.loads(json.dumps(capsule))
+
+    server = EnvironmentRPCServer(
+        ControlConfig(
+            workspace_root=workspace,
+            sandbox_home=tmp_path / "home",
+            environment_rpc_socket=tmp_path / "rpc" / "environment.sock",
+        ),
+        environment_service=Environment(),
+        policy=object(),
+    )
+    token = "workspace-session-mutation-grant"
+    record = _GrantRecord(
+        grant_id="workspace-session-mutation-grant",
+        principal_id="principal-workspace",
+        host_root=workspace,
+        sandbox_root="/workspace",
+        scope="workspace",
+        uid=0,
+        expires_at=time.monotonic() + 60,
+        token_file=tmp_path / "grant",
+    )
+    server._grants[hashlib.sha256(token.encode()).hexdigest()] = record
+    authorized_sessions: list[str] = []
+    monkeypatch.setattr(
+        server, "_authorize_session",
+        lambda session_id, _principal: authorized_sessions.append(session_id),
+    )
+    real_run = subprocess.run
+    cli_calls: list[list[str]] = []
+
+    def run(argv: list[str], *args: object, **kwargs: object):
+        if argv and argv[0] == "git":
+            return real_run(argv, *args, **kwargs)
+        cli_calls.append(argv)
+        return subprocess.CompletedProcess(
+            argv, 0, stdout='{"identity":"chk_workspace_selected"}\n', stderr="",
+        )
+
+    monkeypatch.setattr(environment_rpc_module.subprocess, "run", run)
+
+    def request(request_id: str, argv: list[str]) -> dict[str, object]:
+        return server.dispatch({
+            "grant": token,
+            "request_id": request_id,
+            "argv": argv,
+            "cwd": "/workspace/mncs-environment",
+        }, peer_uid=0)
+
+    selected = request(
+        "req_workspace_mutation_select",
+        ["continuation", "--campaign-id", "cmp_workspace_binding"],
+    )
+    assert selected["ok"] is True
+    assert json.loads(selected["result"]["stdout"])["selected_session_id"] == (
+        "ses_workspace_selected"
+    )
+    assert record.bound_session_id == "ses_workspace_selected"
+
+    authorized = request(
+        "req_workspace_mutation_allowed",
+        ["checkpoint", "ses_workspace_selected", "--progress=selected"],
+    )
+    assert authorized["ok"] is True
+    assert authorized_sessions == ["ses_workspace_selected"]
+    assert len(cli_calls) == 1
+
+    rejected = request(
+        "req_workspace_mutation_cross_session",
+        ["checkpoint", "ses_other_workspace_context", "--progress=wrong-session"],
+    )
+    assert rejected["error"]["code"] == "ENVIRONMENT_AUTHORITY_DENIED"
+    assert rejected["error"]["details"]["selected_session_id"] == (
+        "ses_workspace_selected"
+    )
+    assert len(cli_calls) == 1
 
 
 def test_project_continuation_cli_returns_compact_duplicate_session_capsule(
@@ -1390,6 +1674,7 @@ def test_project_rpc_exposes_session_authorized_read_operations_and_reports_unkn
         uid=0,
         expires_at=time.monotonic() + 60,
         token_file=tmp_path / "grant",
+        bound_session_id="ses_health",
     )
     server._grants[hashlib.sha256(token.encode()).hexdigest()] = project_grant
     calls = []
@@ -2434,6 +2719,7 @@ def test_workspace_entry_attaches_capsule_after_readiness_block(tmp_path: Path, 
         expires_at=time.monotonic() + 60,
         token_file=tmp_path / "grant",
     )
+    grant = server._grants[hashlib.sha256(token.encode()).hexdigest()]
     server._translate_argv = lambda argv, _cwd, _record: argv
     entry_result = {
         "session_id": "ses_project_context",
@@ -2468,6 +2754,7 @@ def test_workspace_entry_attaches_capsule_after_readiness_block(tmp_path: Path, 
             returned["control_project_continuation"]["continuations"]] == [
                 "ses_project_context", "ses_workspace_context",
             ]
+    assert grant.bound_session_id is None
     assert calls == [("mncs-environment", "cmp_workspace_entry")]
 
 
@@ -2788,6 +3075,8 @@ def test_accept_requires_current_receiver_bound_owner_handoff(tmp_path: Path, mo
     assert response["ok"] is True
     assert response["result"]["exit_code"] == 0
     assert len(called) == 1
+    grant = server._grants[hashlib.sha256(token.encode()).hexdigest()]
+    assert grant.bound_session_id == session_id
 
     handoff["to_authenticated_principal_id"] = "ctrl_someone_else"
     rejected = server.dispatch({
@@ -3020,6 +3309,7 @@ def test_task_selector_selects_saved_project_context_over_current_default(
         record,
         ["continuation", "--task-identity", "stable-task-selector"],
         "req_task_selector_context_route",
+        cwd=project,
     )
     assert response["ok"] is True
     projected = json.loads(response["result"]["stdout"])

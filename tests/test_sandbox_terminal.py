@@ -160,6 +160,11 @@ def test_project_bwrap_reconciles_checkpoint_after_control_rpc_restart(config) -
     manifest = project / ".mncs" / "project.json"
     manifest.parent.mkdir()
     shutil.copyfile(manifest_source, manifest)
+    # The resumed Control execution must authenticate this exact repository
+    # definition before it may retry a session mutation after service restart.
+    shutil.copyfile(
+        fixture_source, project / ".mncs" / "project-environment.json",
+    )
 
     private_root = Path(tempfile.mkdtemp(prefix="mce-rpc-restart-", dir="/tmp"))
     endpoint_config = replace(
@@ -246,6 +251,17 @@ def test_project_bwrap_reconciles_checkpoint_after_control_rpc_restart(config) -
         second_sandbox = Sandbox(config, policy)
         second_sandbox.environment_rpc = second_rpc
         second_grant = second_rpc.issue_grant(resolution)
+
+        continuation = run_client(
+            second_sandbox, second_grant,
+            "MNCS_ENV_RPC_REQUEST_ID=req_restart_continuation "
+            "python3 -B -m mncs_env.cli continuation "
+            "--campaign-id cmp_rpc_restart_proof",
+        )
+        assert continuation.returncode == 0, continuation.stdout + continuation.stderr
+        capsule = json.loads(continuation.stdout)
+        assert capsule["status"] == "ready"
+        assert capsule["selected_session_id"] == session_id
 
         retried = run_client(
             second_sandbox, second_grant, checkpoint_command,

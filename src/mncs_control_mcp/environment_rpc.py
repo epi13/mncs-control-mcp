@@ -49,6 +49,32 @@ RPC_SANDBOX_SOCKET = "/run/mncs-environment-rpc/environment.sock"
 LOGGER = logging.getLogger(__name__)
 
 
+def _has_option(argv: list[Any], option: str) -> bool:
+    return any(
+        isinstance(item, str)
+        and (item == option or item.startswith(option + "="))
+        for item in argv
+    )
+
+
+def _requires_selected_session_for_mutation(command: str, argv: list[Any]) -> bool:
+    """Identify session mutations that must match this grant's project selection."""
+    if not isinstance(argv, list):
+        return False
+    if command in {
+        "resume", "checkpoint", "handoff", "complete", "scope-grant", "invoke",
+    }:
+        return True
+    if command == "claims":
+        return any(_has_option(argv, option) for option in (
+            "--acquire", "--release", "--transfer-to",
+        ))
+    if command == "retire":
+        has_target = any(_has_option(argv, option) for option in ("--branch", "--worktree"))
+        return has_target and not _has_option(argv, "--dry-run")
+    return False
+
+
 @dataclass(frozen=True)
 class EnvironmentRPCGrant:
     token_digest: str
@@ -1350,7 +1376,10 @@ class EnvironmentRPCServer:
                 command = argv[0] if isinstance(argv, list) and argv else None
                 selection_lock = (
                     grant.selection_lock
-                    if command in {"continuation", "campaign-bind", "artifact-read", "retire"} else None
+                    if (
+                        command in {"enter", "continuation", "campaign-bind", "artifact-read", "retire", "accept"}
+                        or _requires_selected_session_for_mutation(command or "", argv)
+                    ) else None
                 )
                 if selection_lock is not None:
                     with selection_lock:
@@ -1428,8 +1457,12 @@ class EnvironmentRPCServer:
         request_id = request.get("request_id")
         if not isinstance(request_id, str) or not request_id.startswith("req_") or len(request_id) > 80:
             raise ControlError("ENVIRONMENT_RPC_INVALID_REQUEST", "stable request identity is invalid")
+        if command == "enter":
+            # Entry may establish a different Environment context. Invalidate
+            # any earlier selection until its returned capsule matches again.
+            record.bound_session_id = None
         if command == "continuation":
-            return self._campaign_continuation(record, argv, request_id)
+            return self._campaign_continuation(record, argv, request_id, cwd=cwd)
         if command == "campaign-bind":
             return self._campaign_task_bind(record, argv, request_id)
         if command == "retire":
@@ -1496,30 +1529,42 @@ class EnvironmentRPCServer:
                 )
             else:
                 self._authorize_session(session_id, record.principal_id)
-                if command == "retire":
-                    has_targets = any(
-                        item in {"--branch", "--worktree"}
-                        or item.startswith("--branch=")
-                        or item.startswith("--worktree=")
-                        for item in argv
+                if (_requires_selected_session_for_mutation(command, argv)
+                        and record.bound_session_id != session_id):
+                    raise ControlError(
+                        "ENVIRONMENT_AUTHORITY_DENIED",
+                        "session mutation requires the exact session selected by Environment continuation in this execution",
+                        details={
+                            "session_id": session_id,
+                            "selected_session_id": record.bound_session_id,
+                            "next": "run project continuation in this protected execution, then target only its selected session",
+                        },
                     )
-                    mutation = has_targets and "--dry-run" not in argv
-                    if mutation and record.bound_session_id != session_id:
+            if command == "claims":
+                transfer_target: str | None = None
+                transfer_options = 0
+                index = 0
+                while index < len(argv):
+                    item = argv[index]
+                    if item == "--transfer-to":
+                        transfer_options += 1
+                        if index + 1 < len(argv):
+                            transfer_target = argv[index + 1]
+                        index += 2
+                    elif item.startswith("--transfer-to="):
+                        transfer_options += 1
+                        transfer_target = item.partition("=")[2]
+                        index += 1
+                    else:
+                        index += 1
+                if transfer_options:
+                    if (transfer_options != 1 or not transfer_target
+                            or transfer_target.startswith("--")):
                         raise ControlError(
-                            "ENVIRONMENT_AUTHORITY_DENIED",
-                            "retirement requires the exact session selected by Environment continuation in this execution",
-                            details={
-                                "session_id": session_id,
-                                "next": "run project continuation in this protected execution and use its selected session",
-                            },
+                            "ENVIRONMENT_RPC_INVALID_REQUEST",
+                            "claim transfer needs exactly one target session",
                         )
-            if command == "claims" and "--transfer-to" in argv:
-                try:
-                    target = argv[argv.index("--transfer-to") + 1]
-                except (ValueError, IndexError) as error:
-                    raise ControlError("ENVIRONMENT_RPC_INVALID_REQUEST",
-                                       "claim transfer needs a target session") from error
-                self._authorize_session(target, record.principal_id)
+                    self._authorize_session(transfer_target, record.principal_id)
         cli_source = self.environment_service.environment_path
         program = "from mncs_env.cli import main; raise SystemExit(main())"
         process_env = {
@@ -1547,6 +1592,15 @@ class EnvironmentRPCServer:
         )
         stdout = completed.stdout[:output_limit]
         stderr = completed.stderr[:output_limit]
+        if command == "accept" and completed.returncode == 0:
+            if not isinstance(session_id, str):
+                raise ControlError(
+                    "ENVIRONMENT_RPC_INVALID_REQUEST",
+                    "successful handoff acceptance did not resolve a session identity",
+                )
+            # The explicit handoff grant authorizes this transition. Bind the
+            # newly accepted session for subsequent work in this execution.
+            record.bound_session_id = session_id
         if command == "enter" and completed.returncode in {0, 5}:
             stdout = self._attach_project_continuation(
                 record, stdout, cwd=cwd,
@@ -1666,11 +1720,10 @@ class EnvironmentRPCServer:
         """Add a read-only project capsule to a persisted Environment entry.
 
         The Environment entry remains the authority for session selection and
-        mutation. Control derives one project from the authenticated project
-        grant or workspace-scoped cwd, then adds its existing read-only
-        continuation projection. Readiness-blocked entries still have a
-        durable session result and receive the same capsule. The projection
-        cannot transfer or adopt another context.
+        mutation. Control adds its existing read-only continuation projection
+        and binds this execution only when that projection selects the exact
+        session returned by entry. Readiness-blocked entries still receive the
+        capsule; the projection cannot transfer or adopt another context.
         """
         if (record.scope not in {"project", "workspace"}
                 or original_stdout_bytes > output_limit):
@@ -1697,7 +1750,7 @@ class EnvironmentRPCServer:
         )
         entry_workspace_root = payload.get("workspace_root")
         project_context = None
-        if (record.scope == "project"
+        if (record.scope in {"project", "workspace"}
                 and isinstance(entry_definition_id, str)
                 and entry_definition_id.startswith("env_")
                 and len(entry_definition_id) == 20
@@ -1762,6 +1815,16 @@ class EnvironmentRPCServer:
                     derive_project_context=False,
                 )
                 payload["control_project_continuation"] = capsule
+                if (
+                    record.scope in {"project", "workspace"}
+                    and capsule.get("status") == "ready"
+                    and capsule.get("selection_basis") in {
+                        "authenticated-project-environment-definition",
+                        "authenticated-task-selector",
+                    }
+                    and capsule.get("selected_session_id") == payload.get("session_id")
+                ):
+                    record.bound_session_id = payload["session_id"]
             except ControlError as error:
                 next_step = error.details.get("next") if isinstance(error.details, dict) else None
                 payload["control_project_continuation"] = {
@@ -1961,24 +2024,32 @@ class EnvironmentRPCServer:
     def _project_environment_identity(
         self, record: _GrantRecord, repository: str,
     ) -> tuple[str, str] | None:
-        """Resolve the project's owner-controlled Environment definition.
+        """Resolve one repository's owner-controlled Environment definition.
 
-        A project grant may select only the regular definition stored in that
-        repository's .mncs directory. The definition must retain the same
-        one-repository and workspace-root restrictions enforced by ``enter``.
-        Missing project metadata yields no selector; it never causes Control
-        to guess between campaign contexts.
+        Project grants use their granted checkout. Workspace grants must
+        resolve an exact immediate repository from the supplied cwd before
+        selecting its definition. Missing metadata never makes Control guess
+        between campaign contexts.
         """
-        if record.scope != "project":
+        if record.scope not in {"project", "workspace"}:
             return None
         try:
             workspace_root = Path(self.config.workspace_root).expanduser().resolve(strict=True)
-            project_root = record.host_root.expanduser().resolve(strict=True)
+            grant_root = record.host_root.expanduser().resolve(strict=True)
         except OSError as error:
             raise ControlError(
                 "ENVIRONMENT_WORKSPACE_MISSING",
-                "project Environment context is unavailable",
+                "Environment workspace context is unavailable",
             ) from error
+        if record.scope == "project":
+            project_root = grant_root
+        else:
+            if grant_root != workspace_root:
+                raise ControlError(
+                    "ENVIRONMENT_AUTHORITY_DENIED",
+                    "workspace continuation must use the configured workspace root",
+                )
+            project_root = workspace_root / repository
         if (project_root.parent != workspace_root
                 or project_root.name != repository):
             raise ControlError(
@@ -2062,7 +2133,7 @@ class EnvironmentRPCServer:
         the bounded result is complete, and no other same-campaign session has
         a claim on this repository. All original continuations remain visible.
         """
-        if record.scope != "project":
+        if record.scope not in {"project", "workspace"}:
             return capsule
         selector = project_context
         task_selector = capsule.get("task_selector")
@@ -2346,19 +2417,17 @@ class EnvironmentRPCServer:
         }}
 
     def _campaign_continuation(
-        self, record: _GrantRecord, argv: list[str], request_id: str,
+        self, record: _GrantRecord, argv: list[str], request_id: str, *, cwd: Path,
     ) -> dict[str, Any]:
-        """Return the existing Control-owned capsule for one project grant.
+        """Return the existing Control-owned capsule for one repository grant.
 
-        A project-scoped grant identifies its one immediate checkout. The
-        caller cannot widen that identity with a repository or principal
-        argument, and the existing Environment adapter still performs
-        authenticated Store lookup and domain filtering. The default CLI
-        capsule is compact; callers needing every bounded evidence reference
-        can use Control's typed environment.campaign-continuation capability.
+        Project scope identifies its one immediate checkout. Workspace scope
+        uses the cwd already confined by its grant to identify one immediate
+        checkout. The caller cannot widen that identity with a repository or
+        principal argument; Environment remains the Store lookup authority.
         """
         record.bound_session_id = None
-        project = self._project_repository(record)
+        project = self._project_repository(record, cwd=cwd)
         campaign_id: str | None = None
         task_identity: str | None = None
         index = 1
