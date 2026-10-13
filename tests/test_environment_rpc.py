@@ -673,6 +673,41 @@ def test_artifact_read_is_bound_to_environment_selected_project_session(
     ]
     assert authorized_sessions[-1] == ("ses_selected", "principal-agent")
 
+    summary_capability = "mncs-system-monitor:system-observability"
+    summary_binding_id = "cap_" + "c" * 16
+    summary_path = "system-observability-summary.json"
+    wrong_summary_session = server.dispatch({
+        **base,
+        "request_id": "req_artifact_read_summary_wrong_session",
+        "argv": ["artifact-read", "ses_other", summary_capability,
+                 summary_binding_id, summary_path],
+    }, peer_uid=0)
+    assert wrong_summary_session["error"]["code"] == "ENVIRONMENT_AUTHORITY_DENIED"
+    assert len(calls) == 2
+
+    extra_summary_argument = server.dispatch({
+        **base,
+        "request_id": "req_artifact_read_summary_extra_argument",
+        "argv": ["artifact-read", "ses_selected", summary_capability,
+                 summary_binding_id, summary_path, "unexpected"],
+    }, peer_uid=0)
+    assert extra_summary_argument["error"]["code"] == "ENVIRONMENT_AUTHORITY_DENIED"
+    assert len(calls) == 2
+
+    summary_read = server.dispatch({
+        **base,
+        "request_id": "req_artifact_read_summary_selected_session",
+        "argv": ["artifact-read", "ses_selected", summary_capability,
+                 summary_binding_id, summary_path],
+    }, peer_uid=0)
+    assert summary_read["ok"] is True
+    assert summary_read["result"]["exit_code"] == 0
+    assert calls[2][0][-5:] == [
+        "artifact-read", "ses_selected", summary_capability,
+        summary_binding_id, summary_path,
+    ]
+    assert authorized_sessions[-1] == ("ses_selected", "principal-agent")
+
     selected_session[0] = "ses_other"
     server.dispatch({
         **base,
@@ -703,7 +738,7 @@ def test_artifact_read_is_bound_to_environment_selected_project_session(
             "argv": argv,
         }, peer_uid=0)
         assert rejected["error"]["code"] == "ENVIRONMENT_AUTHORITY_DENIED"
-    assert len(calls) == 2
+    assert len(calls) == 3
 
 
 def test_project_session_mutations_require_exact_continuation_selection(

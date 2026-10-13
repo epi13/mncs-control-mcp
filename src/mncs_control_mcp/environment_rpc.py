@@ -576,6 +576,8 @@ class EnvironmentRPCServer:
             allowed_artifacts = {
                 ("mncs-system-monitor:system-resource-sample",
                  "system-resource-sample.json"),
+                ("mncs-system-monitor:system-observability",
+                 "system-observability-summary.json"),
                 ("mncs-automation:automation-resource-headroom-evaluation",
                  "resource-headroom-decision.json"),
             }
@@ -585,7 +587,7 @@ class EnvironmentRPCServer:
                     or not re.fullmatch(r"cap_[0-9a-f]{16}", argv[3])):
                 raise ControlError(
                     "ENVIRONMENT_AUTHORITY_DENIED",
-                    "Control exposes only bounded Monitor sample and Automation decision artifacts",
+                    "Control exposes only the declared Monitor and Automation artifacts",
                     details={"required": [
                         "artifact-read", "<selected-session>", "<capability>",
                         "<capability-binding-id>", "<declared-artifact-file>",
