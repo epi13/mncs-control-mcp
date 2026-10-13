@@ -2479,6 +2479,65 @@ def test_retire_rpc_scopes_inventory_and_project_mutation(tmp_path: Path) -> Non
             )
 
 
+def test_retire_rpc_maps_sibling_inventory_to_project_sandbox_alias(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    projects = tmp_path / "projects"
+    host_root = projects / "mncs-control-mcp"
+    compiler_root = projects / "mncs-compiler"
+    for checkout in (host_root, compiler_root):
+        (checkout / ".git").mkdir(parents=True)
+    server = EnvironmentRPCServer(
+        ControlConfig(
+            workspace_root=projects,
+            sandbox_home=tmp_path / "home",
+            environment_rpc_socket=tmp_path / "rpc" / "environment.sock",
+        ),
+        environment_service=SimpleNamespace(
+            state_dir=tmp_path / "state", environment_path=tmp_path / "environment-source",
+        ),
+        policy=object(),
+    )
+    grant = _GrantRecord(
+        grant_id="grant-retire-inventory-dispatch-test",
+        principal_id="principal-test",
+        host_root=host_root,
+        sandbox_root="/workspace/mncs-control-mcp",
+        scope="project",
+        uid=0,
+        expires_at=time.monotonic() + 60,
+        token_file=tmp_path / "grant",
+    )
+    monkeypatch.setattr(server, "_grant", lambda _request, _peer: grant)
+    monkeypatch.setattr(server, "_authorize_session", lambda *_args: None)
+    invocations: list[tuple[list[str], dict[str, object]]] = []
+
+    def run(argv: list[str], **kwargs: object) -> SimpleNamespace:
+        invocations.append((argv, kwargs))
+        return SimpleNamespace(returncode=0, stdout="{}\n", stderr="")
+
+    monkeypatch.setattr(environment_rpc_module.subprocess, "run", run)
+    response = server._dispatch_once(
+        {
+            "cwd": "/workspace/mncs-control-mcp",
+            "argv": [
+                "retire", "ses_test", "--repository", "mncs-compiler",
+                "--inventory", "--dry-run",
+            ],
+            "request_id": "req_retire_sibling_inventory_dispatch_test",
+        },
+        peer_uid=grant.uid,
+    )
+
+    assert response["ok"] is True
+    assert len(invocations) == 1
+    argv, kwargs = invocations[0]
+    assert kwargs["cwd"] == host_root
+    assert argv[argv.index("--repository") + 1] == str(compiler_root)
+    assert argv[argv.index("--execution-root") + 1] == str(compiler_root)
+    assert argv[argv.index("--sandbox-root") + 1] == "/workspace/mncs-compiler"
+
+
 def test_retire_rpc_requires_continuation_selected_session_before_mutation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

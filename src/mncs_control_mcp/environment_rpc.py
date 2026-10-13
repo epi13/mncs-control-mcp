@@ -1469,9 +1469,9 @@ class EnvironmentRPCServer:
             return self._campaign_task_bind(record, argv, request_id)
         if command == "retire":
             # The repository path was resolved by Control to one immediate
-            # configured workspace checkout. Environment may inspect physical
-            # worktrees only within that checkout; other registrations remain
-            # classified outside this operation's scope.
+            # configured workspace checkout. Project grants can run read-only
+            # inventory against a sibling checkout, but mutations remain
+            # confined to the grant's exact repository.
             repository = next(
                 Path(item.split("=", 1)[1])
                 for item in argv
@@ -1483,12 +1483,36 @@ class EnvironmentRPCServer:
             repository = repository.expanduser().resolve(strict=True)
             try:
                 repository_relative = repository.relative_to(host_root)
+                sandbox_repository = Path(record.sandbox_root) / repository_relative
             except ValueError as error:
-                raise ControlError(
-                    "ENVIRONMENT_WORKSPACE_ESCAPE",
-                    "retirement repository escapes its authenticated execution root",
-                ) from error
-            sandbox_repository = Path(record.sandbox_root) / repository_relative
+                if "--inventory" not in argv:
+                    raise ControlError(
+                        "ENVIRONMENT_WORKSPACE_ESCAPE",
+                        "retirement repository escapes its authenticated execution root",
+                    ) from error
+                configured_root = Path(self.config.workspace_root).expanduser().resolve(
+                    strict=True
+                )
+                try:
+                    workspace_relative = repository.relative_to(configured_root)
+                except ValueError as workspace_error:
+                    raise ControlError(
+                        "ENVIRONMENT_WORKSPACE_ESCAPE",
+                        "retirement inventory repository escapes the configured workspace",
+                    ) from workspace_error
+                sandbox_root = Path(record.sandbox_root)
+                if (
+                    record.scope != "project"
+                    or host_root.parent != configured_root
+                    or len(workspace_relative.parts) != 1
+                    or sandbox_root.parent != Path("/workspace")
+                    or sandbox_root.name != host_root.name
+                ):
+                    raise ControlError(
+                        "ENVIRONMENT_WORKSPACE_ESCAPE",
+                        "cross-project retirement inventory requires a matching immediate project grant",
+                    ) from error
+                sandbox_repository = sandbox_root.parent / workspace_relative
             argv.extend([
                 "--execution-root", str(repository),
                 "--sandbox-root", str(sandbox_repository),
