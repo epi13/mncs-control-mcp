@@ -1654,6 +1654,108 @@ def test_project_rpc_exposes_session_authorized_read_operations_and_reports_unkn
     assert len(calls) == 8
 
 
+def test_project_rpc_exposes_session_bound_system_observability(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "projects"
+    project = workspace / "mncs-environment"
+    project.mkdir(parents=True)
+    token = "test-environment-grant"
+    calls: list[tuple[list[str], dict[str, object]]] = []
+    loaded_sessions: list[str] = []
+
+    class Store:
+        def load_snapshot(self, session_id: str) -> dict[str, str]:
+            loaded_sessions.append(session_id)
+            return {"authenticated_principal_id": "principal-agent"}
+
+        def close(self) -> None:
+            pass
+
+    class Environment:
+        state_dir = tmp_path / "state"
+        environment_path = tmp_path / "environment"
+
+        def _pkg(self) -> object:
+            return object()
+
+        def _store(self, _pkg: object) -> Store:
+            return Store()
+
+    server = EnvironmentRPCServer(
+        ControlConfig(
+            workspace_root=workspace,
+            repositories={"environment": "mncs-environment"},
+            sandbox_home=tmp_path / "home",
+            environment_rpc_socket=tmp_path / "rpc" / "environment.sock",
+        ),
+        environment_service=Environment(),
+        policy=object(),
+    )
+    grant = _GrantRecord(
+        grant_id="project-observability-grant",
+        principal_id="principal-agent",
+        host_root=project,
+        sandbox_root="/workspace/mncs-environment",
+        scope="project",
+        uid=0,
+        expires_at=time.monotonic() + 60,
+        token_file=tmp_path / "grant",
+        bound_session_id="ses_selected",
+    )
+    server._grants[hashlib.sha256(token.encode()).hexdigest()] = grant
+
+    def run(argv: list[str], **kwargs: object) -> SimpleNamespace:
+        calls.append((argv, kwargs))
+        return SimpleNamespace(
+            returncode=0,
+            stdout='{"schema":"mncs.system-monitor.observability.v1","status":"ok"}\n',
+            stderr="",
+        )
+
+    monkeypatch.setattr("mncs_control_mcp.environment_rpc.subprocess.run", run)
+    request = {
+        "grant": token,
+        "request_id": "req_project_system_observability",
+        "argv": [
+            "invoke", "ses_selected", "mncs-system-monitor:system-observability",
+        ],
+        "cwd": "/workspace/mncs-environment",
+    }
+    admitted = server.dispatch(request, peer_uid=0)
+    assert admitted["ok"] is True
+    assert json.loads(admitted["result"]["stdout"])["status"] == "ok"
+    assert calls[0][0][-3:] == request["argv"]
+    assert calls[0][1]["env"]["MNCS_ENV_AUTH_PRINCIPAL_ID"] == "principal-agent"
+    assert calls[0][1]["env"]["MNCS_ENV_RPC_REQUEST_ID"] == request["request_id"]
+    assert loaded_sessions == ["ses_selected"]
+
+    wrong_session = server.dispatch({
+        **request,
+        "request_id": "req_project_system_observability_wrong_session",
+        "argv": [
+            "invoke", "ses_other", "mncs-system-monitor:system-observability",
+        ],
+    }, peer_uid=0)
+    assert wrong_session["ok"] is False
+    assert wrong_session["error"]["code"] == "ENVIRONMENT_AUTHORITY_DENIED"
+    assert len(calls) == 1
+    assert loaded_sessions == ["ses_selected"]
+
+    extra_arguments = server.dispatch({
+        **request,
+        "request_id": "req_project_system_observability_extra_arguments",
+        "argv": [
+            "invoke", "ses_selected", "mncs-system-monitor:system-observability",
+            "--include-process-details",
+        ],
+    }, peer_uid=0)
+    assert extra_arguments["ok"] is False
+    assert extra_arguments["error"]["code"] == "ENVIRONMENT_AUTHORITY_DENIED"
+    assert len(calls) == 1
+    assert loaded_sessions == ["ses_selected"]
+
+
 def test_project_rpc_exposes_only_typed_resource_headroom_evaluation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -42,6 +42,7 @@ ALLOWED_INVOKE_CAPABILITIES = frozenset({
     "mncs-environment:projection-evidence-inspection",
     "mncs-environment:campaign-state-inspection",
     "mncs-system-monitor:system-resource-sample",
+    "mncs-system-monitor:system-observability",
     "mncs-automation:automation-resource-headroom-evaluation",
 })
 RPC_SANDBOX_SOCKET = "/run/mncs-environment-rpc/environment.sock"
@@ -612,6 +613,13 @@ class EnvironmentRPCServer:
                     details={"required": [
                         "invoke", "<authorized-session>", argv[2],
                     ]},
+                )
+            elif (argv[2] == "mncs-system-monitor:system-observability"
+                  and record.bound_session_id != argv[1]):
+                raise ControlError(
+                    "ENVIRONMENT_AUTHORITY_DENIED",
+                    "System Monitor observability requires the session selected by this grant's authenticated continuation",
+                    details={"next": "run project continuation and use its selected session"},
                 )
             environment_project = self.config.repositories.get(
                 "environment", "mncs-environment"
