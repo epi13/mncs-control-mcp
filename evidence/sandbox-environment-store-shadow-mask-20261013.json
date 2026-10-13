@@ -1,0 +1,63 @@
+{
+  "schema_version": "mncs.control.sandbox-environment-store-shadow-mask/1",
+  "identity": "ev_control_sandbox_environment_store_shadow_mask_20261013",
+  "recorded_at": "2026-10-13T19:06:50Z",
+  "campaign_identity": "cmp_mncs_continuity_20261010",
+  "environment_session_id": "ses_7226fbcfe65820f7",
+  "source": {
+    "repository": "mncs-control-mcp",
+    "implementation_revision": "e851006699ba17e60e49f1bb81aae924b28872bc",
+    "files": [
+      {
+        "path": "src/mncs_control_mcp/sandbox.py",
+        "sha256": "91e383b02e994f2a3ff9a41012a43ce0514177dda2465216cac5e8bbd70bc5ed"
+      },
+      {
+        "path": "tests/test_sandbox_terminal.py",
+        "sha256": "93414993a5515f1e2923e6a19fb7084f2166e37754daa1a1af60ae59d59270fc"
+      }
+    ]
+  },
+  "behavior": {
+    "environment_persistence_transport": "Every protected Bubblewrap invocation sets MNCS_ENV_PERSISTENCE_TRANSPORT=control-rpc, including invocations without a grant. Environment CLI therefore cannot fall through to local filesystem persistence; absent socket or grant data produces its structured persistence-service-unavailable diagnostic.",
+    "sandbox_home_shadow": "The Store path below /home/developer is overlaid with an empty private read-only directory. Existing sandbox-home bytes remain untouched on the host and are not visible to the protected process.",
+    "canonical_store_access": "No Store path or file descriptor is granted to the agent. Publication remains through the authenticated Control Environment RPC.",
+    "mask_source": "The mask source is outside sandbox_home, user-owned, private, and required to remain empty; unsafe or unavailable mask state fails closed."
+  },
+  "validation": {
+    "protected_mask_test": {
+      "command": "pytest -q tests/test_sandbox_terminal.py::test_bwrap_masks_sandbox_home_environment_store_and_requires_control_rpc",
+      "result": "PASS",
+      "backend": "bwrap",
+      "assertions": [
+        "legacy Store fixture is hidden behind an empty directory",
+        "writes through the protected mount fail",
+        "MNCS_ENV_PERSISTENCE_TRANSPORT is control-rpc",
+        "no RPC socket or grant is configured without an authorized grant",
+        "the test-owned legacy marker remains unchanged on the host"
+      ]
+    },
+    "protected_rpc_continuity_tests": {
+      "command": "pytest -q tests/test_sandbox_terminal.py::test_project_bwrap_reconciles_checkpoint_after_control_rpc_restart tests/test_sandbox_terminal.py::test_workspace_bwrap_entry_reuses_session_and_attaches_project_capsule",
+      "result": "PASS; 2 tests",
+      "backend": "bwrap"
+    },
+    "combined_regressions": {
+      "command": "pytest -q tests/test_environment_rpc.py tests/test_sandbox_terminal.py",
+      "result": "PASS; 55 tests (39 Environment RPC, 16 sandbox)"
+    },
+    "static_checks": {
+      "command": "ruff check src/mncs_control_mcp/sandbox.py tests/test_sandbox_terminal.py",
+      "result": "PASS"
+    }
+  },
+  "limitations": [
+    "The protected bwrap test proves fail-closed masking and the authenticated RPC continuity tests use isolated test-owned Store state. This record does not claim a canonical Store publication acceptance test.",
+    "Compiler and Forge remain owned by the prior exclusive claim holders; no tests, merges, or worktree retirement were performed in those repositories."
+  ],
+  "delivery": {
+    "branch": "campaign/control-store-shadow-mask-20261013",
+    "revision": "e851006699ba17e60e49f1bb81aae924b28872bc",
+    "main_merge_and_push_pending": true
+  }
+}
