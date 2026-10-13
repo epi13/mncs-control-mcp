@@ -544,18 +544,25 @@ class EnvironmentRPCServer:
         if command == "campaign-state":
             self._authorize_campaign_state_argv(argv, record)
         if command == "artifact-read":
+            allowed_artifacts = {
+                ("mncs-system-monitor:system-resource-sample",
+                 "system-resource-sample.json"),
+                ("mncs-automation:automation-resource-headroom-evaluation",
+                 "resource-headroom-decision.json"),
+            }
             if (len(argv) != 5
                     or not re.fullmatch(r"ses_[A-Za-z0-9_-]{1,120}", argv[1])
-                    or argv[2] != "mncs-system-monitor:system-resource-sample"
-                    or not re.fullmatch(r"cap_[0-9a-f]{16}", argv[3])
-                    or argv[4] != "system-resource-sample.json"):
+                    or (argv[2], argv[4]) not in allowed_artifacts
+                    or not re.fullmatch(r"cap_[0-9a-f]{16}", argv[3])):
                 raise ControlError(
                     "ENVIRONMENT_AUTHORITY_DENIED",
-                    "Control exposes only the bounded System Monitor sample artifact",
+                    "Control exposes only bounded Monitor sample and Automation decision artifacts",
                     details={"required": [
-                        "artifact-read", "<selected-session>",
-                        "mncs-system-monitor:system-resource-sample",
-                        "<capability-binding-id>", "system-resource-sample.json",
+                        "artifact-read", "<selected-session>", "<capability>",
+                        "<capability-binding-id>", "<declared-artifact-file>",
+                    ], "allowed": [
+                        {"capability": capability, "path": path}
+                        for capability, path in sorted(allowed_artifacts)
                     ]},
                 )
             environment_project = self.config.repositories.get(

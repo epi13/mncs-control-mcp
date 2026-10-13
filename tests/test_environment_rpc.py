@@ -655,6 +655,23 @@ def test_artifact_read_is_bound_to_environment_selected_project_session(
     ]
     assert authorized_sessions[-1] == ("ses_selected", "principal-agent")
 
+    decision_capability = (
+        "mncs-automation:automation-resource-headroom-evaluation"
+    )
+    decision_binding_id = "cap_" + "b" * 16
+    decision_read = server.dispatch({
+        **base,
+        "request_id": "req_artifact_read_automation_decision",
+        "argv": ["artifact-read", "ses_selected", decision_capability,
+                 decision_binding_id, "resource-headroom-decision.json"],
+    }, peer_uid=0)
+    assert decision_read["ok"] is True
+    assert calls[1][0][-5:] == [
+        "artifact-read", "ses_selected", decision_capability,
+        decision_binding_id, "resource-headroom-decision.json",
+    ]
+    assert authorized_sessions[-1] == ("ses_selected", "principal-agent")
+
     selected_session[0] = "ses_other"
     server.dispatch({
         **base,
@@ -676,6 +693,8 @@ def test_artifact_read_is_bound_to_environment_selected_project_session(
          "system-resource-sample.json"],
         ["artifact-read", "ses_selected", capability, "not-a-binding",
          "system-resource-sample.json"],
+        ["artifact-read", "ses_selected", decision_capability, decision_binding_id,
+         "system-resource-sample.json"],
     )):
         rejected = server.dispatch({
             **base,
@@ -683,7 +702,7 @@ def test_artifact_read_is_bound_to_environment_selected_project_session(
             "argv": argv,
         }, peer_uid=0)
         assert rejected["error"]["code"] == "ENVIRONMENT_AUTHORITY_DENIED"
-    assert len(calls) == 1
+    assert len(calls) == 2
 
 
 def test_project_entry_returns_campaign_capsule_without_changing_entry_authority(
