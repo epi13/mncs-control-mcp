@@ -1,0 +1,103 @@
+{
+  "schema_version": "mncs.control.retirement-inventory-sibling-sandbox-acceptance/1",
+  "identity": "ev_control_retirement_sibling_inventory_acceptance_20261013",
+  "recorded_at_utc": "2026-10-13T21:16:12Z",
+  "owner": "mncs-control-mcp",
+  "campaign_identity": "cmp_mncs_continuity_20261010",
+  "source": {
+    "repository": "mncs-control-mcp",
+    "base_main": "6ecfc25af7616e6a56ea6da8f1a4241c7e55c5c9",
+    "implementation_commit": "a9873a1eb4f0fbcdcf3123e9fe943ce70ef2cc21",
+    "files": {
+      "src/mncs_control_mcp/environment_rpc.py": "164e44b15831435d0e25e77440949d619e08ef9f0a9d655957fdc42f12144261",
+      "tests/test_environment_rpc.py": "e6e10edeb0fa7f8cfc354ad3588cb151638a0b3644b218573d4799c75e1193d6"
+    }
+  },
+  "change": {
+    "behavior": "A project-scoped Control grant can map an immediate configured sibling checkout to its /workspace/<repository> alias only for the validated --inventory --dry-run operation.",
+    "authority_preserved": [
+      "Environment RPC authentication and principal-bound session authorization remain required.",
+      "The inventory parser still requires --inventory and --dry-run and rejects mutation targets.",
+      "Retirement mutations remain restricted to the exact granted repository.",
+      "The sibling must be one immediate, non-symlink Git checkout under the configured workspace.",
+      "No sibling filesystem path, file descriptor, or writable project grant was given to the protected caller."
+    ]
+  },
+  "focused_validation": {
+    "sandbox_backend": "bwrap",
+    "scope": "project",
+    "project": "mncs-control-mcp",
+    "network": false,
+    "test_command": "python3 -B -m pytest -q tests/test_environment_rpc.py -k 'retire_rpc' --tb=short",
+    "result": "3 passed",
+    "static_checks": {
+      "command": "python3 -B -m ruff check src/mncs_control_mcp/environment_rpc.py tests/test_environment_rpc.py && python3 -B -m py_compile src/mncs_control_mcp/environment_rpc.py tests/test_environment_rpc.py && git diff --check",
+      "result": "PASS"
+    }
+  },
+  "protected_integration": {
+    "control_service": {
+      "unit": "mncs-control-tunnel.service",
+      "active_after_restart": true,
+      "invocation_before": "ca240760133c4186bf4b6e59a811441b",
+      "invocation_after": "b9ebacae99194e0ca7992eb53128fcb2",
+      "main_pid_after": 481554,
+      "started_at_after": "2026-10-13T13:12:57-08:00"
+    },
+    "execution": {
+      "job_id": "term-70b0baeb9d39b5ba4566543b",
+      "sandbox_backend": "bwrap",
+      "scope": "project",
+      "project": "mncs-control-mcp",
+      "network": false,
+      "command": "python3 -B -m mncs_env.cli retire ses_7226fbcfe65820f7 --repository mncs-compiler --dry-run --inventory",
+      "started_at": "2026-10-13T21:15:34.739034Z",
+      "completed_at": "2026-10-13T21:15:44.455546Z",
+      "exit_code": 0,
+      "session_id": "ses_7226fbcfe65820f7",
+      "mutation_performed": false,
+      "retirement_inventory": {
+        "schema_version": "mncs.environment.worktree-inventory/1",
+        "repository": "mncs-compiler",
+        "git_common_directory_identity": "git-common:0356dd87cca2a0c0",
+        "canonical_ref": "origin/main",
+        "canonical_head": "4e4bf038b46b6090900994bce7121dbe5eafd44f",
+        "branch_count": 62,
+        "worktree_count": 66,
+        "branches_by_classification": {
+          "canonical-branch": 1,
+          "protected-by-another-consumer": 61
+        },
+        "worktrees_by_classification": {
+          "protected-by-another-consumer": 66
+        },
+        "worktrees_by_access_disposition": {
+          "not-probed-protected": 3,
+          "outside-current-execution-scope": 63
+        },
+        "candidate_branch": {
+          "branch": "campaign/keyword-local-index-delivery-20261010",
+          "head": "2b6f38113a4716ce3918f6a3318e70353caeaa88",
+          "canonical_ahead_count": 1,
+          "canonical_behind_count": 14,
+          "canonical_reachable": false,
+          "evidence_only_tip": true,
+          "evidence_paths_at_tip": [
+            "evidence/SELF-HOST-MATRIX.json"
+          ],
+          "classification": "protected-by-another-consumer",
+          "claim_id": "claim:mncs-compiler",
+          "claim_version": 63,
+          "claim_session_id": "ses_d2537acde8b8a875"
+        }
+      },
+      "result_wrapper": "A protected Python process invoked the command in a subprocess, parsed its JSON response, and emitted only the summary and keyword-local-index candidate row."
+    }
+  },
+  "readiness": "PASS_FOR_PROTECTED_READ_ONLY_SIBLING_INVENTORY",
+  "limitations": [
+    "The live inventory marks every Compiler branch and worktree protected by the existing exclusive claim; no Compiler tests, merges, branch mutations, or worktree retirement were performed.",
+    "The live inventory classified three worktrees as not-probed-protected and 63 as outside this execution scope; none were classified as deleted.",
+    "This proves the Control mapping and Environment read-only inventory path only; it does not resolve Compiler claim ownership."
+  ]
+}
