@@ -1,0 +1,86 @@
+{
+  "schema_version": "mncs.control.artifact-read-binding-proof/1",
+  "identity": "ev_control_system_monitor_summary_artifact_read_20261013",
+  "recorded_at": "2026-10-13T19:18:48Z",
+  "campaign_identity": "cmp_mncs_continuity_20261010",
+  "environment_session_id": "ses_7226fbcfe65820f7",
+  "source": {
+    "repository": "mncs-control-mcp",
+    "implementation_revision": "04d0a888090f29fc8fa8c5b7bae4717b08ead756",
+    "files": [
+      {
+        "path": "src/mncs_control_mcp/environment_rpc.py",
+        "sha256": "b48add196d7150edc325b1d9aee3a2282c251204e73cc27111538444b17646f6"
+      },
+      {
+        "path": "tests/test_environment_rpc.py",
+        "sha256": "f7fc5700faade5a0da4721e2ca63ba0fb180546e41599c159f62eea292201637"
+      }
+    ]
+  },
+  "authorization_contract": {
+    "capability": "mncs-system-monitor:system-observability",
+    "artifact_file": "system-observability-summary.json",
+    "scope": "one exact capability and filename pair",
+    "grant_project": "mncs-environment",
+    "session_binding": "artifact reads require the session selected through authenticated continuation",
+    "binding_identity": "the current capability inventory binding id is required",
+    "agent_store_path_or_descriptor_exposed": false
+  },
+  "protected_readback": {
+    "backend": "bwrap",
+    "transport": "authenticated MNCS Control Environment RPC",
+    "process": "fresh terminal process; continuation selected the campaign session before artifact-read",
+    "session_id": "ses_7226fbcfe65820f7",
+    "capability_binding_id": "cap_8066edfab5edad2c",
+    "artifact_file": "system-observability-summary.json",
+    "byte_count": 1334,
+    "sha256": "fd34fe9cb013e82e71d92478280eaad97d30bc2bf679510db01279d678338659",
+    "json_parsed": true,
+    "schema_field_present": true,
+    "top_level_keys": [
+      "host",
+      "observed_at",
+      "pressure",
+      "sample_time",
+      "sampled_process_count",
+      "schema"
+    ]
+  },
+  "validation": {
+    "focused_rpc_test": {
+      "command": "pytest -q tests/test_environment_rpc.py::test_artifact_read_is_bound_to_environment_selected_project_session",
+      "result": "PASS"
+    },
+    "rpc_test_file": {
+      "command": "pytest -q tests/test_environment_rpc.py",
+      "result": "PASS; 39 tests"
+    },
+    "static_checks": {
+      "command": "ruff check src/mncs_control_mcp/environment_rpc.py tests/test_environment_rpc.py",
+      "result": "PASS"
+    },
+    "negative_cases": [
+      "wrong selected session is denied before provider invocation",
+      "extra argument is denied before provider invocation",
+      "the approved summary pair succeeds for the selected session and passes the existing authorized-session check"
+    ]
+  },
+  "reconciliation": {
+    "stale_binding_attempt": {
+      "binding_id": "cap_75cd183cf08aea1e",
+      "result": "rejected with structured publication-rejected diagnostic; no artifact mutation",
+      "resolution": "fresh selected-session capability inventory supplied cap_8066edfab5edad2c"
+    },
+    "publisher": "the Monitor invocation and canonical Store publication predate this readback; this record proves mediated fresh-process retrieval"
+  },
+  "limitations": [
+    "This proves the authorized artifact-read path for the declared summary. It does not prove a compiler execution, Forge receipt, or Automation scheduling decision grounded in the observation.",
+    "Compiler and Forge remain protected by their prior exclusive claims; no operations were performed in those repositories."
+  ],
+  "delivery": {
+    "branch": "main",
+    "revision": "04d0a888090f29fc8fa8c5b7bae4717b08ead756",
+    "status": "pushed"
+  }
+}
