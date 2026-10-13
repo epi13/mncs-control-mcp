@@ -42,6 +42,7 @@ ALLOWED_INVOKE_CAPABILITIES = frozenset({
     "mncs-environment:projection-evidence-inspection",
     "mncs-environment:campaign-state-inspection",
     "mncs-system-monitor:system-resource-sample",
+    "mncs-automation:automation-resource-headroom-evaluation",
 })
 RPC_SANDBOX_SOCKET = "/run/mncs-environment-rpc/environment.sock"
 LOGGER = logging.getLogger(__name__)
@@ -590,7 +591,12 @@ class EnvironmentRPCServer:
                         "next": "inspect the session capability inventory and extend the Control operation contract",
                     },
                 )
-            if len(argv) != 3:
+            resource_evaluation = (
+                argv[2] == "mncs-automation:automation-resource-headroom-evaluation"
+            )
+            if resource_evaluation:
+                self._authorize_resource_headroom_invocation(argv, record)
+            elif len(argv) != 3:
                 raise ControlError(
                     "ENVIRONMENT_AUTHORITY_DENIED",
                     "Control exposes this capability only with its session-bound declared invocation",
@@ -938,6 +944,87 @@ class EnvironmentRPCServer:
                     translated[index] = "--repository=" + str(repository)
                 index += 1
         return translated
+
+    def _authorize_resource_headroom_invocation(
+        self, argv: list[str], record: _GrantRecord,
+    ) -> None:
+        """Admit one typed Monitor-artifact to Automation evaluation request."""
+        if record.bound_session_id != argv[1]:
+            raise ControlError(
+                "ENVIRONMENT_AUTHORITY_DENIED",
+                "resource-headroom evaluation requires the session selected by this grant's authenticated continuation",
+                details={"next": "run project continuation and use its selected session"},
+            )
+        required_prefix = [
+            "invoke",
+            argv[1] if len(argv) > 1 else "",
+            "mncs-automation:automation-resource-headroom-evaluation",
+            "--input-artifact",
+            "monitor-sample",
+            "mncs-system-monitor:system-resource-sample",
+        ]
+        if (len(argv) != 25 or argv[:6] != required_prefix
+                or re.fullmatch(r"cap_[0-9a-f]{16}", argv[6]) is None
+                or argv[7] != "system-resource-sample.json"
+                or argv[8] != "--"):
+            raise ControlError(
+                "ENVIRONMENT_AUTHORITY_DENIED",
+                "resource-headroom evaluation requires the bounded System Monitor Store artifact",
+                details={"required": [
+                    "invoke", "<selected-session>",
+                    "mncs-automation:automation-resource-headroom-evaluation",
+                    "--input-artifact monitor-sample",
+                    "mncs-system-monitor:system-resource-sample",
+                    "<capability-binding-id> system-resource-sample.json",
+                    "--", "<bounded resource-evaluation parameters>",
+                ]},
+            )
+
+        option_names = [
+            "--input-name",
+            "--measurement-execution",
+            "--measurement-subject-identity",
+            "--intent-identity",
+            "--requested-memory-bytes",
+            "--measurement-scale-percent",
+            "--minimum-host-headroom-bytes",
+            "--max-age-ms",
+        ]
+        values = argv[10::2]
+        if argv[9::2] != option_names or len(values) != len(option_names):
+            raise ControlError(
+                "ENVIRONMENT_AUTHORITY_DENIED",
+                "resource-headroom evaluation arguments exceed the typed operation contract",
+            )
+        (input_name, measurement_execution, subject_identity, intent_identity,
+         requested_memory, scale_percent, minimum_headroom, max_age) = values
+        identity_pattern = r"[A-Za-z0-9][A-Za-z0-9._:-]{0,159}"
+        if (input_name != "monitor-sample"
+                or re.fullmatch(identity_pattern, measurement_execution) is None
+                or re.fullmatch(identity_pattern, subject_identity) is None
+                or re.fullmatch(identity_pattern, intent_identity) is None):
+            raise ControlError(
+                "ENVIRONMENT_RPC_INVALID_REQUEST",
+                "resource-headroom identities are malformed",
+            )
+        number_pattern = r"(?:0|[1-9][0-9]{0,18})"
+        numeric_values: list[int] = []
+        for value in (requested_memory, scale_percent, minimum_headroom, max_age):
+            if re.fullmatch(number_pattern, value) is None:
+                raise ControlError(
+                    "ENVIRONMENT_RPC_INVALID_REQUEST",
+                    "resource-headroom numeric parameters must be bounded unsigned integers",
+                )
+            numeric_values.append(int(value))
+        requested_bytes, scale, host_reserve, maximum_age = numeric_values
+        if (not 0 < requested_bytes <= 2**63 - 1
+                or not 100 <= scale <= 500
+                or not 0 <= host_reserve <= 2**63 - 1
+                or not 0 <= maximum_age <= 86_400_000):
+            raise ControlError(
+                "ENVIRONMENT_RPC_INVALID_REQUEST",
+                "resource-headroom numeric parameters exceed their declared bounds",
+            )
 
     def _authorize_campaign_state_argv(
         self, argv: list[str], record: _GrantRecord,

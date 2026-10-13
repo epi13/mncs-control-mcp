@@ -1635,6 +1635,125 @@ def test_project_rpc_exposes_session_authorized_read_operations_and_reports_unkn
     assert len(calls) == 8
 
 
+def test_project_rpc_exposes_only_typed_resource_headroom_evaluation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "projects"
+    project = workspace / "mncs-environment"
+    project.mkdir(parents=True)
+    token = "project-resource-headroom"
+    calls: list[tuple[list[str], dict[str, object]]] = []
+
+    class Store:
+        def load_snapshot(self, session_id: str) -> dict[str, str]:
+            assert session_id == "ses_resource"
+            return {"authenticated_principal_id": "principal-agent"}
+
+        def close(self) -> None:
+            pass
+
+    class Environment:
+        state_dir = tmp_path / "state"
+        environment_path = tmp_path / "environment"
+
+        def _pkg(self) -> object:
+            return object()
+
+        def _store(self, _pkg: object) -> Store:
+            return Store()
+
+    server = EnvironmentRPCServer(
+        ControlConfig(
+            workspace_root=workspace,
+            repositories={"environment": "mncs-environment"},
+            sandbox_home=tmp_path / "home",
+            environment_rpc_socket=tmp_path / "rpc" / "environment.sock",
+        ),
+        environment_service=Environment(),
+        policy=object(),
+    )
+    grant = _GrantRecord(
+        grant_id="project-resource-grant",
+        principal_id="principal-agent",
+        host_root=project,
+        sandbox_root="/workspace/mncs-environment",
+        scope="project",
+        uid=0,
+        expires_at=time.monotonic() + 60,
+        token_file=tmp_path / "grant",
+        bound_session_id="ses_resource",
+    )
+    server._grants[hashlib.sha256(token.encode()).hexdigest()] = grant
+
+    def run(argv: list[str], **kwargs: object) -> SimpleNamespace:
+        calls.append((argv, kwargs))
+        return SimpleNamespace(
+            returncode=0,
+            stdout=(
+                '{"schema_version":"mncs.automation.resource-headroom-evaluation/1",'
+                '"condition":"unknown"}\n'
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr("mncs_control_mcp.environment_rpc.subprocess.run", run)
+    invocation_argv = [
+        "invoke", "ses_resource",
+        "mncs-automation:automation-resource-headroom-evaluation",
+        "--input-artifact", "monitor-sample",
+        "mncs-system-monitor:system-resource-sample",
+        "cap_0123456789abcdef", "system-resource-sample.json", "--",
+        "--input-name", "monitor-sample",
+        "--measurement-execution", "pending-forge-execution",
+        "--measurement-subject-identity", "pending-forge-subject",
+        "--intent-identity", "compiler-resource-loop-next",
+        "--requested-memory-bytes", "1073741824",
+        "--measurement-scale-percent", "125",
+        "--minimum-host-headroom-bytes", "268435456",
+        "--max-age-ms", "60000",
+    ]
+    request = {
+        "grant": token,
+        "request_id": "req_resource_headroom_invoke",
+        "argv": invocation_argv,
+        "cwd": "/workspace/mncs-environment",
+    }
+    response = server.dispatch(request, peer_uid=0)
+
+    assert response["ok"] is True
+    assert json.loads(response["result"]["stdout"])["condition"] == "unknown"
+    assert calls[0][0][-len(invocation_argv):] == invocation_argv
+    assert calls[0][1]["env"]["MNCS_ENV_AUTH_PRINCIPAL_ID"] == "principal-agent"
+    assert calls[0][1]["env"]["MNCS_ENV_RPC_REQUEST_ID"] == "req_resource_headroom_invoke"
+    assert server.dispatch(request, peer_uid=0) == response
+    assert len(calls) == 1
+
+    bad_requests = [
+        invocation_argv[:6] + ["cap_invalid"] + invocation_argv[7:],
+        invocation_argv[:5] + ["mncs-forge:execution-receipts"] + invocation_argv[6:],
+        invocation_argv[:7] + ["../system-resource-sample.json"] + invocation_argv[8:],
+        invocation_argv[:-2] + ["--max-age-ms", "86400001"],
+        invocation_argv + ["--mncs", "/bin/false"],
+    ]
+    for index, argv in enumerate(bad_requests):
+        rejected = server.dispatch({
+            **request,
+            "request_id": f"req_resource_headroom_rejected_{index}",
+            "argv": argv,
+        }, peer_uid=0)
+        assert rejected["ok"] is False
+    assert len(calls) == 1
+
+    grant.bound_session_id = "ses_other"
+    wrong_session = server.dispatch({
+        **request,
+        "request_id": "req_resource_headroom_wrong_session",
+    }, peer_uid=0)
+    assert wrong_session["ok"] is False
+    assert wrong_session["error"]["code"] == "ENVIRONMENT_AUTHORITY_DENIED"
+    assert len(calls) == 1
+
+
 def test_store_verify_rpc_is_session_bound_and_read_only(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
