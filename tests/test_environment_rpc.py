@@ -1061,6 +1061,7 @@ def test_project_continuation_cli_returns_compact_duplicate_session_capsule(
                 "claim_ids": ["claim:mncs-environment"],
                 "claims": [{"claim_id": "claim:mncs-environment", "version": 4}],
                 "checkpoint_ids": ["chk_1", "chk_2"],
+                "campaign_state_checkpoint_id": "chk_campaign_state",
                 "latest_checkpoint": {"identity": "chk_2", "sequence": 2},
                 "evidence": evidence,
                 "evidence_count": 64,
@@ -1156,6 +1157,7 @@ def test_project_continuation_cli_returns_compact_duplicate_session_capsule(
     linked, other = result["continuations"]
     assert linked["project_reference"]["basis"] == ["active_claim.repository"]
     assert linked["claim_ids"] == ["claim:mncs-environment"]
+    assert linked["campaign_state_checkpoint_id"] == "chk_campaign_state"
     assert linked["latest_checkpoint"]["identity"] == "chk_2"
     assert linked["evidence_count"] == 64
     assert [item["identity"] for item in linked["evidence_refs"]] == [

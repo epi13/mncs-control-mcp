@@ -1792,6 +1792,7 @@ class EnvironmentRPCServer:
             "workspace_root", "project_reference", "work_intent", "repositories",
             "authorized_consumers", "campaign_session_ids",
             "repository_facts_source", "claim_ids", "claims", "checkpoint_ids",
+            "campaign_state_checkpoint_id",
             "latest_checkpoint", "delivery", "unresolved_pressures", "evidence_count",
             "evidence_truncated", "campaign_charter", "live_repository_observation",
             "recorded_checkout_comparisons",
