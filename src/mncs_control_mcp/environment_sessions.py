@@ -35,7 +35,7 @@ _CAMPAIGN_REPOSITORY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _CAMPAIGN_CHARTER_SCHEMA = "mncs.environment.campaign-charter/1"
 _CAMPAIGN_CHARTER_MAX_BYTES = 64 * 1024
 _CAMPAIGN_CAPSULE_EVIDENCE_MAX = 32
-_CAMPAIGN_CHARTER_EVIDENCE_SEARCH_MAX = 128
+_CAMPAIGN_CHARTER_EVIDENCE_SEARCH_MAX = 16
 _GIT_OBJECT_ID = re.compile(r"^(?:[a-f0-9]{40}|[a-f0-9]{64})$")
 _SHA256 = re.compile(r"^[a-f0-9]{64}$")
 _CONTINUABLE_LIFECYCLES = frozenset({
@@ -1254,10 +1254,22 @@ class EnvironmentService:
                     "ENVIRONMENT_CAMPAIGN_STATE_CONFLICT",
                     "campaign checkpoint changed while building the continuation capsule",
                 )
-            # Search the owner-validated full ledger for the charter pointer,
-            # while keeping the emitted context capsule on its bounded recent
-            # evidence window.
-            charter_evidence = campaign_state["evidence"]
+            # Environment returns this small index from the validated full
+            # append-only ledger; the ordinary context remains on its recent
+            # evidence page. A missing, inconsistent, or truncated index is
+            # fail-closed and cannot suppress ownership ambiguity.
+            charter_evidence = []
+            charter_index = campaign_state.get("campaign_charter_evidence")
+            if isinstance(charter_index, dict):
+                charter_references = charter_index.get("references")
+                charter_count = charter_index.get("count")
+                if (charter_index.get("truncated") is False
+                        and isinstance(charter_count, int)
+                        and not isinstance(charter_count, bool)
+                        and 0 <= charter_count <= _CAMPAIGN_CHARTER_EVIDENCE_SEARCH_MAX
+                        and isinstance(charter_references, list)
+                        and len(charter_references) == charter_count):
+                    charter_evidence = charter_references
         verified_charter = self._verified_campaign_charter(
             campaign_identity if isinstance(campaign_identity, str) else None,
             charter_evidence,
@@ -1282,13 +1294,14 @@ class EnvironmentService:
         self, campaign_identity: str | None, evidence: Any,
         *, evidence_limit: int = _CAMPAIGN_CHARTER_EVIDENCE_SEARCH_MAX,
     ) -> dict[str, Any] | None:
-        """Project a charter only when its Environment evidence link verifies.
+        """Project a charter only when one Environment evidence link verifies.
 
         The evidence reference chooses a Git object and relative path, never a
         host path. Reads are confined to the configured Environment project,
         an immediate nonsymlink child of the workspace, and to small blobs in
-        the exact recorded commit. The digest and charter campaign identity
-        must both match before any objective text reaches the capsule.
+        the exact recorded commit. Candidate names are only hints: each blob
+        must still pass schema, campaign, and digest validation before it can
+        be projected.
         """
         if not isinstance(campaign_identity, str) or not campaign_identity:
             return None
@@ -1310,28 +1323,9 @@ class EnvironmentService:
             and isinstance(item.get("identity"), str)
             and "campaign_charter" in item["identity"]
         ]
-        # Old and new charters can both be legitimate evidence. Do not select
-        # one based on list order when the campaign projection is ambiguous.
-        if len(candidates) != 1:
-            return None
-
-        reference = candidates[0]
-        path_value = reference.get("path")
-        commit = reference.get("commit")
-        digest = reference.get("sha256")
-        evidence_identity = reference.get("identity")
-        if (not isinstance(path_value, str) or not path_value or len(path_value) > 512
-                or "\\" in path_value or "\x00" in path_value
-                or path_value.startswith("/")
-                or not isinstance(commit, str) or not _GIT_OBJECT_ID.fullmatch(commit)
-                or not isinstance(digest, str) or not _SHA256.fullmatch(digest)
-                or not isinstance(evidence_identity, str) or len(evidence_identity) > 160):
-            return None
-        path_parts = path_value.split("/")
-        if any(part in {"", ".", ".."} for part in path_parts):
-            return None
-        relative_path = PurePosixPath(path_value)
-        if relative_path.is_absolute():
+        # Bound verification work, then resolve false-positive identity hints
+        # from their exact blobs. Multiple valid charters remain ambiguous.
+        if not candidates or len(candidates) > 8:
             return None
 
         try:
@@ -1344,7 +1338,6 @@ class EnvironmentService:
                 or project_root.parent != workspace_root):
             return None
 
-        object_spec = f"{commit}:{relative_path.as_posix()}"
         git_environment = {
             "PATH": os.environ.get("PATH", os.defpath),
             "HOME": str(workspace_root),
@@ -1354,61 +1347,83 @@ class EnvironmentService:
             "GIT_NO_REPLACE_OBJECTS": "1",
             "LC_ALL": "C",
         }
-        try:
-            size_result = subprocess.run(
-                ["git", "cat-file", "-s", object_spec],
-                cwd=project_root,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                env=git_environment,
-                timeout=3.0,
-                check=False,
-            )
-            if size_result.returncode != 0 or len(size_result.stdout) > 32:
-                return None
-            blob_size = int(size_result.stdout.strip())
-            if blob_size < 1 or blob_size > _CAMPAIGN_CHARTER_MAX_BYTES:
-                return None
-            blob_result = subprocess.run(
-                ["git", "cat-file", "blob", object_spec],
-                cwd=project_root,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                env=git_environment,
-                timeout=3.0,
-                check=False,
-            )
-            if (blob_result.returncode != 0
-                    or len(blob_result.stdout) != blob_size
-                    or hashlib.sha256(blob_result.stdout).hexdigest() != digest):
-                return None
-            charter = json.loads(blob_result.stdout.decode("utf-8"))
-        except (OSError, subprocess.SubprocessError, ValueError, UnicodeError):
-            return None
+        verified: list[dict[str, Any]] = []
+        for reference in candidates:
+            path_value = reference.get("path")
+            commit = reference.get("commit")
+            digest = reference.get("sha256")
+            evidence_identity = reference.get("identity")
+            if (not isinstance(path_value, str) or not path_value or len(path_value) > 512
+                    or "\\" in path_value or "\x00" in path_value
+                    or path_value.startswith("/")
+                    or not isinstance(commit, str) or not _GIT_OBJECT_ID.fullmatch(commit)
+                    or not isinstance(digest, str) or not _SHA256.fullmatch(digest)
+                    or not isinstance(evidence_identity, str) or len(evidence_identity) > 160):
+                continue
+            path_parts = path_value.split("/")
+            if any(part in {"", ".", ".."} for part in path_parts):
+                continue
+            relative_path = PurePosixPath(path_value)
+            if relative_path.is_absolute():
+                continue
 
-        if (not isinstance(charter, dict)
-                or charter.get("schema_version") != _CAMPAIGN_CHARTER_SCHEMA
-                or charter.get("campaign_identity") != campaign_identity):
-            return None
-        objective = charter.get("objective")
-        charter_identity = charter.get("identity")
-        if (not isinstance(objective, str) or not objective.strip()
-                or not isinstance(charter_identity, str) or not charter_identity):
-            return None
-        return {
-            "status": "verified",
-            "identity": charter_identity[:160],
-            "evidence_identity": evidence_identity,
-            "objective": objective.strip()[:1200],
-            "source": {
-                "repository": configured_name,
-                "commit": commit,
-                "path": relative_path.as_posix(),
-                "sha256": digest,
-            },
-        }
+            object_spec = f"{commit}:{relative_path.as_posix()}"
+            try:
+                size_result = subprocess.run(
+                    ["git", "cat-file", "-s", object_spec],
+                    cwd=project_root,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    env=git_environment,
+                    timeout=3.0,
+                    check=False,
+                )
+                if size_result.returncode != 0 or len(size_result.stdout) > 32:
+                    continue
+                blob_size = int(size_result.stdout.strip())
+                if blob_size < 1 or blob_size > _CAMPAIGN_CHARTER_MAX_BYTES:
+                    continue
+                blob_result = subprocess.run(
+                    ["git", "cat-file", "blob", object_spec],
+                    cwd=project_root,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    env=git_environment,
+                    timeout=3.0,
+                    check=False,
+                )
+                if (blob_result.returncode != 0
+                        or len(blob_result.stdout) != blob_size
+                        or hashlib.sha256(blob_result.stdout).hexdigest() != digest):
+                    continue
+                charter = json.loads(blob_result.stdout.decode("utf-8"))
+            except (OSError, subprocess.SubprocessError, ValueError, UnicodeError):
+                continue
+
+            if (not isinstance(charter, dict)
+                    or charter.get("schema_version") != _CAMPAIGN_CHARTER_SCHEMA
+                    or charter.get("campaign_identity") != campaign_identity):
+                continue
+            objective = charter.get("objective")
+            charter_identity = charter.get("identity")
+            if (not isinstance(objective, str) or not objective.strip()
+                    or not isinstance(charter_identity, str) or not charter_identity):
+                continue
+            verified.append({
+                "status": "verified",
+                "identity": charter_identity[:160],
+                "evidence_identity": evidence_identity,
+                "objective": objective.strip()[:1200],
+                "source": {
+                    "repository": configured_name,
+                    "commit": commit,
+                    "path": relative_path.as_posix(),
+                    "sha256": digest,
+                },
+            })
+        return verified[0] if len(verified) == 1 else None
 
     @staticmethod
     def _bounded_capsule_value(

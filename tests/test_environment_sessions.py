@@ -52,7 +52,8 @@ def _config(tmp_path: Path, **overrides) -> ControlConfig:
 def _campaign_charter_result(
     tmp_path: Path, *, referenced_digest: str | None = None,
     charter_campaign: str = "campaign-1", evidence_prefix: int = 0,
-    evidence_suffix: int = 0,
+    evidence_suffix: int = 0, selector_decoy: bool = False,
+    charter_index_truncated: bool = False, second_valid_charter: bool = False,
 ) -> dict:
     workspace = tmp_path / "projects"
     control_project = workspace / "mncs-control-mcp"
@@ -72,6 +73,26 @@ def _campaign_charter_result(
     }, sort_keys=True).encode("utf-8")
     charter_path = environment_project / "evidence" / "campaign-charter-test.json"
     charter_path.write_bytes(raw_charter)
+    raw_selector = json.dumps({
+        "schema_version": "mncs.environment.campaign-charter-task-selector/1",
+        "identity": "ev_campaign_charter_task_selector_restart_20261012",
+        "campaign_identity": charter_campaign,
+        "objective": "This selector identity is not a charter artifact.",
+    }, sort_keys=True).encode("utf-8")
+    raw_secondary_charter = json.dumps({
+        "schema_version": "mncs.environment.campaign-charter/1",
+        "identity": "ev_test_secondary_campaign_charter",
+        "campaign_identity": charter_campaign,
+        "objective": "This is a conflicting second charter.",
+    }, sort_keys=True).encode("utf-8")
+    if selector_decoy:
+        (environment_project / "evidence" / "campaign-charter-task-selector.json").write_bytes(
+            raw_selector
+        )
+    if second_valid_charter:
+        (environment_project / "evidence" / "campaign-charter-secondary.json").write_bytes(
+            raw_secondary_charter
+        )
     subprocess.run(["git", "-C", str(environment_project), "add", "evidence"], check=True)
     subprocess.run(["git", "-C", str(environment_project), "commit", "-q", "-m",
                     "Add test charter"], check=True)
@@ -92,7 +113,19 @@ def _campaign_charter_result(
         "commit": commit,
         "path": "evidence/campaign-charter-test.json",
         "sha256": referenced_digest or digest,
-    }] + [{
+    }] + ([{
+        "identity": "ev_campaign_charter_task_selector_restart_20261012",
+        "repository": "mncs-environment",
+        "commit": commit,
+        "path": "evidence/campaign-charter-task-selector.json",
+        "sha256": hashlib.sha256(raw_selector).hexdigest(),
+    }] if selector_decoy else []) + ([{
+        "identity": "ev_env_campaign_charter_secondary_pointer_test",
+        "repository": "mncs-environment",
+        "commit": commit,
+        "path": "evidence/campaign-charter-secondary.json",
+        "sha256": hashlib.sha256(raw_secondary_charter).hexdigest(),
+    }] if second_valid_charter else []) + [{
         "identity": f"ev_test_after_charter_{index:02d}",
         "repository": "mncs-environment",
         "commit": commit,
@@ -132,6 +165,31 @@ def _campaign_charter_result(
     class Session:
         @staticmethod
         def open(**_kwargs):
+            def campaign_state(*, evidence_offset=None, evidence_limit=128):
+                total = len(evidence)
+                offset = (max(0, total - evidence_limit)
+                          if evidence_offset is None else evidence_offset)
+                page = evidence[offset:offset + evidence_limit]
+                charter_references = [
+                    item for item in evidence
+                    if "campaign_charter" in item.get("identity", "")
+                ]
+                return {
+                    "campaign_identity": "campaign-1",
+                    "checkpoint_id": "chk_test",
+                    "evidence": page,
+                    "evidence_count": total,
+                    "evidence_offset": offset,
+                    "evidence_limit": evidence_limit,
+                    "campaign_charter_evidence": {
+                        "references": charter_references[:16],
+                        "count": (17 if charter_index_truncated
+                                  else len(charter_references)),
+                        "truncated": (charter_index_truncated
+                                      or len(charter_references) > 16),
+                    },
+                }
+
             return SimpleNamespace(
                 context=lambda: {"continuation": {
                     "campaign_state_checkpoint_id": "chk_test",
@@ -139,11 +197,7 @@ def _campaign_charter_result(
                     "evidence_count": len(evidence),
                     "evidence_truncated": len(evidence) > 32,
                 }},
-                campaign_state=lambda: {
-                    "campaign_identity": "campaign-1",
-                    "checkpoint_id": "chk_test",
-                    "evidence": evidence,
-                },
+                campaign_state=campaign_state,
             )
 
     service = EnvironmentService(_config(tmp_path))
@@ -480,6 +534,23 @@ def test_campaign_continuation_projects_exact_git_verified_charter(tmp_path: Pat
     }
 
 
+def test_campaign_continuation_finds_original_charter_past_recent_evidence_page(
+    tmp_path: Path,
+) -> None:
+    result = _campaign_charter_result(
+        tmp_path, evidence_prefix=34, evidence_suffix=155, selector_decoy=True,
+    )
+
+    assert result["status"] == "ready"
+    capsule = result["continuations"][0]
+    assert capsule["evidence_count"] == 191
+    assert capsule["campaign_charter"]["status"] == "verified"
+    assert capsule["campaign_charter"]["evidence_identity"] == "ev_env_campaign_charter_test"
+    assert capsule["campaign_charter"]["objective"] == (
+        "Continue the verified long-running campaign safely."
+    )
+
+
 def test_campaign_continuation_verifies_charter_in_presented_evidence_window(
     tmp_path: Path,
 ) -> None:
@@ -511,6 +582,24 @@ def test_campaign_continuation_verifies_old_charter_without_emitting_old_evidenc
     )
     assert capsule["campaign_charter"]["status"] == "verified"
     assert capsule["campaign_charter"]["evidence_identity"] == "ev_env_campaign_charter_test"
+
+
+def test_campaign_continuation_keeps_two_verified_charters_ambiguous(
+    tmp_path: Path,
+) -> None:
+    result = _campaign_charter_result(tmp_path, second_valid_charter=True)
+
+    assert result["status"] == "ready"
+    assert "campaign_charter" not in result["continuations"][0]
+
+
+def test_campaign_continuation_fails_closed_on_truncated_charter_index(
+    tmp_path: Path,
+) -> None:
+    result = _campaign_charter_result(tmp_path, charter_index_truncated=True)
+
+    assert result["status"] == "ready"
+    assert "campaign_charter" not in result["continuations"][0]
 
 
 @pytest.mark.parametrize("failure", ["digest", "campaign"])
