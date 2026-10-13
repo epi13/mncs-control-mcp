@@ -1,0 +1,80 @@
+{
+  "schema_version": "mncs.control.campaign-state-cas-base-capsule-proof/1",
+  "identity": "ev_control_campaign_state_cas_base_capsule_20261013",
+  "verified_at": "2026-10-13T02:26:12Z",
+  "owner": "mncs-control-mcp",
+  "campaign_id": "cmp_mncs_continuity_20261010",
+  "change": {
+    "purpose": "Expose the Environment-owned campaign-state checkpoint identity in the compact project continuation capsule so callers can submit the correct optimistic concurrency base.",
+    "ownership_boundary": "Environment remains authoritative for campaign state and checkpoint validation; Control projects the returned identity through its session capsule and compact RPC allowlist.",
+    "session_checkpoint_is_distinct": true,
+    "source_commits": [
+      "dd323f44e3c2215a4cf25060b3164056645a8046",
+      "979c1424ed6a7c2a505cfc8e6c359a76ce38368d"
+    ],
+    "source_files": [
+      {
+        "path": "src/mncs_control_mcp/environment_sessions.py",
+        "sha256": "f8d868d0f7e62bec68ac346f1fcd101b774afa32314071ed372ad70bb224dc86"
+      },
+      {
+        "path": "src/mncs_control_mcp/environment_rpc.py",
+        "sha256": "a4b9f1d436c218f67b067189402bebe8dc8609e951cf7cded9e8122bc931af4e"
+      }
+    ],
+    "test_files": [
+      {
+        "path": "tests/test_environment_sessions.py",
+        "sha256": "498e93050fa8ff9fe1f7bebc7992620c0ee6660096bec0e0e9a262c3b12e2355"
+      },
+      {
+        "path": "tests/test_environment_rpc.py",
+        "sha256": "2d9052e7a249c9d8212378a4015a14e56c6c229a669fc8caa2615c17fc4fa55f"
+      }
+    ]
+  },
+  "verification": {
+    "backend": "Control project bwrap",
+    "tests": [
+      {
+        "command": "python3 -m pytest -q tests/test_environment_sessions.py",
+        "passed": 23,
+        "skipped": 1,
+        "failed": 0
+      },
+      {
+        "command": "python3 -m pytest -q tests/test_environment_rpc.py::test_project_continuation_cli_returns_compact_duplicate_session_capsule",
+        "passed": 1,
+        "failed": 0
+      },
+      {
+        "command": "ruff check src/mncs_control_mcp/environment_sessions.py src/mncs_control_mcp/environment_rpc.py tests/test_environment_sessions.py tests/test_environment_rpc.py",
+        "result": "passed"
+      }
+    ],
+    "fresh_protected_process": {
+      "project": "mncs-environment",
+      "task_identity_lookup": "resolved",
+      "raw_task_identity_in_evidence": false,
+      "campaign_id": "cmp_mncs_continuity_20261010",
+      "session_id": "ses_7226fbcfe65820f7",
+      "capsule_campaign_state_checkpoint_id": "chk_7240a1376e439b04",
+      "environment_campaign_state_read_checkpoint_id": "chk_7240a1376e439b04",
+      "evidence_count": 176,
+      "latest_evidence_identity": "ev_environment_goal_thread_continuation_20261013",
+      "result": "campaign-state CAS base and ledger readback match"
+    }
+  },
+  "delivery": {
+    "repository": "mncs-control-mcp",
+    "branch": "main",
+    "head": "979c1424ed6a7c2a505cfc8e6c359a76ce38368d",
+    "remote_ref": "origin/main",
+    "remote_head": "979c1424ed6a7c2a505cfc8e6c359a76ce38368d",
+    "status": "pushed"
+  },
+  "remaining": [
+    "Compiler and Forge remain under earlier exclusive claims; no handoff was observed during this checkpoint.",
+    "Compiler-to-Forge resource-feedback execution and compiler succession remain unproven."
+  ]
+}
