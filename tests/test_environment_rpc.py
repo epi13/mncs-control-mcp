@@ -3705,6 +3705,7 @@ def test_task_selector_selects_saved_project_context_over_current_default(
     "capability",
     [
         "mncs-compiler:compiler-producer",
+        "mncs-compiler:compiler-build",
         "mncs-forge:canonical-vm-work",
     ],
 )
@@ -3779,8 +3780,8 @@ def test_project_rpc_exposes_recovered_compiler_and_forge_capabilities(
 
     unsupported = server.dispatch({
         **request,
-        "request_id": "req_unapproved_compiler_build",
-        "argv": ["invoke", "ses_recovered", "mncs-compiler:compiler-build"],
+        "request_id": "req_unapproved_language_compile",
+        "argv": ["invoke", "ses_recovered", "mncs-language:compile"],
     }, peer_uid=0)
     assert unsupported["ok"] is False
     assert unsupported["error"]["code"] == "ENVIRONMENT_OPERATION_UNAVAILABLE"
