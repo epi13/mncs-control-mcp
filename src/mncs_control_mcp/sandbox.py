@@ -70,6 +70,7 @@ class Sandbox:
         self.config = config
         self.policy = policy
         self.environment_rpc = None
+        self.process_manager = None
         discovered = shutil.which("bwrap")
         requested = config.sandbox_backend
         if requested == "bwrap" and discovered is None:
@@ -643,6 +644,26 @@ class Sandbox:
             if rpc is not None:
                 rpc.revoke_grant(rpc_grant)
             raise ControlError("COMMAND_START_FAILED", str(exc)) from exc
+        process_manager = self.process_manager
+        grant_id = getattr(rpc_grant, "grant_id", None)
+        request_process_registered = False
+        if process_manager is not None and isinstance(grant_id, str):
+            register = getattr(
+                process_manager, "register_claim_recovery_request_process", None,
+            )
+            if callable(register):
+                try:
+                    register(grant_id, process.pid)
+                    request_process_registered = True
+                except Exception as exc:
+                    _terminate_group(process)
+                    process.wait()
+                    if rpc is not None:
+                        rpc.revoke_grant(rpc_grant)
+                    raise ControlError(
+                        "TERMINAL_TRACKING_FAILED",
+                        "could not register the terminal request for safe Environment recovery",
+                    ) from exc
         try:
             stdout, stderr, truncated = _communicate_bounded(
                 process, self.config.max_output_bytes, timeout, input_bytes=input_bytes
@@ -652,8 +673,14 @@ class Sandbox:
                 _terminate_group(process)
             process.wait()
         finally:
-            if rpc is not None:
-                rpc.revoke_grant(rpc_grant)
+            try:
+                if request_process_registered:
+                    process_manager.unregister_claim_recovery_request_process(
+                        grant_id, process.pid,
+                    )
+            finally:
+                if rpc is not None:
+                    rpc.revoke_grant(rpc_grant)
         return SandboxResult(
             command=command,
             cwd=resolution.sandbox_cwd,

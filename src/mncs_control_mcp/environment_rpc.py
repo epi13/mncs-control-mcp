@@ -1939,13 +1939,29 @@ class EnvironmentRPCServer:
     def _current_request_process_inventory(
         self, current_grant_id: str, entries: list[Path],
     ) -> tuple[set[int], list[dict[str, object]], bool, list[str]]:
-        """Identify the active terminal request tree by its host-owned grant."""
+        """Identify the exact active terminal request tree by its host grant."""
+        identities_method = getattr(
+            self.process_manager, "claim_recovery_request_root_identities", None,
+        )
         roots_method = getattr(
             self.process_manager, "claim_recovery_request_roots", None,
         )
-        if not callable(roots_method):
+        if callable(identities_method):
+            identities = identities_method(current_grant_id)
+            root_start_ticks: dict[int, str | None] = {}
+            for item in identities:
+                if not isinstance(item, dict) or type(item.get("pid")) is not int:
+                    return set(), [], False, ["request_process_root_identity_invalid"]
+                start_ticks = item.get("start_ticks")
+                if start_ticks is not None and not isinstance(start_ticks, str):
+                    return set(), [], False, ["request_process_root_identity_invalid"]
+                root_start_ticks[item["pid"]] = start_ticks
+            roots = set(root_start_ticks)
+        elif callable(roots_method):
+            roots = set(roots_method(current_grant_id))
+            root_start_ticks = {pid: None for pid in roots}
+        else:
             return set(), [], False, ["current_request_roots_unavailable"]
-        roots = set(roots_method(current_grant_id))
         if not roots:
             return set(), [], True, []
         parents: dict[int, int] = {}
@@ -1972,7 +1988,19 @@ class EnvironmentRPCServer:
         if missing_roots:
             complete = False
             reasons.append("request_process_root_unreadable")
-        excluded = {pid for pid in roots if pid in parents}
+        excluded: set[int] = set()
+        for pid in roots.intersection(parents):
+            expected_ticks = root_start_ticks.get(pid)
+            if expected_ticks is None:
+                complete = False
+                reasons.append("request_process_root_identity_unavailable")
+                continue
+            observed_ticks = self._proc_start_ticks(pid)
+            if observed_ticks != expected_ticks:
+                complete = False
+                reasons.append("request_process_root_identity_changed")
+                continue
+            excluded.add(pid)
         while True:
             descendants = {
                 pid for pid, parent in parents.items()

@@ -462,15 +462,10 @@ def test_recovery_process_inventory_excludes_only_its_current_terminal_tree(
     )
     manager = ProcessManager.__new__(ProcessManager)
     manager._lock = threading.RLock()
-    manager._environment_grants = {
-        "current-request": SimpleNamespace(grant_id="grant-current"),
-    }
-    manager._jobs = {
-        "current-request": SimpleNamespace(
-            job_id="current-request", status="running",
-            process=current,
-        ),
-    }
+    manager._request_processes = {}
+    manager.register_claim_recovery_request_process(
+        "grant-current", current.pid,
+    )
     server = EnvironmentRPCServer(
         ControlConfig(
             workspace_root=tmp_path,

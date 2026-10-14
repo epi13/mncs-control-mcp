@@ -126,6 +126,7 @@ class ProcessManager:
         self.sandbox = sandbox
         self._jobs: dict[str, TerminalJob] = {}
         self._environment_grants: dict[str, object] = {}
+        self._request_processes: dict[str, dict[int, str | None]] = {}
         self._claim_recovery_repositories: set[str] = set()
         self._claim_recovery_checkouts: dict[str, Path] = {}
         self._external_futures: dict[str, Future[object]] = {}
@@ -136,6 +137,7 @@ class ProcessManager:
         self._lock = threading.RLock()
         self._persist_lock = threading.Lock()
         self._load_metadata()
+        self.sandbox.process_manager = self
         atexit.register(self.cleanup)
 
     def _load_metadata(self) -> None:
@@ -309,6 +311,9 @@ class ProcessManager:
             self._jobs[job.job_id] = job
             if rpc_grant is not None:
                 self._environment_grants[job.job_id] = rpc_grant
+                self._request_processes.setdefault(rpc_grant.grant_id, {})[
+                    process.pid
+                ] = self._process_start_ticks(process.pid)
             self._persist()
         assert process.stdout is not None and process.stderr is not None
         threading.Thread(target=self._drain, args=(process.stdout, job.stdout), daemon=True).start()
@@ -342,6 +347,9 @@ class ProcessManager:
             self._persist()
             grant = self._environment_grants.pop(job.job_id, None)
         if grant is not None:
+            self.unregister_claim_recovery_request_process(
+                grant.grant_id, job.process.pid,
+            )
             self.sandbox.environment_rpc.revoke_grant(grant)
 
     def _get(self, job_id: str) -> TerminalJob:
@@ -469,20 +477,53 @@ class ProcessManager:
     def claim_recovery_request_roots(self, current_grant_id: str) -> list[int]:
         """Return host PIDs for the one terminal request carrying this grant.
 
-        A CLI lifecycle request reaches Control through a project terminal job.
-        Its own waiting client process must not be mistaken for a live former
-        owner merely because it is running from the checkout being recovered.
+        Both asynchronous terminal jobs and synchronous terminal_exec calls
+        register their exact host process against the grant that authorized
+        them. A request must not be mistaken for a former owner merely because
+        it is running from the checkout being recovered.
         """
+        return [
+            int(item["pid"])
+            for item in self.claim_recovery_request_root_identities(current_grant_id)
+        ]
+
+    def register_claim_recovery_request_process(
+        self, grant_id: str, pid: int,
+    ) -> None:
+        """Track the exact terminal process for its RPC grant."""
+        start_ticks = self._process_start_ticks(pid)
         with self._lock:
-            roots = {
-                job.process.pid
-                for job in self._jobs.values()
-                if job.status == "running"
-                and job.process is not None
-                and getattr(self._environment_grants.get(job.job_id), "grant_id", None)
-                == current_grant_id
-            }
-        return sorted(roots)
+            self._request_processes.setdefault(grant_id, {})[pid] = start_ticks
+
+    def unregister_claim_recovery_request_process(
+        self, grant_id: str, pid: int,
+    ) -> None:
+        with self._lock:
+            roots = self._request_processes.get(grant_id)
+            if roots is None:
+                return
+            roots.pop(pid, None)
+            if not roots:
+                self._request_processes.pop(grant_id, None)
+
+    @staticmethod
+    def _process_start_ticks(pid: int) -> str | None:
+        try:
+            stat_text = Path(f"/proc/{pid}/stat").read_text(encoding="ascii")
+            return stat_text.rsplit(")", 1)[1].split()[19]
+        except (OSError, IndexError):
+            return None
+
+    def claim_recovery_request_root_identities(
+        self, current_grant_id: str,
+    ) -> list[dict[str, object]]:
+        """Return PID and start-time identities for the current request tree."""
+        with self._lock:
+            roots = dict(self._request_processes.get(current_grant_id, {}))
+        return [
+            {"pid": pid, "start_ticks": expected_ticks}
+            for pid, expected_ticks in sorted(roots.items())
+        ]
 
     def _path_overlaps_claim_checkout(
         self, project_root: Path, candidate: Path, checkout: Path,
