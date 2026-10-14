@@ -1591,6 +1591,71 @@ class EnvironmentService:
             if callable(close):
                 close()
 
+    def recover_claim(
+        self,
+        *,
+        session_id: str,
+        claim_id: str,
+        repository: str,
+        owner_session_id: str,
+        expected_version: int,
+        authorization: dict[str, Any],
+        request_id: str,
+        reason: str,
+    ) -> dict[str, Any]:
+        """Run Environment's exact claim recovery after Control host fencing."""
+        principal = self.authenticated_principal_id
+        if not isinstance(principal, str) or not principal:
+            raise ControlError(
+                "ENVIRONMENT_AUTHORITY_DENIED",
+                "owner claim recovery requires Control's authenticated principal",
+            )
+        if (authorization.get("requester_principal_id") != principal
+                or authorization.get("requester_session_id") != session_id
+                or authorization.get("claim_id") != claim_id
+                or authorization.get("repository") != repository
+                or authorization.get("owner_session_id") != owner_session_id
+                or authorization.get("expected_claim_version") != expected_version):
+            raise ControlError(
+                "ENVIRONMENT_AUTHORITY_DENIED",
+                "owner claim recovery authorization does not match the selected transition",
+            )
+        pkg = self._pkg()
+        store = self._store(pkg)
+        try:
+            self._authorize_session(store, session_id)
+            session = pkg.sessions.Session(store, session_id)
+            try:
+                return session.recover_claim_controlled(
+                    claim_id=claim_id,
+                    repository=repository,
+                    owner_session_id=owner_session_id,
+                    expected_version=expected_version,
+                    authorization=authorization,
+                    authenticated_principal_id=principal,
+                    request_id=request_id,
+                    reason=reason,
+                )
+            except ControlError:
+                raise
+            except Exception as exc:
+                name = type(exc).__name__
+                if name == "ClaimConflict":
+                    raise ControlError("ENVIRONMENT_CLAIM_CONFLICT", str(exc)) from exc
+                if name == "AuthorityDenied":
+                    raise ControlError("ENVIRONMENT_AUTHORITY_DENIED", str(exc)) from exc
+                if name == "SnapshotConflict":
+                    raise ControlError("ENVIRONMENT_PUBLICATION_CONFLICT", str(exc)) from exc
+                if name in {"StoreIntegrityFailure", "StoreCorruption"}:
+                    raise ControlError("ENVIRONMENT_STORE_CORRUPTION", str(exc)) from exc
+                if name == "StoreUnavailable":
+                    raise ControlError("ENVIRONMENT_PERSISTENCE_UNAVAILABLE", str(exc)) from exc
+                raise ControlError("ENVIRONMENT_CLAIM_RECOVERY_FAILED", str(exc)) from exc
+        finally:
+            close = getattr(store, "close", None)
+            if callable(close):
+                close()
+
     def release_claim(self, session_id: str, repository: str, reason: str = "") -> dict[str, Any]:
         sessions = self._sessions()
         store = self._store(self._pkg())

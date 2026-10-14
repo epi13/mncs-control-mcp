@@ -125,6 +125,7 @@ class ProcessManager:
         self.sandbox = sandbox
         self._jobs: dict[str, TerminalJob] = {}
         self._environment_grants: dict[str, object] = {}
+        self._claim_recovery_repositories: set[str] = set()
         self._external_futures: dict[str, Future[object]] = {}
         self._external_results: dict[str, object] = {}
         self._external_processes: dict[str, multiprocessing.Process] = {}
@@ -224,6 +225,19 @@ class ProcessManager:
         if timeout <= 0 or timeout > self.config.max_timeout_seconds:
             raise ControlError("INVALID_TIMEOUT", "timeout exceeds the configured terminal limit")
         resolution = self.policy.resolve_scope(scope=scope, project=project, cwd=cwd)
+        with self._lock:
+            if (resolution.scope == "workspace"
+                    and self._claim_recovery_repositories):
+                raise ControlError(
+                    "ENVIRONMENT_OWNER_RECOVERY_ACTIVE",
+                    "workspace terminal jobs are paused during an owner claim recovery",
+                )
+            if resolution.project in self._claim_recovery_repositories:
+                raise ControlError(
+                    "ENVIRONMENT_OWNER_RECOVERY_ACTIVE",
+                    "project terminal jobs are paused during an owner claim recovery",
+                    details={"repository": resolution.project},
+                )
         rpc = self.sandbox.environment_rpc
         rpc_grant = rpc.issue_grant(resolution) if rpc is not None else None
         try:
@@ -236,6 +250,22 @@ class ProcessManager:
                 rpc.revoke_grant(rpc_grant)
             raise
         with self._lock:
+            if (resolution.scope == "workspace"
+                    and self._claim_recovery_repositories):
+                if rpc is not None:
+                    rpc.revoke_grant(rpc_grant)
+                raise ControlError(
+                    "ENVIRONMENT_OWNER_RECOVERY_ACTIVE",
+                    "workspace terminal jobs are paused during an owner claim recovery",
+                )
+            if resolution.project in self._claim_recovery_repositories:
+                if rpc is not None:
+                    rpc.revoke_grant(rpc_grant)
+                raise ControlError(
+                    "ENVIRONMENT_OWNER_RECOVERY_ACTIVE",
+                    "project terminal jobs are paused during an owner claim recovery",
+                    details={"repository": resolution.project},
+                )
             running = sum(job.status == "running" for job in self._jobs.values())
             if running >= self.config.max_concurrent_jobs:
                 if rpc is not None:
@@ -368,6 +398,62 @@ class ProcessManager:
         with self._lock:
             jobs = [job.public() for job in sorted(self._jobs.values(), key=lambda item: item.created_at, reverse=True)]
         return {"jobs": jobs[:100], "running": sum(item["status"] == "running" for item in jobs)}
+
+    def claim_recovery_job_candidates(
+        self,
+        repository: str,
+        *,
+        owner_session_id: str,
+        current_grant_id: str,
+        environment_project: str,
+        grant_sessions: dict[str, str | None],
+    ) -> list[dict[str, object]]:
+        """Return host-owned jobs that could still act on a repository claim."""
+        with self._lock:
+            rows = []
+            for job in self._jobs.values():
+                if job.status not in {"running", "queued"}:
+                    continue
+                execution_grant = self._environment_grants.get(job.job_id)
+                grant_id = getattr(execution_grant, "grant_id", None)
+                if grant_id == current_grant_id:
+                    continue
+                bound_session_id = grant_sessions.get(grant_id) if grant_id else None
+                command = job.command.lower()
+                cwd = job.cwd.lower()
+                related = (
+                    job.scope == "workspace"
+                    or job.project == repository
+                    or f"/{repository.lower()}" in cwd
+                    or repository.lower() in command
+                    or bound_session_id == owner_session_id
+                    or (job.project == environment_project and bound_session_id is None)
+                )
+                if related:
+                    rows.append({
+                        "job_id": job.job_id,
+                        "status": job.status,
+                        "project": job.project,
+                        "scope": job.scope,
+                        "kind": job.kind,
+                        "pid": job.process.pid if job.process is not None else None,
+                    })
+            return rows
+
+    def begin_claim_recovery(self, repository: str) -> None:
+        """Prevent new terminal work for this repository through claim CAS."""
+        with self._lock:
+            if repository in self._claim_recovery_repositories:
+                raise ControlError(
+                    "ENVIRONMENT_CLAIM_RECOVERY_ACTIVE",
+                    "this repository already has a claim recovery transition in progress",
+                    details={"repository": repository},
+                )
+            self._claim_recovery_repositories.add(repository)
+
+    def end_claim_recovery(self, repository: str) -> None:
+        with self._lock:
+            self._claim_recovery_repositories.discard(repository)
 
     def record_external(
         self,

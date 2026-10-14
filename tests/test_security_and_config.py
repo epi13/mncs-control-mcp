@@ -134,6 +134,44 @@ def test_configuration_loads_owner_scoped_environment_grant_file(
     }
 
 
+def test_configuration_loads_exact_claim_recovery_approval(tmp_path: Path) -> None:
+    approval_file = tmp_path / "scope-grants.toml"
+    approval_file.write_text(
+        '[claim_recovery.cmp_scope_test."claim:mncs-compiler"]\n'
+        'repository = "mncs-compiler"\n'
+        'claim_version = 63\n'
+        'owner_session_id = "ses_old_owner"\n'
+        'owner_consumer_id = "old-compiler-consumer"\n'
+        'requester_session_id = "ses_new_owner"\n'
+        'approval_reference = "user-approval:exact-claim-recovery"\n',
+        encoding="utf-8",
+    )
+    approval_file.chmod(0o600)
+    config_path = tmp_path / "control.toml"
+    config_path.write_text(
+        "[workspace]\n"
+        f"root = {str(tmp_path / 'projects')!r}\n"
+        "[integration]\n"
+        f"environment_scope_grants_file = {str(approval_file)!r}\n",
+        encoding="utf-8",
+    )
+
+    config = load_config(config_path)
+
+    assert config.environment_claim_recovery_grants == {
+        "cmp_scope_test": {
+            "claim:mncs-compiler": {
+                "repository": "mncs-compiler",
+                "claim_version": 63,
+                "owner_session_id": "ses_old_owner",
+                "owner_consumer_id": "old-compiler-consumer",
+                "requester_session_id": "ses_new_owner",
+                "approval_reference": "user-approval:exact-claim-recovery",
+            },
+        },
+    }
+
+
 def test_configuration_rejects_non_private_environment_grant_file(
     tmp_path: Path,
 ) -> None:

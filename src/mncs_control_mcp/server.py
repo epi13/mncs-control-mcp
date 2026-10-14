@@ -92,7 +92,9 @@ def build_server(config: ControlConfig | None = None) -> Any:
     projects = ProjectService(selected, policy, sandbox, git)
     inventory = ToolInventory(selected)
     environment_sessions = EnvironmentService(selected)
-    environment_rpc = EnvironmentRPCServer(selected, environment_sessions, policy)
+    environment_rpc = EnvironmentRPCServer(
+        selected, environment_sessions, policy, process_manager=processes,
+    )
     environment_rpc.start()
     environment_sessions.authenticated_principal_id = environment_rpc.principal_id
     sandbox.environment_rpc = environment_rpc

@@ -215,6 +215,294 @@ def test_scope_grant_rpc_requires_exact_campaign_approval_and_environment_projec
     assert raised.value.code == "ENVIRONMENT_WORKSPACE_ESCAPE"
 
 
+def test_claim_recovery_rpc_requires_exact_owner_approval_generation_and_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "projects"
+    environment = workspace / "mncs-environment"
+    environment.mkdir(parents=True)
+    approval = "user-approval:compiler-claim-recovery"
+    approved = {
+        "repository": "mncs-compiler",
+        "claim_version": 63,
+        "owner_session_id": "ses_old_compiler",
+        "owner_consumer_id": "luna-compiler-self-consumption-admission-20261009",
+        "requester_session_id": "ses_new_campaign",
+        "approval_reference": approval,
+    }
+
+    class Store:
+        def load_snapshot(self, _session_id: str) -> dict:
+            return {
+                "authenticated_principal_id": "principal-test",
+                "campaign": {"identity": "cmp_mncs_continuity_20261010"},
+            }
+
+        def close(self) -> None:
+            pass
+
+    service = SimpleNamespace(
+        state_dir=tmp_path / "state",
+        environment_path=tmp_path / "environment-source",
+        _pkg=lambda: object(),
+        _store=lambda _pkg: Store(),
+    )
+    server = EnvironmentRPCServer(
+        ControlConfig(
+            workspace_root=workspace,
+            sandbox_home=tmp_path / "home",
+            environment_rpc_socket=tmp_path / "rpc" / "environment.sock",
+            environment_claim_recovery_grants={
+                "cmp_mncs_continuity_20261010": {
+                    "claim:mncs-compiler": approved,
+                },
+            },
+        ),
+        environment_service=service,
+        policy=object(),
+    )
+    grant = _GrantRecord(
+        grant_id="claim-recovery-test",
+        principal_id="principal-test",
+        host_root=environment,
+        sandbox_root="/workspace/mncs-environment",
+        scope="project",
+        uid=0,
+        expires_at=time.monotonic() + 60,
+        token_file=tmp_path / "grant",
+        bound_session_id="ses_new_campaign",
+    )
+    args = [
+        "claim-recover", "ses_new_campaign",
+        "--campaign-id", "cmp_mncs_continuity_20261010",
+        "--claim-id", "claim:mncs-compiler",
+        "--repository", "mncs-compiler",
+        "--owner-session-id", "ses_old_compiler",
+        "--expected-version", "63",
+        "--approval-reference", approval,
+        "--reason", "operator-approved recovery after host reboot",
+    ]
+    authorized_sessions: list[str] = []
+    monkeypatch.setattr(
+        server, "_authorize_session",
+        lambda session_id, _principal: authorized_sessions.append(session_id),
+    )
+
+    result = server._authorize_claim_recovery_argv(args, environment, grant)
+
+    assert result["claim_id"] == "claim:mncs-compiler"
+    assert result["expected_version"] == 63
+    assert result["owner_consumer_id"] == approved["owner_consumer_id"]
+    assert authorized_sessions == ["ses_new_campaign"]
+    for changed in (
+        args[:11] + ["64"] + args[12:],
+        args[:-3] + ["user-approval:other", "--reason", "operator-approved recovery"],
+    ):
+        with pytest.raises(ControlError) as raised:
+            server._authorize_claim_recovery_argv(changed, environment, grant)
+        assert raised.value.code == "ENVIRONMENT_AUTHORITY_DENIED"
+    wrong_session = _GrantRecord(
+        **{**grant.__dict__, "bound_session_id": "ses_other"},
+    )
+    with pytest.raises(ControlError) as raised:
+        server._authorize_claim_recovery_argv(args, environment, wrong_session)
+    assert raised.value.code == "ENVIRONMENT_AUTHORITY_DENIED"
+
+
+def test_claim_recovery_liveness_correlates_jobs_and_excludes_only_current_grant() -> None:
+    from mncs_control_mcp.processes import ProcessManager
+
+    manager = ProcessManager.__new__(ProcessManager)
+    manager._lock = threading.RLock()
+    manager._claim_recovery_repositories = set()
+    manager._jobs = {
+        "old-session": SimpleNamespace(
+            job_id="old-session", status="running", command="python task.py", cwd="/workspace/other",
+            scope="project", project="mncs-language", kind="terminal",
+            process=SimpleNamespace(pid=101),
+        ),
+        "repository": SimpleNamespace(
+            job_id="repository", status="queued", command="python build.py", cwd="/workspace/compiler",
+            scope="project", project="mncs-compiler", kind="terminal",
+            process=None,
+        ),
+        "current-recovery": SimpleNamespace(
+            job_id="current-recovery", status="running", command="mncs-env claim-recover", cwd="/workspace/environment",
+            scope="project", project="mncs-environment", kind="terminal",
+            process=SimpleNamespace(pid=103),
+        ),
+        "unrelated": SimpleNamespace(
+            job_id="unrelated", status="running", command="python task.py", cwd="/workspace/language",
+            scope="project", project="mncs-language", kind="terminal",
+            process=SimpleNamespace(pid=104),
+        ),
+        "unbound-environment": SimpleNamespace(
+            job_id="unbound-environment", status="running", command="python continuation.py", cwd="/workspace/environment",
+            scope="project", project="mncs-environment", kind="terminal",
+            process=SimpleNamespace(pid=105),
+        ),
+    }
+    manager._environment_grants = {
+        "old-session": SimpleNamespace(grant_id="grant-old"),
+        "repository": SimpleNamespace(grant_id="grant-compiler"),
+        "current-recovery": SimpleNamespace(grant_id="grant-current"),
+        "unrelated": SimpleNamespace(grant_id="grant-unrelated"),
+    }
+    rows = manager.claim_recovery_job_candidates(
+        "mncs-compiler",
+        owner_session_id="ses_old_owner",
+        current_grant_id="grant-current",
+        environment_project="mncs-environment",
+        grant_sessions={
+            "grant-old": "ses_old_owner",
+            "grant-compiler": "ses_current",
+            "grant-current": "ses_requester",
+            "grant-unrelated": "ses_other",
+        },
+    )
+    assert {item["job_id"] for item in rows} == {
+        "old-session", "repository", "unbound-environment",
+    }
+
+
+def test_process_manager_pauses_project_jobs_during_claim_recovery() -> None:
+    from mncs_control_mcp.processes import ProcessManager
+
+    manager = ProcessManager.__new__(ProcessManager)
+    manager.config = SimpleNamespace(
+        allow_terminal=True,
+        default_timeout_seconds=30,
+        max_timeout_seconds=60,
+    )
+    manager.policy = SimpleNamespace(resolve_scope=lambda **_kwargs: SimpleNamespace(
+        scope="project", project="mncs-compiler",
+    ))
+    manager._lock = threading.RLock()
+    manager._claim_recovery_repositories = {"mncs-compiler"}
+
+    with pytest.raises(ControlError) as raised:
+        manager.start(
+            "python compile_fixture.py",
+            scope="project",
+            project="mncs-compiler",
+            cwd="/workspace/mncs-compiler",
+            timeout_seconds=30,
+            network=False,
+        )
+    assert raised.value.code == "ENVIRONMENT_OWNER_RECOVERY_ACTIVE"
+
+
+def test_claim_recovery_request_tracks_selected_continuation_session() -> None:
+    assert EnvironmentRPCServer._request_session(
+        ["continuation", "--repository", "mncs-environment"],
+        bound_session_id="ses_selected",
+    ) == "ses_selected"
+    assert EnvironmentRPCServer._request_session(
+        ["campaign-bind", "--session-id", "ses_old_owner", "--task-identity", "task-1"],
+    ) == "ses_old_owner"
+    assert EnvironmentRPCServer._request_session(
+        ["complete", "ses_old_owner", "--outcome", "done"],
+    ) == "ses_old_owner"
+
+
+def test_claim_recovery_refuses_a_live_former_owner_process(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    claim = {
+        "claim_id": "claim:mncs-compiler",
+        "version": 63,
+        "status": "held",
+        "repository": "mncs-compiler",
+        "session_id": "ses_old_compiler",
+        "consumer_id": "old-compiler-consumer",
+        "scope": {"kind": "repository", "exclusive": True},
+        "acquired_at": "2026-10-13T00:00:00+00:00",
+        "expires_at": "2026-10-20T00:00:00+00:00",
+    }
+
+    class Store:
+        def load_snapshot(self, session_id: str) -> dict:
+            if session_id == "ses_new_campaign":
+                return {
+                    "authenticated_principal_id": "principal-test",
+                    "campaign": {"identity": "cmp_recovery_test"},
+                }
+            return {"session_id": session_id}
+
+        def read_claims(self) -> list[dict]:
+            return [claim]
+
+        def close(self) -> None:
+            pass
+
+    service = SimpleNamespace(
+        state_dir=tmp_path / "state",
+        _pkg=lambda: SimpleNamespace(claims=SimpleNamespace(
+            active_claims=lambda _records: {claim["claim_id"]: claim},
+            _alive=lambda _claim: True,
+        )),
+        _store=lambda _pkg: Store(),
+        recover_claim=mock.Mock(),
+    )
+    server = EnvironmentRPCServer(
+        ControlConfig(
+            workspace_root=tmp_path,
+            sandbox_home=tmp_path / "home",
+            environment_rpc_socket=tmp_path / "rpc" / "environment.sock",
+        ),
+        environment_service=service,
+        policy=object(),
+        process_manager=SimpleNamespace(
+            begin_claim_recovery=mock.Mock(),
+            end_claim_recovery=mock.Mock(),
+        ),
+    )
+    observation = {
+        "jobs": [], "grants": [], "active_requests": 0,
+        "processes": [{"pid": 777, "reason": "former-session-environment"}],
+        "processes_examined": 4, "same_uid_processes_examined": 2,
+        "host_boot_id": "00000000-0000-0000-0000-000000000000",
+        "process_complete": True, "services": [], "user_units_examined": 1,
+        "services_complete": True,
+    }
+    monkeypatch.setattr(
+        server, "_recovery_liveness_snapshot",
+        lambda **_kwargs: observation,
+    )
+    grant = _GrantRecord(
+        grant_id="recovery-live-owner-test",
+        principal_id="principal-test",
+        host_root=tmp_path,
+        sandbox_root="/workspace/environment",
+        scope="project",
+        uid=os.getuid(),
+        expires_at=time.monotonic() + 60,
+        token_file=tmp_path / "grant",
+    )
+
+    with pytest.raises(ControlError) as raised:
+        server._perform_claim_recovery(
+            {
+                "session_id": "ses_new_campaign",
+                "campaign_id": "cmp_recovery_test",
+                "claim_id": "claim:mncs-compiler",
+                "repository": "mncs-compiler",
+                "owner_session_id": "ses_old_compiler",
+                "owner_consumer_id": "old-compiler-consumer",
+                "expected_version": 63,
+                "approval_reference": "user-approval:test",
+                "reason": "test blocked live owner",
+            },
+            record=grant,
+            request_id="req_live_owner_recovery_test",
+        )
+
+    assert raised.value.code == "ENVIRONMENT_OWNER_EXECUTION_ACTIVE"
+    service.recover_claim.assert_not_called()
+    server.process_manager.end_claim_recovery.assert_called_once_with("mncs-compiler")
+    assert "ses_old_compiler" not in server._fenced_sessions
+
+
 def test_rpc_accepts_bounded_campaign_metadata_and_rejects_oversized_arguments(
     tmp_path: Path,
 ) -> None:

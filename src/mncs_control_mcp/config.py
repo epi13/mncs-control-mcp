@@ -5,6 +5,7 @@ import re
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from .errors import ControlError
 
@@ -195,6 +196,7 @@ class ControlConfig:
         default_factory=lambda: Path.home() / ".local" / "state" / "mncs-control-mcp" / "environment-rpc" / "environment.sock"
     )
     environment_scope_grants: dict[str, dict[str, str]] = field(default_factory=dict)
+    environment_claim_recovery_grants: dict[str, dict[str, dict[str, Any]]] = field(default_factory=dict)
     environment_scope_grants_path: Path | None = None
 
     @property
@@ -341,6 +343,7 @@ def load_config(path: Path | str | None = None) -> ControlConfig:
     scope_grants_value = integration.get("environment_scope_grants_file")
     scope_grants_path = _path(scope_grants_value) if scope_grants_value else None
     environment_scope_grants: dict[str, dict[str, str]] = {}
+    environment_claim_recovery_grants: dict[str, dict[str, dict[str, Any]]] = {}
     if scope_grants_path is not None and scope_grants_path.is_symlink():
         raise ControlError(
             "CONFIG_INVALID", "Environment scope grants file must not be a symbolic link"
@@ -389,6 +392,62 @@ def load_config(path: Path | str | None = None) -> ControlConfig:
                     )
                 validated[repository] = approval_reference
             environment_scope_grants[campaign_id] = validated
+
+        recoveries = scope_grants_raw.get("claim_recovery", {})
+        if not isinstance(recoveries, dict):
+            raise ControlError(
+                "CONFIG_INVALID", "claim recovery grants must be a table"
+            )
+        for campaign_id, claim_entries in recoveries.items():
+            if (not isinstance(campaign_id, str)
+                    or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,159}", campaign_id)
+                    or not isinstance(claim_entries, dict) or not claim_entries):
+                raise ControlError(
+                    "CONFIG_INVALID", "Environment claim recovery campaign entries are invalid"
+                )
+            validated_entries: dict[str, dict[str, Any]] = {}
+            for claim_id, entry in claim_entries.items():
+                required = {
+                    "repository", "claim_version", "owner_session_id",
+                    "owner_consumer_id", "requester_session_id", "approval_reference",
+                }
+                if (not isinstance(claim_id, str)
+                        or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,159}", claim_id)
+                        or not isinstance(entry, dict) or set(entry) != required):
+                    raise ControlError(
+                        "CONFIG_INVALID", "Environment claim recovery entries must name one exact claim transition"
+                    )
+                repository = entry.get("repository")
+                claim_version = entry.get("claim_version")
+                owner_session_id = entry.get("owner_session_id")
+                owner_consumer_id = entry.get("owner_consumer_id")
+                requester_session_id = entry.get("requester_session_id")
+                approval_reference = entry.get("approval_reference")
+                if (not isinstance(repository, str)
+                        or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,119}", repository)
+                        or claim_id != f"claim:{repository}"
+                        or type(claim_version) is not int or claim_version < 1
+                        or not isinstance(owner_session_id, str)
+                        or not re.fullmatch(r"ses_[A-Za-z0-9_-]{1,120}", owner_session_id)
+                        or not isinstance(requester_session_id, str)
+                        or not re.fullmatch(r"ses_[A-Za-z0-9_-]{1,120}", requester_session_id)
+                        or not isinstance(owner_consumer_id, str)
+                        or not owner_consumer_id.strip() or len(owner_consumer_id) > 160
+                        or not isinstance(approval_reference, str)
+                        or not approval_reference.strip() or len(approval_reference) > 256
+                        or "\x00" in approval_reference):
+                    raise ControlError(
+                        "CONFIG_INVALID", "Environment claim recovery grant values are invalid"
+                    )
+                validated_entries[claim_id] = {
+                    "repository": repository,
+                    "claim_version": claim_version,
+                    "owner_session_id": owner_session_id,
+                    "owner_consumer_id": owner_consumer_id,
+                    "requester_session_id": requester_session_id,
+                    "approval_reference": approval_reference,
+                }
+            environment_claim_recovery_grants[campaign_id] = validated_entries
 
     harness_value = integration.get("harness_config")
     forge_executable = integration.get("forge_mcp_executable")
@@ -492,6 +551,7 @@ def load_config(path: Path | str | None = None) -> ControlConfig:
             Path.home() / ".local" / "state" / "mncs-control-mcp" / "environment-rpc" / "environment.sock",
         ),
         environment_scope_grants=environment_scope_grants,
+        environment_claim_recovery_grants=environment_claim_recovery_grants,
         environment_scope_grants_path=scope_grants_path,
         fabric_execution_mode=fabric_execution_mode,
         fabric_controller_id=str(integration.get("fabric_controller_id", "mncs-harness")),
