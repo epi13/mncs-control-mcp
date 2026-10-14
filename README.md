@@ -102,12 +102,13 @@ codex mcp add mncs-environment -- \
 ```
 
 Start a new Codex process after registration. Call `mncs_environment` with a
-configured `project`, a named `operation` such as `enter`, `continuation`,
+workspace `project`, a named `operation` such as `enter`, `continuation`,
 `checkpoint`, `claims`, or `complete`, and operation-specific `arguments`.
 The optional `cwd` selects a directory relative to that project, including an
-existing worktree. Control issues a project grant over the existing private
-Environment socket, binds it to the MCP process and selected working directory,
-and audits each lifecycle call. The tool maps only its fixed operation list;
+existing worktree. Control admits an immediate Git checkout under the workspace,
+issues its grant over the existing private Environment socket, binds the grant
+to the MCP process and selected working directory, and audits each lifecycle
+call. The tool maps only its fixed operation list;
 it cannot run shell commands or arbitrary Environment CLI arguments. The
 operation list can grow without changing the MCP tool schema.
 

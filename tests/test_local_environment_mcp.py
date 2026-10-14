@@ -78,7 +78,7 @@ def test_local_rpc_bootstrap_binds_capability_to_process_and_working_tree(
             workspace_root=workspace,
             sandbox_home=tmp_path / "home",
             environment_rpc_socket=tmp_path / "state" / "environment.sock",
-            repositories={"compiler": "mncs-compiler"},
+            repositories={"environment": "mncs-environment"},
         ),
         environment_service=SimpleNamespace(state_dir=tmp_path / "canonical"),
         policy=object(),
@@ -121,6 +121,7 @@ def test_local_bridge_uses_owner_resolved_context_without_leaking_grant(
     workspace = tmp_path / "projects"
     project = workspace / "mncs-compiler"
     project.mkdir(parents=True)
+    (project / ".git").mkdir()
     server = EnvironmentRPCServer(
         ControlConfig(
             workspace_root=workspace,

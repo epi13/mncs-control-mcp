@@ -332,11 +332,10 @@ class EnvironmentRPCServer:
             )
         if not isinstance(project, str) or not re.fullmatch(
             r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", project,
-        ) or project not in set(self.config.repositories.values()):
+        ):
             raise ControlError(
                 "ENVIRONMENT_AUTHORITY_DENIED",
-                "local Environment entry requires one configured project name",
-                details={"allowed_projects": sorted(set(self.config.repositories.values()))},
+                "local Environment entry requires one immediate workspace project name",
             )
         workspace_root = self.config.workspace_root.expanduser().resolve(strict=True)
         project_path = workspace_root / project
@@ -349,7 +348,20 @@ class EnvironmentRPCServer:
         if project_root.parent != workspace_root or not project_root.is_dir():
             raise ControlError(
                 "ENVIRONMENT_WORKSPACE_ESCAPE",
-                "configured project must be one immediate workspace directory",
+                "project must be one immediate workspace directory",
+            )
+        git_marker = project_root / ".git"
+        try:
+            marker_stat = git_marker.lstat()
+        except OSError as error:
+            raise ControlError(
+                "ENVIRONMENT_WORKSPACE_MISSING",
+                "local Environment entry requires an immediate Git project",
+            ) from error
+        if not (stat.S_ISDIR(marker_stat.st_mode) or stat.S_ISREG(marker_stat.st_mode)):
+            raise ControlError(
+                "ENVIRONMENT_WORKSPACE_ESCAPE",
+                "project .git marker must be a regular file or directory",
             )
         if cwd in (None, ""):
             try:

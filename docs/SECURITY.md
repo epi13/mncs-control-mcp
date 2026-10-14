@@ -98,9 +98,10 @@ never exposes Store paths or file descriptors to the sandbox.
 endpoint does not trigger file persistence or direct Store writes.
 Local Codex stdio clients may request the same owner-issued project grant
 through an explicit bootstrap message. Control authenticates the Unix peer
-PID and UID, admits only a configured immediate project, confines the grant to
-one selected project directory, and rejects its use from another process
-identity. The stable MCP wrapper exposes named lifecycle operations with
+PID and UID, admits only an immediate Git checkout under the configured
+workspace, confines the grant to its selected working directory, and rejects
+its use from another process identity. The stable MCP wrapper exposes named
+lifecycle operations with
 operation-specific argument validation; it does not proxy shell or arbitrary
 CLI input. These calls use the existing Store owner and are recorded in the
 Control audit log.
