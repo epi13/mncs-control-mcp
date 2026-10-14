@@ -14,6 +14,7 @@ import logging
 import os
 import re
 import secrets
+import shlex
 import socket
 import stat
 import struct
@@ -2659,9 +2660,91 @@ class EnvironmentRPCServer:
         if (not callable(identities_method) and not callable(roots_method)
                 and peer_identity is None):
             return set(), [], False, ["current_request_roots_unavailable"]
-        return self._process_tree_exclusions(
+        excluded, processes, complete, reasons = self._process_tree_exclusions(
             identities, entries, reason_prefix="request_process",
         )
+        launcher = self._current_request_shell_launcher(peer_identity, entries)
+        if launcher is not None:
+            launcher_pid = int(launcher["pid"])
+            excluded.add(launcher_pid)
+            if not any(item.get("pid") == launcher_pid for item in processes):
+                processes.append(launcher)
+                processes.sort(key=lambda item: int(item["pid"]))
+        return excluded, processes, complete, reasons
+
+    def _current_request_shell_launcher(
+        self, peer_identity: dict[str, object] | None,
+        entries: list[Path],
+    ) -> dict[str, object] | None:
+        """Identify a one-shot shell that directly launched the active MCP peer.
+
+        Local Codex CLI requests can reach the Environment socket through a
+        child process of ``bash -c codex ...``. The shell is the caller for
+        this request, but its command line may mention a repository path and
+        its environment may be unreadable to Control. Excluding this exact
+        parent process avoids treating the request launcher as a competing
+        repository writer; its other children remain visible to liveness
+        checks.
+        """
+        if (not isinstance(peer_identity, dict)
+                or type(peer_identity.get("pid")) is not int
+                or not isinstance(peer_identity.get("start_ticks"), str)):
+            return None
+        entries_by_pid = {
+            int(entry.name): entry for entry in entries if entry.name.isdigit()
+        }
+        peer_pid = int(peer_identity["pid"])
+        peer_entry = entries_by_pid.get(peer_pid)
+        if peer_entry is None:
+            return None
+        try:
+            peer_status = (peer_entry / "status").read_text(encoding="utf-8")
+            if self._proc_start_ticks(peer_pid) != peer_identity["start_ticks"]:
+                return None
+            parent_pid = int(next(
+                line.split()[1] for line in peer_status.splitlines()
+                if line.startswith("PPid:")
+            ))
+            parent_entry = entries_by_pid.get(parent_pid)
+            if parent_entry is None:
+                return None
+            parent_status = (parent_entry / "status").read_text(encoding="utf-8")
+            parent_uid = int(next(
+                line.split()[1] for line in parent_status.splitlines()
+                if line.startswith("Uid:")
+            ))
+            if parent_uid != os.getuid():
+                return None
+            parent_comm = (parent_entry / "comm").read_text(
+                encoding="utf-8",
+            ).strip()
+            if parent_comm not in {"bash", "dash", "fish", "ksh", "sh", "zsh"}:
+                return None
+            peer_cmdline = (peer_entry / "cmdline").read_bytes()
+            parent_cmdline = (parent_entry / "cmdline").read_bytes()
+            peer_argv = [item.decode("utf-8", errors="replace")
+                         for item in peer_cmdline.split(b"\x00") if item]
+            parent_argv = [item.decode("utf-8", errors="replace")
+                           for item in parent_cmdline.split(b"\x00") if item]
+            if not peer_argv or len(parent_argv) < 3:
+                return None
+            command_index = next((
+                index + 1 for index, item in enumerate(parent_argv[1:], start=1)
+                if item.startswith("-") and "c" in item[1:]
+                and index + 1 < len(parent_argv)
+            ), None)
+            if command_index is None:
+                return None
+            command_argv = shlex.split(parent_argv[command_index])
+            if (not command_argv
+                    or Path(command_argv[0]).name != Path(peer_argv[0]).name):
+                return None
+            start_ticks = self._proc_start_ticks(parent_pid)
+            if start_ticks is None:
+                return None
+            return {"pid": parent_pid, "start_ticks": start_ticks}
+        except (OSError, StopIteration, ValueError, IndexError):
+            return None
 
     def _process_tree_exclusions(
         self,
