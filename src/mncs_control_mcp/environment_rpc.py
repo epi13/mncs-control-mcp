@@ -4290,6 +4290,53 @@ class EnvironmentRPCServer:
             raise TypeError("Environment returned a non-object continuation capsule")
         capsule = self._select_project_campaign_context(capsule, record, project)
         selected_session = capsule.get("selected_session_id")
+        if (selected_session is None and campaign_id is not None
+                and capsule.get("status") == "ready"):
+            continuations = capsule.get("continuations")
+            continuation_count = capsule.get(
+                "continuations_count",
+                len(continuations) if isinstance(continuations, list) else None,
+            )
+            if (isinstance(continuations, list)
+                    and len(continuations) == 1
+                    and type(continuation_count) is int
+                    and continuation_count == 1
+                    and capsule.get("continuations_truncated") is not True):
+                continuation = continuations[0]
+                project_reference = (
+                    continuation.get("project_reference")
+                    if isinstance(continuation, dict) else None
+                )
+                campaign_session_ids = (
+                    continuation.get("campaign_session_ids")
+                    if isinstance(continuation, dict) else None
+                )
+                candidate_session_id = (
+                    continuation.get("session_id")
+                    if isinstance(continuation, dict) else None
+                )
+                if (
+                    isinstance(candidate_session_id, str)
+                    and re.fullmatch(r"ses_[A-Za-z0-9_-]{1,120}", candidate_session_id)
+                    and isinstance(continuation.get("campaign_id"), str)
+                    and continuation["campaign_id"] == campaign_id
+                    and isinstance(campaign_session_ids, list)
+                    and candidate_session_id in campaign_session_ids
+                    and isinstance(project_reference, dict)
+                    and project_reference.get("status") == "linked"
+                    and isinstance(project_reference.get("basis"), list)
+                    and bool(project_reference["basis"])
+                    and continuation.get("lifecycle") in {
+                        "active", "blocked", "waiting", "checkpointed", "abandoned",
+                    }
+                ):
+                    selected_session = candidate_session_id
+                    capsule["selected_session_id"] = candidate_session_id
+                    capsule["selection_basis"] = "authenticated-explicit-linked-campaign"
+                    capsule["selected_context"] = {
+                        "definition_id": continuation.get("definition_id"),
+                        "workspace_root": continuation.get("workspace_root"),
+                    }
         task_selector = capsule.get("task_selector")
         if (
             task_identity is not None
@@ -4313,6 +4360,7 @@ class EnvironmentRPCServer:
                 and capsule.get("selection_basis") in {
                     "authenticated-project-environment-definition",
                     "authenticated-task-selector",
+                    "authenticated-explicit-linked-campaign",
                 }
                 and isinstance(selected_session, str)
                 and re.fullmatch(r"ses_[A-Za-z0-9_-]{1,120}", selected_session)):

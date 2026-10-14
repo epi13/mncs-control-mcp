@@ -4,8 +4,8 @@ import hashlib
 import json
 import os
 import shutil
-import sys
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -2624,6 +2624,187 @@ def test_project_continuation_cli_returns_compact_duplicate_session_capsule(
         json.dumps(capsule).encode()
     )
     assert environment.calls == [("mncs-environment", "cmp_continuation_fixture")]
+
+
+def test_explicit_linked_campaign_selection_binds_fresh_project_grant(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "projects"
+    project = workspace / "mncs-environment"
+    project.mkdir(parents=True)
+    campaign_id = "cmp_explicit_campaign_binding"
+    session_id = "ses_explicit_campaign_binding"
+    capsule = {
+        "schema_version": "mncs.control.campaign-continuation/1",
+        "campaign_id": campaign_id,
+        "repository": "mncs-environment",
+        "status": "ready",
+        "continuations_count": 1,
+        "continuations_truncated": False,
+        "continuations": [{
+            "session_id": session_id,
+            "campaign_id": campaign_id,
+            "campaign_session_ids": [session_id],
+            "definition_id": "env_explicit_campaign",
+            "workspace_root": str(workspace),
+            "lifecycle": "active",
+            "project_reference": {
+                "status": "linked",
+                "basis": ["active_claim.repository"],
+            },
+        }],
+    }
+
+    class Environment:
+        state_dir = tmp_path / "state"
+        environment_path = tmp_path / "environment"
+        authenticated_principal_id = "principal-test"
+
+        @staticmethod
+        def campaign_continuation(_repository: str, _campaign_id: str | None = None):
+            return json.loads(json.dumps(capsule))
+
+    server = EnvironmentRPCServer(
+        ControlConfig(
+            workspace_root=workspace,
+            sandbox_home=tmp_path / "home",
+            environment_rpc_socket=tmp_path / "rpc" / "environment.sock",
+        ),
+        environment_service=Environment(),
+        policy=object(),
+    )
+    token = "explicit-campaign-binding-grant"
+    record = _GrantRecord(
+        grant_id="explicit-campaign-binding-grant",
+        principal_id="principal-test",
+        host_root=project,
+        sandbox_root="/workspace/mncs-environment",
+        scope="project",
+        uid=0,
+        expires_at=time.monotonic() + 60,
+        token_file=tmp_path / "grant",
+    )
+    server._grants[hashlib.sha256(token.encode()).hexdigest()] = record
+    monkeypatch.setattr(server, "_authorize_session", lambda _session_id, _principal: None)
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        "mncs_control_mcp.environment_rpc.subprocess.run",
+        lambda argv, **_kwargs: calls.append(argv) or SimpleNamespace(
+            returncode=0, stdout='{"evidence_count":1}\n', stderr="",
+        ),
+    )
+
+    def request(request_id: str, argv: list[str]) -> dict[str, object]:
+        return server.dispatch({
+            "grant": token,
+            "request_id": request_id,
+            "argv": argv,
+            "cwd": "/workspace/mncs-environment",
+        }, peer_uid=0)
+
+    denied = request("req_explicit_campaign_unselected", [
+        "campaign-state", session_id,
+    ])
+    assert denied["error"]["code"] == "ENVIRONMENT_AUTHORITY_DENIED"
+    assert calls == []
+
+    selected = request("req_explicit_campaign_select", [
+        "continuation", "--campaign-id", campaign_id,
+    ])
+    assert selected["ok"] is True
+    projected = json.loads(selected["result"]["stdout"])
+    assert projected["selected_session_id"] == session_id
+    assert projected["selection_basis"] == "authenticated-explicit-linked-campaign"
+    assert record.bound_session_id == session_id
+
+    state = request("req_explicit_campaign_state", [
+        "campaign-state", session_id, "--evidence-offset", "0", "--evidence-limit", "4",
+    ])
+    assert state["ok"] is True
+    assert json.loads(state["result"]["stdout"]) == {"evidence_count": 1}
+    assert calls[0][-6:] == [
+        "campaign-state", session_id, "--evidence-offset", "0", "--evidence-limit", "4",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("continuation_count", "reference_status", "row_campaign_id"),
+    [
+        (2, "linked", "cmp_explicit_campaign_binding"),
+        (1, "same_campaign_only", "cmp_explicit_campaign_binding"),
+        (1, "linked", "cmp_other_campaign"),
+    ],
+)
+def test_explicit_campaign_selection_does_not_bind_ambiguous_or_unlinked_rows(
+    continuation_count: int,
+    reference_status: str,
+    row_campaign_id: str,
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "projects"
+    project = workspace / "mncs-environment"
+    project.mkdir(parents=True)
+    campaign_id = "cmp_explicit_campaign_binding"
+    row = {
+        "session_id": "ses_explicit_campaign_binding",
+        "campaign_id": row_campaign_id,
+        "campaign_session_ids": ["ses_explicit_campaign_binding"],
+        "lifecycle": "active",
+        "project_reference": {
+            "status": reference_status,
+            "basis": ["active_claim.repository"] if reference_status == "linked" else [],
+        },
+    }
+    capsule = {
+        "campaign_id": campaign_id,
+        "repository": "mncs-environment",
+        "status": "ready",
+        "continuations_count": continuation_count,
+        "continuations_truncated": False,
+        "continuations": [row],
+    }
+
+    class Environment:
+        state_dir = tmp_path / "state"
+        environment_path = tmp_path / "environment"
+        authenticated_principal_id = "principal-test"
+
+        @staticmethod
+        def campaign_continuation(_repository: str, _campaign_id: str | None = None):
+            return capsule
+
+    server = EnvironmentRPCServer(
+        ControlConfig(
+            workspace_root=workspace,
+            sandbox_home=tmp_path / "home",
+            environment_rpc_socket=tmp_path / "rpc" / "environment.sock",
+        ),
+        environment_service=Environment(),
+        policy=object(),
+    )
+    token = "explicit-campaign-no-bind-grant"
+    record = _GrantRecord(
+        grant_id="explicit-campaign-no-bind-grant",
+        principal_id="principal-test",
+        host_root=project,
+        sandbox_root="/workspace/mncs-environment",
+        scope="project",
+        uid=0,
+        expires_at=time.monotonic() + 60,
+        token_file=tmp_path / "grant",
+    )
+    server._grants[hashlib.sha256(token.encode()).hexdigest()] = record
+
+    response = server.dispatch({
+        "grant": token,
+        "request_id": "req_explicit_campaign_no_bind",
+        "argv": ["continuation", "--campaign-id", campaign_id],
+        "cwd": "/workspace/mncs-environment",
+    }, peer_uid=0)
+
+    assert response["ok"] is True
+    assert record.bound_session_id is None
+    assert "selected_session_id" not in json.loads(response["result"]["stdout"])
 
 
 def test_project_continuation_refuses_selection_when_other_context_holds_claim(
