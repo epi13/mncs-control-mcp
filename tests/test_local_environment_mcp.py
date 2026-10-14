@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import mncs_control_mcp.local_environment_mcp as local_environment_mcp
 from mncs_control_mcp.config import ControlConfig
 from mncs_control_mcp.environment_rpc import EnvironmentRPCServer
 from mncs_control_mcp.errors import ControlError
@@ -132,6 +133,37 @@ def test_project_context_requires_cwd_when_multiple_contexts_exist(
 
     with pytest.raises(ValueError, match="cwd is required"):
         bridge._context("mncs-compiler", "")
+
+
+def test_session_operation_reselects_through_campaign_on_a_fresh_context(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bridge = object.__new__(LocalEnvironmentMCP)
+    bridge.socket_path = tmp_path / "unused.sock"
+    context = _ProjectContext("grant", "/workspace/mncs-compiler")
+    bridge._contexts = {}
+    monkeypatch.setattr(bridge, "_context", lambda _project, _cwd: context)
+    requests: list[dict[str, object]] = []
+    replies = [
+        {"status": "ready", "selected_session_id": "ses_selected"},
+        {"session_id": "ses_selected", "lifecycle": "active"},
+    ]
+
+    def fake_rpc(_socket_path: Path, request: dict[str, object]) -> dict[str, object]:
+        requests.append(request)
+        return {"ok": True, "result": {
+            "stdout": json.dumps(replies.pop(0)), "stderr": "", "exit_code": 0,
+        }}
+
+    monkeypatch.setattr(local_environment_mcp, "_rpc", fake_rpc)
+    response = bridge.invoke(
+        "mncs-compiler", "context", {"campaign_id": "cmp_current"},
+    )
+
+    assert response["ok"] is True
+    assert response["result"]["session_id"] == "ses_selected"
+    assert requests[0]["argv"] == ["continuation", "--campaign-id", "cmp_current"]
+    assert requests[1]["argv"] == ["context", "ses_selected"]
 
 
 def test_selection_error_is_bounded_and_keeps_campaign_choices() -> None:

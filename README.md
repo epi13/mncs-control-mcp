@@ -113,7 +113,10 @@ it cannot run shell commands or arbitrary Environment CLI arguments. The
 operation list can grow without changing the MCP tool schema. If continuation
 reports multiple campaigns, pass the campaign ID already named by the requested
 work. The bridge selects a session only when the returned campaign has exactly
-one session; otherwise it returns the choices without mutation.
+one session; otherwise it returns bounded campaign choices without mutation.
+Any session-scoped operation may include `campaign_id` or `task_identity` to
+reselect through Control after a fresh MCP process starts; the caller does not
+need to reuse an in-memory session ID or depend on a prior connector process.
 
 ## Workspace and scope model
 

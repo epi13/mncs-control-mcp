@@ -26,6 +26,7 @@ SESSION_OPERATIONS = frozenset({
     "inspect", "context", "health", "capabilities", "checkpoint", "handoff",
     "complete", "claims", "campaign_state", "artifact_read", "store_generation",
 })
+SESSION_SELECTOR_FIELDS = frozenset({"campaign_id", "task_identity"})
 
 
 @dataclass
@@ -612,8 +613,32 @@ class LocalEnvironmentMCP:
     def _select_session(
         self, context: _ProjectContext, project: str, values: dict[str, Any],
     ) -> dict[str, Any] | None:
-        if context.selected_session_id and SESSION_RE.fullmatch(context.selected_session_id):
+        campaign_id = values.get("campaign_id")
+        task_identity = values.get("task_identity")
+        if campaign_id is not None and task_identity is not None:
+            raise ValueError("supply campaign_id or task_identity, not both")
+        if (context.selected_session_id
+                and SESSION_RE.fullmatch(context.selected_session_id)
+                and campaign_id is None and task_identity is None):
+            requested_session_id = values.get("session_id")
+            if requested_session_id not in (None, context.selected_session_id):
+                return {
+                    "ok": False,
+                    "error": {
+                        "code": "ENVIRONMENT_SESSION_SELECTION_REQUIRED",
+                        "message": "requested session differs from this project context's selected session",
+                        "details": {
+                            "selected_session_id": context.selected_session_id,
+                            "session_id": requested_session_id,
+                            "next": "supply the campaign_id or task_identity for the intended session",
+                        },
+                    },
+                }
             return None
+        # A fresh MCP process may not retain its in-memory session cache.
+        # Rebind through Control's authenticated project continuation whenever
+        # the caller supplies a stable campaign or task selector.
+        context.selected_session_id = None
         argv = ["continuation"]
         for field, flag in (("campaign_id", "--campaign-id"),
                             ("task_identity", "--task-identity")):
@@ -666,13 +691,21 @@ class LocalEnvironmentMCP:
                     "mode", "repository", "claim_id", "offset", "limit", "reason", "ttl",
                     "basis", "paths", "worktree", "branch", "expected_store_generation",
                     "evidence_offset", "evidence_limit", "capability", "binding_id", "path",
+                    *SESSION_SELECTOR_FIELDS,
                 })
                 selected_error = self._select_session(context, project, values)
                 if selected_error is not None:
                     return self._response_error(selected_error)
+                operation_values = {
+                    key: value for key, value in values.items()
+                    if key not in SESSION_SELECTOR_FIELDS
+                }
             else:
                 values = arguments or {}
-            argv, uses_session = _build_argv(operation, values, context, project)
+                operation_values = values
+            argv, uses_session = _build_argv(
+                operation, operation_values, context, project,
+            )
             if uses_session and not context.selected_session_id:
                 raise ValueError("no authenticated session selected")
             request = {
@@ -703,7 +736,9 @@ class LocalEnvironmentMCP:
                             return self._response_error(selected_error)
                     request["grant"] = context.grant
                     request["request_id"] = "req_" + secrets.token_hex(16)
-                    argv, uses_session = _build_argv(operation, values, context, project)
+                    argv, uses_session = _build_argv(
+                        operation, operation_values, context, project,
+                    )
                     request["argv"] = argv
                     response = _rpc(self.socket_path, request)
             return self._present(operation, response)
@@ -732,8 +767,10 @@ def main() -> None:
             "strictly validated Environment lifecycle operation. Supported operations "
             "include enter, continuation, inspect, context, health, capabilities, "
             "checkpoint, handoff, complete, claims, campaign_state, artifact_read, "
-            "and store_generation. The project and optional cwd select one project "
-            "directory; no shell or arbitrary CLI arguments are accepted."
+            "and store_generation. The project and optional project-relative cwd "
+            "select one project directory. Session operations may include campaign_id "
+            "or task_identity to reselect safely after an MCP process restart. No shell "
+            "or arbitrary CLI arguments are accepted."
         ),
     )
     def mncs_environment(
