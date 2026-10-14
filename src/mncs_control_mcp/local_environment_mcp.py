@@ -14,6 +14,7 @@ from typing import Any
 from .config import load_config
 
 MAX_FRAME = 256 * 1024
+MAX_TOOL_RESULT_BYTES = 64 * 1024
 SESSION_RE = re.compile(r"ses_[A-Za-z0-9_-]{1,120}")
 TOKEN_RE = re.compile(r"[A-Za-z0-9_-]{32,128}")
 OPERATIONS = frozenset({
@@ -238,7 +239,7 @@ def _build_argv(
                 raise ValueError("claims list accepts only repository, offset, and limit")
             argv.extend(["--repository", repository])
             for field, default, low, high in (("offset", 0, 0, 2**31 - 1),
-                                              ("limit", 100, 1, 128)):
+                ("limit", 25, 1, 128)):
                 number = values.get(field, default)
                 if type(number) is not int or not low <= number <= high:
                     raise ValueError(f"{field} is outside its supported range")
@@ -291,7 +292,7 @@ def _build_argv(
         argv = ["campaign-state", session_id]
         for field, flag, default, low, high in (
             ("evidence_offset", "--evidence-offset", 0, 0, 2**31 - 1),
-            ("evidence_limit", "--evidence-limit", 128, 1, 128),
+            ("evidence_limit", "--evidence-limit", 20, 1, 128),
         ):
             number = values.get(field, default)
             if type(number) is not int or not low <= number <= high:
@@ -377,6 +378,143 @@ class LocalEnvironmentMCP:
             return session_ids[0]
         return None
 
+    @staticmethod
+    def _compact_continuation(payload: dict[str, Any]) -> dict[str, Any]:
+        rows = payload.get("continuations")
+        compact_rows: list[dict[str, Any]] = []
+        if isinstance(rows, list):
+            for row in rows[:32]:
+                if not isinstance(row, dict):
+                    continue
+                item = {
+                    key: row[key]
+                    for key in (
+                        "campaign_id", "campaign_session_ids", "current_campaign_consumer",
+                        "authorized_consumers", "lifecycle", "latest_checkpoint",
+                        "claim_ids", "work_intent", "evidence_count", "evidence_truncated",
+                        "delivery", "repositories", "project_reference",
+                    )
+                    if key in row
+                }
+                if isinstance(item.get("delivery"), dict):
+                    delivery = item["delivery"]
+                    item["delivery"] = {
+                        key: delivery[key]
+                        for key in ("status", "reason", "repositories_count", "repositories_truncated")
+                        if key in delivery
+                    }
+                if isinstance(item.get("repositories"), list):
+                    item["repositories"] = [
+                        {
+                            key: repository[key]
+                            for key in ("repository", "branch", "head", "status")
+                            if key in repository
+                        }
+                        for repository in item["repositories"][:16]
+                        if isinstance(repository, dict)
+                    ]
+                compact_rows.append(item)
+        selected = LocalEnvironmentMCP._selected_session(payload)
+        compact = {
+            key: payload[key]
+            for key in ("schema_version", "status", "repository", "campaigns_count",
+                        "continuations_count", "continuations_truncated", "next")
+            if key in payload
+        }
+        if selected is not None:
+            compact["selected_session_id"] = selected
+        compact["continuations"] = compact_rows
+        return compact
+
+    @staticmethod
+    def _compact_context(payload: dict[str, Any]) -> dict[str, Any]:
+        keys = (
+            "schema_version", "session_id", "lifecycle", "environment_id",
+            "work_intent", "workspace_root", "persistence", "toolchain",
+            "writable_repositories", "protected_repositories",
+        )
+        compact = {key: payload[key] for key in keys if key in payload}
+        authority = payload.get("authority")
+        if isinstance(authority, dict):
+            compact["authority"] = {
+                key: authority[key]
+                for key in ("readable", "writable", "protected_repositories", "escalation_required")
+                if key in authority
+            }
+        readiness = payload.get("readiness")
+        if isinstance(readiness, dict):
+            compact["readiness"] = {
+                key: readiness[key]
+                for key in ("status", "blocking", "required_unavailable", "required_unknown",
+                            "unavailable_count", "unknown_count")
+                if key in readiness
+            }
+        doctor = payload.get("doctor")
+        if isinstance(doctor, dict):
+            compact["doctor"] = {
+                key: doctor[key] for key in ("readiness", "summary", "remaining") if key in doctor
+            }
+        projects = payload.get("projects")
+        if isinstance(projects, list):
+            compact["projects"] = [
+                {key: item[key] for key in ("repository", "path", "branch", "dirty") if key in item}
+                for item in projects[:16] if isinstance(item, dict)
+            ]
+        capabilities = payload.get("capabilities")
+        if isinstance(capabilities, dict):
+            available = capabilities.get("available")
+            if isinstance(available, list):
+                compact["capabilities"] = {
+                    "available": [
+                        item.get("capability") for item in available[:64]
+                        if isinstance(item, dict) and isinstance(item.get("capability"), str)
+                    ],
+                    "count": len(available),
+                }
+        return compact
+
+    @staticmethod
+    def _present(operation: str, response: dict[str, Any]) -> dict[str, Any]:
+        if response.get("ok") is not True:
+            error = response.get("error")
+            return {"ok": False, "operation": operation,
+                    "error": error if isinstance(error, dict) else {
+                        "code": "ENVIRONMENT_RPC_FAILED",
+                        "message": "Control Environment operation failed",
+                    }}
+        result = response.get("result")
+        if not isinstance(result, dict):
+            return {"ok": True, "operation": operation, "result": result}
+        payload = LocalEnvironmentMCP._payload(response)
+        if isinstance(payload, dict):
+            if operation == "continuation":
+                payload = LocalEnvironmentMCP._compact_continuation(payload)
+            elif operation in {"enter", "context", "inspect", "resume"}:
+                payload = LocalEnvironmentMCP._compact_context(payload)
+            encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True,
+                                 separators=(",", ":")).encode("utf-8")
+            if len(encoded) > MAX_TOOL_RESULT_BYTES:
+                payload = {
+                    "status": "truncated",
+                    "response_bytes": len(encoded),
+                    "next": "request a smaller evidence or claim page",
+                }
+            return {
+                "ok": True,
+                "operation": operation,
+                "exit_code": result.get("exit_code"),
+                "result": payload,
+                "stderr": str(result.get("stderr", ""))[:2048],
+            }
+        stdout = result.get("stdout")
+        return {
+            "ok": True,
+            "operation": operation,
+            "exit_code": result.get("exit_code"),
+            "result": str(stdout)[:MAX_TOOL_RESULT_BYTES] if stdout is not None else result,
+            "stderr": str(result.get("stderr", ""))[:2048],
+        }
+
     def _select_session(
         self, context: _ProjectContext, project: str, values: dict[str, Any],
     ) -> dict[str, Any] | None:
@@ -421,7 +559,7 @@ class LocalEnvironmentMCP:
             }}
         if not isinstance(project, str) or len(project) > 128:
             return {"ok": False, "error": {"code": "ENVIRONMENT_RPC_INVALID_REQUEST",
-                                             "message": "project must be a configured project name"}}
+                                             "message": "project must be an immediate workspace Git checkout name"}}
         try:
             if cwd:
                 cwd = _relative_path(cwd, "cwd")
@@ -474,7 +612,7 @@ class LocalEnvironmentMCP:
                     argv, uses_session = _build_argv(operation, values, context, project)
                     request["argv"] = argv
                     response = _rpc(self.socket_path, request)
-            return response
+            return self._present(operation, response)
         except _OwnerRPCError as error:
             return self._response_error(error.response)
         except (ConnectionError, OSError, ValueError, TypeError) as error:

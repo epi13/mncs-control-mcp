@@ -110,7 +110,10 @@ issues its grant over the existing private Environment socket, binds the grant
 to the MCP process and selected working directory, and audits each lifecycle
 call. The tool maps only its fixed operation list;
 it cannot run shell commands or arbitrary Environment CLI arguments. The
-operation list can grow without changing the MCP tool schema.
+operation list can grow without changing the MCP tool schema. If continuation
+reports multiple campaigns, pass the campaign ID already named by the requested
+work. The bridge selects a session only when the returned campaign has exactly
+one session; otherwise it returns the choices without mutation.
 
 ## Workspace and scope model
 

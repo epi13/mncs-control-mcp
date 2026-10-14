@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 from types import SimpleNamespace
@@ -10,6 +11,7 @@ from mncs_control_mcp.config import ControlConfig
 from mncs_control_mcp.environment_rpc import EnvironmentRPCServer
 from mncs_control_mcp.errors import ControlError
 from mncs_control_mcp.local_environment_mcp import (
+    MAX_TOOL_RESULT_BYTES,
     LocalEnvironmentMCP,
     _build_argv,
     _ProjectContext,
@@ -74,6 +76,30 @@ def test_campaign_continuation_selects_only_one_unambiguous_session() -> None:
         "status": "ready",
         "continuations": [{"campaign_session_ids": ["ses_one", "ses_two"]}],
     }) is None
+
+
+def test_continuation_response_omits_large_workspace_inventory() -> None:
+    payload = {
+        "status": "ready",
+        "repository": "mncs-compiler",
+        "continuations": [{
+            "campaign_id": "cmp_compiler",
+            "campaign_session_ids": ["ses_selected"],
+            "latest_checkpoint": {"identity": "chk_latest", "progress": "verified"},
+            "live_repository_observation": {
+                "worktree_registrations": [{"path": f"/tmp/worktree-{index}"}
+                                            for index in range(1000)],
+            },
+        }],
+    }
+    response = LocalEnvironmentMCP._present("continuation", {
+        "ok": True,
+        "result": {"exit_code": 0, "stdout": json.dumps(payload), "stderr": ""},
+    })
+    encoded = json.dumps(response).encode("utf-8")
+    assert len(encoded) < MAX_TOOL_RESULT_BYTES
+    assert response["result"]["selected_session_id"] == "ses_selected"
+    assert "live_repository_observation" not in response["result"]["continuations"][0]
 
 
 def test_local_rpc_bootstrap_binds_capability_to_process_and_working_tree(
