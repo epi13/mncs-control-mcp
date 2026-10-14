@@ -1026,6 +1026,26 @@ def test_artifact_read_is_bound_to_environment_selected_project_session(
     ]
     assert authorized_sessions[-1] == ("ses_selected", "principal-agent")
 
+    task_witness_reads = (
+        (forge_capability, forge_binding_id, 5),
+        (scheduled_forge_capability, scheduled_forge_binding_id, 6),
+    )
+    for index, (task_capability, task_binding_id, call_index) in enumerate(
+        task_witness_reads
+    ):
+        task_read = server.dispatch({
+            **base,
+            "request_id": f"req_artifact_read_compiler_task_{index}",
+            "argv": ["artifact-read", "ses_selected", task_capability,
+                     task_binding_id, "compiler-vm-task.json"],
+        }, peer_uid=0)
+        assert task_read["ok"] is True
+        assert calls[call_index][0][-5:] == [
+            "artifact-read", "ses_selected", task_capability,
+            task_binding_id, "compiler-vm-task.json",
+        ]
+        assert authorized_sessions[-1] == ("ses_selected", "principal-agent")
+
     selected_session[0] = "ses_other"
     server.dispatch({
         **base,
@@ -1053,6 +1073,8 @@ def test_artifact_read_is_bound_to_environment_selected_project_session(
          "forge-failure.json"],
         ["artifact-read", "ses_selected", scheduled_forge_capability,
          scheduled_forge_binding_id, "forge-failure.json"],
+        ["artifact-read", "ses_selected", forge_capability, forge_binding_id,
+         "compiler-vm-task-private.json"],
     )):
         rejected = server.dispatch({
             **base,
@@ -1060,7 +1082,7 @@ def test_artifact_read_is_bound_to_environment_selected_project_session(
             "argv": argv,
         }, peer_uid=0)
         assert rejected["error"]["code"] == "ENVIRONMENT_AUTHORITY_DENIED"
-    assert len(calls) == 5
+    assert len(calls) == 7
 
 
 def test_project_session_mutations_require_exact_continuation_selection(
