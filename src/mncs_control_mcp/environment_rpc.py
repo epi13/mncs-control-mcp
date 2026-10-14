@@ -626,6 +626,8 @@ class EnvironmentRPCServer:
             allowed_artifacts = {
                 ("mncs-forge:provider-artifact-execution",
                  "forge-execution-receipt.json"),
+                ("mncs-forge:compiler-vm-scheduled-work",
+                 "forge-execution-receipt.json"),
                 ("mncs-system-monitor:system-resource-sample",
                  "system-resource-sample.json"),
                 ("mncs-system-monitor:system-observability",
