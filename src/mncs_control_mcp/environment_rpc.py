@@ -2375,6 +2375,8 @@ class EnvironmentRPCServer:
         same_uid_examined = 0
         complete = True
         incomplete_counts: dict[str, int] = {}
+        unreadable_matches: list[dict[str, object]] = []
+        unreadable_match_count = 0
 
         def mark_incomplete(reason: str) -> None:
             nonlocal complete
@@ -2524,12 +2526,25 @@ class EnvironmentRPCServer:
                 # A repository-associated process with hidden session context
                 # cannot be proved unrelated to the displaced owner.
                 mark_incomplete("matching_process_context_unreadable")
+                unreadable_match_count += 1
+                if len(unreadable_matches) < 8:
+                    unreadable_matches.append({
+                        "pid": pid,
+                        "ppid": ppid,
+                        "start_ticks": start_ticks or "unavailable",
+                        "comm": comm,
+                        "executable": Path(executable).name
+                        if executable is not None else "unavailable",
+                        "reason": reason,
+                    })
         return (matches, resident_services, excluded_processes,
                 len([item for item in entries if item.name.isdigit()]),
                 same_uid_examined, boot_id, complete, {
                     "request_process_tree_complete": exclusion_complete,
-                "tracked_job_process_tree_complete": tracked_exclusion_complete,
-                "tracked_job_processes_excluded": tracked_excluded_processes,
+                    "tracked_job_process_tree_complete": tracked_exclusion_complete,
+                    "tracked_job_processes_excluded": tracked_excluded_processes,
+                    "unreadable_match_count": unreadable_match_count,
+                    "unreadable_matches": unreadable_matches,
                     "incomplete_reasons": [
                         {"reason": reason, "count": count}
                         for reason, count in sorted(incomplete_counts.items())

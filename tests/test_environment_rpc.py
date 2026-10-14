@@ -503,6 +503,8 @@ def test_recovery_process_inventory_excludes_only_its_current_terminal_tree(
                 "pid": tracked_job.pid,
                 "start_ticks": ProcessManager._process_start_ticks(tracked_job.pid),
             }],
+            "unreadable_match_count": 0,
+            "unreadable_matches": [],
             "incomplete_reasons": [],
         }
         assert current.pid in excluded_ids
@@ -562,11 +564,84 @@ def test_host_process_inventory_explains_an_incomplete_request_tree(
         "request_process_tree_complete": False,
         "tracked_job_process_tree_complete": True,
         "tracked_job_processes_excluded": [],
+        "unreadable_match_count": 0,
+        "unreadable_matches": [],
         "incomplete_reasons": [
             {"reason": "current_request_process_tree_incomplete", "count": 1},
             {"reason": "request_process_root_unreadable", "count": 1},
         ],
     }
+
+
+def test_host_process_inventory_identifies_unreadable_matching_processes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from mncs_control_mcp.processes import ProcessManager
+
+    project = tmp_path / "mncs-compiler"
+    checkout = project / ".worktrees" / "selected"
+    checkout.mkdir(parents=True)
+    owner = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        cwd=checkout,
+    )
+    manager = ProcessManager.__new__(ProcessManager)
+    manager._lock = threading.RLock()
+    manager._request_processes = {}
+    server = EnvironmentRPCServer(
+        ControlConfig(
+            workspace_root=tmp_path,
+            sandbox_home=tmp_path / "home",
+            environment_rpc_socket=tmp_path / "rpc" / "environment.sock",
+        ),
+        environment_service=SimpleNamespace(state_dir=tmp_path / "state"),
+        policy=object(),
+        process_manager=manager,
+    )
+    read_bytes = Path.read_bytes
+
+    def hide_owner_environment(path: Path) -> bytes:
+        if path == Path(f"/proc/{owner.pid}/environ"):
+            raise PermissionError("fixture-hidden process environment")
+        return read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", hide_owner_environment)
+    try:
+        owner_status = Path(f"/proc/{owner.pid}/status").read_text()
+        owner_ppid = int(next(
+            line.split()[1] for line in owner_status.splitlines()
+            if line.startswith("PPid:")
+        ))
+        owner_executable = Path(os.readlink(f"/proc/{owner.pid}/exe")).name
+        inventory = server._host_process_inventory(
+            owner_session_id="ses_old_owner",
+            repository="mncs-compiler",
+            checkout=str(checkout),
+            current_grant_id="grant-current",
+        )
+
+        diagnostics = inventory[7]
+        assert inventory[6] is False
+        assert diagnostics["unreadable_match_count"] == 1
+        match = diagnostics["unreadable_matches"][0]
+        assert match == {
+            "pid": owner.pid,
+            "ppid": owner_ppid,
+            "start_ticks": ProcessManager._process_start_ticks(owner.pid),
+            "comm": match["comm"],
+            "executable": owner_executable,
+            "reason": "selected-worktree-working-directory",
+        }
+        assert match["comm"]
+        assert set(match) == {
+            "pid", "ppid", "start_ticks", "comm", "executable", "reason",
+        }
+        assert diagnostics["incomplete_reasons"] == [{
+            "reason": "matching_process_context_unreadable", "count": 1,
+        }]
+    finally:
+        owner.terminate()
+        owner.wait(timeout=3)
 
 
 def test_claim_recovery_request_tracks_selected_continuation_session() -> None:
