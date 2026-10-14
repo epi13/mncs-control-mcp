@@ -51,6 +51,52 @@ def test_stable_tool_maps_only_named_environment_operations() -> None:
         )
 
 
+def test_resume_revalidates_the_selected_session() -> None:
+    context = _ProjectContext("secret", "/workspace/mncs-compiler/.worktrees/run")
+    context.selected_session_id = "ses_selected"
+
+    argv, selected = _build_argv(
+        "resume", {"session_id": "ses_selected"}, context, "mncs-compiler",
+    )
+
+    assert selected is True
+    assert argv == ["resume", "ses_selected", "--revalidate"]
+
+
+def test_verify_maps_a_project_capability_to_its_fixed_invocation() -> None:
+    context = _ProjectContext("secret", "/workspace/mncs-compiler/.worktrees/run")
+    context.selected_session_id = "ses_selected"
+    capability = "mncs-compiler:verification-executor/mncs-compiler.frontend-differential"
+
+    argv, selected = _build_argv(
+        "verify",
+        {"session_id": "ses_selected", "capability": capability},
+        context,
+        "mncs-compiler",
+    )
+
+    assert selected is True
+    assert argv == ["invoke", "ses_selected", capability]
+
+
+def test_verify_rejects_other_projects_and_caller_supplied_arguments() -> None:
+    context = _ProjectContext("secret", "/workspace/mncs-compiler")
+    context.selected_session_id = "ses_selected"
+    with pytest.raises(ValueError, match="selected project"):
+        _build_argv(
+            "verify", {"session_id": "ses_selected", "capability": "../../shell"},
+            context, "mncs-compiler",
+        )
+    with pytest.raises(ValueError, match="unsupported arguments"):
+        _build_argv(
+            "verify",
+            {"session_id": "ses_selected",
+             "capability": "mncs-compiler:verification-executor/test",
+             "argv": ["rm", "-rf"]},
+            context, "mncs-compiler",
+        )
+
+
 def test_claim_release_mapping_is_explicit_and_bounded() -> None:
     context = _ProjectContext("secret", "/workspace/mncs-compiler")
     context.selected_session_id = "ses_selected"

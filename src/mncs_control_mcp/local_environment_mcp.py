@@ -19,12 +19,13 @@ SESSION_RE = re.compile(r"ses_[A-Za-z0-9_-]{1,120}")
 TOKEN_RE = re.compile(r"[A-Za-z0-9_-]{32,128}")
 OPERATIONS = frozenset({
     "enter", "continuation", "inspect", "context", "health", "capabilities",
-    "checkpoint", "handoff", "complete", "claims", "campaign_state",
-    "artifact_read", "store_generation",
+    "resume", "verify", "checkpoint", "handoff", "complete", "claims",
+    "campaign_state", "artifact_read", "store_generation",
 })
 SESSION_OPERATIONS = frozenset({
-    "inspect", "context", "health", "capabilities", "checkpoint", "handoff",
-    "complete", "claims", "campaign_state", "artifact_read", "store_generation",
+    "inspect", "context", "health", "capabilities", "resume", "verify",
+    "checkpoint", "handoff", "complete", "claims", "campaign_state",
+    "artifact_read", "store_generation",
 })
 SESSION_SELECTOR_FIELDS = frozenset({"campaign_id", "task_identity"})
 
@@ -125,6 +126,8 @@ def _build_argv(
         "continuation": {"campaign_id", "task_identity"},
         "inspect": {"session_id"}, "context": {"session_id"},
         "health": {"session_id", "live"}, "capabilities": {"session_id"},
+        "resume": {"session_id"},
+        "verify": {"session_id", "capability"},
         "checkpoint": {
             "session_id", "progress", "remaining", "campaign_base_checkpoint",
             "campaign_evidence", "campaign_evidence_delta", "campaign_delivery",
@@ -178,6 +181,22 @@ def _build_argv(
     session_id = _session_argument(values, context)
     if operation in {"inspect", "context", "capabilities"}:
         return [operation, session_id], True
+    if operation == "resume":
+        # Revalidate on every explicit resume so a fresh agent sees current
+        # checkout/toolchain readiness through this stable gateway.
+        return ["resume", session_id, "--revalidate"], True
+    if operation == "verify":
+        capability = _string(values.get("capability"), "capability", max_length=256)
+        prefix = f"{project}:verification-executor/"
+        name = capability.removeprefix(prefix) if capability.startswith(prefix) else ""
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,159}", name):
+            raise ValueError(
+                "verify accepts only a declared verification capability for the selected project"
+            )
+        # Control intentionally authorizes project verification only through
+        # this exact fixed-argument CLI form; the Environment descriptor owns
+        # the provider command and the selected session owns its authority.
+        return ["invoke", session_id, capability], True
     if operation == "health":
         argv = ["health", session_id]
         if values.get("live") is True:
@@ -756,8 +775,11 @@ def main() -> None:
             "Enter or continue one configured MNCS project and perform a named, "
             "strictly validated Environment lifecycle operation. Supported operations "
             "include enter, continuation, inspect, context, health, capabilities, "
-            "checkpoint, handoff, complete, claims, campaign_state, artifact_read, "
-            "and store_generation. The project and optional project-relative cwd "
+            "resume, verify, checkpoint, handoff, complete, claims, campaign_state, "
+            "artifact_read, and store_generation. Resume revalidates the selected "
+            "session. Verify runs one already-bound project verification capability "
+            "with its descriptor's fixed arguments and selected project authority. "
+            "The project and optional project-relative cwd "
             "select one project directory. Session operations may include campaign_id "
             "or task_identity to reselect safely after an MCP process restart. No shell "
             "or arbitrary CLI arguments are accepted."
