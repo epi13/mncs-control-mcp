@@ -91,6 +91,26 @@ journalctl --user -u mncs-control-tunnel.service -f
 
 If typed `env_*` tools are absent from a caller's MCP snapshot, Environment work still uses the stable project-scoped terminal tools: run `python3 -B -m mncs_env.cli --help` or a supported lifecycle command from the selected Environment project. Control routes these CLI operations through the authenticated Environment RPC and its fixed allowlist; the CLI does not receive canonical Store paths or a general Store write interface. This path does not depend on adding one MCP tool for each Environment capability.
 
+For local Codex CLI sessions, the same owner service also supports one stable
+stdio MCP tool. Register it once with the Control checkout's editable Python
+environment:
+
+```bash
+codex mcp add mncs-environment -- \
+  /path/to/mncs-control-mcp/.venv/bin/python -B -m \
+  mncs_control_mcp.local_environment_mcp
+```
+
+Start a new Codex process after registration. Call `mncs_environment` with a
+configured `project`, a named `operation` such as `enter`, `continuation`,
+`checkpoint`, `claims`, or `complete`, and operation-specific `arguments`.
+The optional `cwd` selects a directory relative to that project, including an
+existing worktree. Control issues a project grant over the existing private
+Environment socket, binds it to the MCP process and selected working directory,
+and audits each lifecycle call. The tool maps only its fixed operation list;
+it cannot run shell commands or arbitrary Environment CLI arguments. The
+operation list can grow without changing the MCP tool schema.
+
 ## Workspace and scope model
 
 The sandbox also aliases the host workspace path to `/workspace`. Project

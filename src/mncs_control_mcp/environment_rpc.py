@@ -112,6 +112,9 @@ class _GrantRecord:
     uid: int
     expires_at: float
     token_file: Path
+    working_root: Path | None = None
+    client_pid: int | None = None
+    client_start_ticks: str | None = None
     bound_session_id: str | None = None
     selection_lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
 
@@ -121,12 +124,13 @@ class EnvironmentRPCServer:
 
     def __init__(
         self, config: Any, environment_service: Any, policy: Any,
-        process_manager: Any | None = None,
+        process_manager: Any | None = None, audit_log: Any | None = None,
     ) -> None:
         self.config = config
         self.environment_service = environment_service
         self.policy = policy
         self.process_manager = process_manager
+        self.audit_log = audit_log
         self.socket_path = Path(config.environment_rpc_socket).expanduser().resolve()
         self.token_root = self.socket_path.parent / "grants"
         stable = json.dumps(
@@ -141,6 +145,7 @@ class EnvironmentRPCServer:
         self._request_records: OrderedDict[str, tuple[str, str, dict[str, Any]]] = OrderedDict()
         self._active_requests: set[str] = set()
         self._active_request_sessions: dict[str, str] = {}
+        self._active_request_peer_ids: dict[str, dict[str, object]] = {}
         self._session_locks: dict[str, threading.RLock] = {}
         self._fenced_sessions: set[str] = set()
         self._socket: socket.socket | None = None
@@ -256,7 +261,10 @@ class EnvironmentRPCServer:
             probe.close()
         self.socket_path.unlink()
 
-    def issue_grant(self, resolution: Any) -> EnvironmentRPCGrant:
+    def issue_grant(
+        self, resolution: Any, *, client_pid: int | None = None,
+        working_root: Path | None = None,
+    ) -> EnvironmentRPCGrant:
         if self._closed or self._socket is None:
             raise ControlError("ENVIRONMENT_PERSISTENCE_UNAVAILABLE",
                                "Control Environment publication endpoint is unavailable")
@@ -283,8 +291,28 @@ class EnvironmentRPCServer:
             uid=os.getuid(),
             expires_at=time.monotonic() + max(30.0, float(self.config.max_timeout_seconds) + 15.0),
             token_file=token_file,
+            working_root=working_root.resolve() if working_root is not None else None,
+            client_pid=client_pid,
+            client_start_ticks=(
+                self._proc_start_ticks(client_pid) if client_pid is not None else None
+            ),
         )
+        if record.client_pid is not None and record.client_start_ticks is None:
+            token_file.unlink(missing_ok=True)
+            raise ControlError(
+                "ENVIRONMENT_AUTHORITY_DENIED",
+                "local MCP process identity could not be established",
+            )
         with self._lock:
+            now = time.monotonic()
+            expired = [
+                (digest, existing)
+                for digest, existing in self._grants.items()
+                if now >= existing.expires_at
+            ]
+            for digest, existing in expired:
+                self._grants.pop(digest, None)
+                existing.token_file.unlink(missing_ok=True)
             self._grants[token_digest] = record
         return EnvironmentRPCGrant(
             token_digest=token_digest,
@@ -292,6 +320,93 @@ class EnvironmentRPCServer:
             token_file=token_file,
             sandbox_token_file="/run/mncs-environment-rpc/grant",
         )
+
+    def issue_local_project_grant(
+        self, project: Any, cwd: Any, *, peer_uid: int | None, peer_pid: int | None,
+    ) -> dict[str, Any]:
+        """Issue a project capability to the authenticated local stdio MCP process."""
+        if peer_uid != os.getuid() or type(peer_pid) is not int or peer_pid < 1:
+            raise ControlError(
+                "ENVIRONMENT_AUTHORITY_DENIED",
+                "local Environment entry requires authenticated same-user process credentials",
+            )
+        if not isinstance(project, str) or not re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", project,
+        ) or project not in set(self.config.repositories.values()):
+            raise ControlError(
+                "ENVIRONMENT_AUTHORITY_DENIED",
+                "local Environment entry requires one configured project name",
+                details={"allowed_projects": sorted(set(self.config.repositories.values()))},
+            )
+        workspace_root = self.config.workspace_root.expanduser().resolve(strict=True)
+        project_path = workspace_root / project
+        if project_path.is_symlink():
+            raise ControlError(
+                "ENVIRONMENT_WORKSPACE_ESCAPE",
+                "configured project root must not be a symbolic link",
+            )
+        project_root = project_path.resolve(strict=True)
+        if project_root.parent != workspace_root or not project_root.is_dir():
+            raise ControlError(
+                "ENVIRONMENT_WORKSPACE_ESCAPE",
+                "configured project must be one immediate workspace directory",
+            )
+        if cwd in (None, ""):
+            try:
+                peer_cwd = self._peer_process_cwd(peer_pid)
+                working_root = peer_cwd if peer_cwd.is_relative_to(project_root) else project_root
+            except (OSError, ValueError):
+                working_root = project_root
+        else:
+            if (not isinstance(cwd, str) or len(cwd) > 1024 or "\x00" in cwd
+                    or "\\" in cwd or Path(cwd).is_absolute()
+                    or any(part in {"..", ""} for part in cwd.split("/") if part != ".")):
+                raise ControlError(
+                    "ENVIRONMENT_WORKSPACE_ESCAPE",
+                    "local Environment working directory must be a safe project-relative path",
+                )
+            relative_cwd = Path(cwd)
+            candidate = project_root.joinpath(*relative_cwd.parts)
+            try:
+                working_root = candidate.resolve(strict=True)
+                working_root.relative_to(project_root)
+            except (OSError, ValueError) as error:
+                raise ControlError(
+                    "ENVIRONMENT_WORKSPACE_ESCAPE",
+                    "local Environment working directory must remain inside its configured project",
+                ) from error
+            if not working_root.is_dir():
+                raise ControlError(
+                    "ENVIRONMENT_WORKSPACE_MISSING",
+                    "local Environment working directory is unavailable",
+                )
+        from types import SimpleNamespace
+
+        grant = self.issue_grant(
+            SimpleNamespace(scope="project", project=project, host_root=project_root),
+            client_pid=peer_pid,
+            working_root=working_root,
+        )
+        token = grant.token_file.read_text(encoding="ascii")
+        if self.audit_log is not None:
+            self.audit_log.record(
+                "mncs_environment_bootstrap", success=True, project=project,
+                client_pid=peer_pid, scope="project",
+            )
+        return {
+            "grant": token,
+            "grant_id": grant.grant_id,
+            "project": project,
+            "working_directory": str(working_root),
+            "sandbox_cwd": "/workspace/" + project + (
+                "" if working_root == project_root
+                else "/" + working_root.relative_to(project_root).as_posix()
+            ),
+            "scope": "project",
+            "expires_in_seconds": max(0, int(
+                float(self.config.max_timeout_seconds) + 15.0
+            )),
+        }
 
     def grant_mount_source(self, grant: EnvironmentRPCGrant) -> Path:
         """Return the private host file for an active, Control-issued grant."""
@@ -373,6 +488,20 @@ class EnvironmentRPCServer:
             _, uid, _ = struct.unpack("3i", connection.getsockopt(
                 socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i")))
             return uid
+        except OSError:
+            return None
+
+    @staticmethod
+    def _peer_credentials(connection: socket.socket) -> tuple[int, int] | None:
+        """Return Linux AF_UNIX peer (pid, uid) credentials."""
+        if not hasattr(socket, "SO_PEERCRED"):
+            return None
+        try:
+            pid, uid, _ = struct.unpack("3i", connection.getsockopt(
+                socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i")))
+            if pid < 1 or uid < 0:
+                return None
+            return pid, uid
         except OSError:
             return None
 
@@ -465,15 +594,40 @@ class EnvironmentRPCServer:
 
     def _serve_connection(self, connection: socket.socket) -> None:
         request: dict[str, Any] | None = None
+        peer_pid: int | None = None
+        peer_uid: int | None = None
+        local_record: _GrantRecord | None = None
         with connection:
             try:
                 connection.settimeout(300.0)
-                peer_uid = self._peer_uid(connection)
-                if peer_uid is None or peer_uid != os.getuid():
+                peer_credentials = self._peer_credentials(connection)
+                if peer_credentials is None:
+                    raise ControlError("ENVIRONMENT_AUTHORITY_DENIED",
+                                       "Environment IPC peer credentials were not admitted")
+                peer_pid, peer_uid = peer_credentials
+                if peer_uid != os.getuid():
                     raise ControlError("ENVIRONMENT_AUTHORITY_DENIED",
                                        "Environment IPC peer credentials were not admitted")
                 request = self._receive_frame(connection)
-                response = self.dispatch(request, peer_uid=peer_uid)
+                if request.get("action") == "local-project-grant":
+                    if set(request) != {"action", "project", "cwd"}:
+                        raise ControlError(
+                            "ENVIRONMENT_RPC_INVALID_REQUEST",
+                            "local Environment bootstrap accepts only project and working directory",
+                        )
+                    result = self.issue_local_project_grant(
+                        request.get("project"), request.get("cwd"),
+                        peer_uid=peer_uid, peer_pid=peer_pid,
+                    )
+                    response = {"ok": True, "result": result}
+                else:
+                    local_record = (
+                        self._grant(request, peer_uid, peer_pid)
+                        if peer_pid is not None else self._grant(request, peer_uid)
+                    )
+                    response = self.dispatch(
+                        request, peer_uid=peer_uid, peer_pid=peer_pid,
+                    )
             except ControlError as error:
                 response = {"ok": False, "error": {
                     "code": error.code, "message": error.message,
@@ -484,6 +638,23 @@ class EnvironmentRPCServer:
                     "code": "ENVIRONMENT_RPC_INVALID_REQUEST",
                     "message": str(error),
                 }}
+            if (self.audit_log is not None and request is not None
+                    and local_record is not None and local_record.client_pid is not None):
+                argv = request.get("argv")
+                command = argv[0] if isinstance(argv, list) and argv else "unknown"
+                result = response.get("result") if isinstance(response, dict) else None
+                successful = (
+                    response.get("ok") is True
+                    and isinstance(result, dict)
+                    and result.get("exit_code", 0) == 0
+                )
+                self.audit_log.record(
+                    "mncs_environment", success=successful,
+                    error=(response.get("error") or {}).get("code")
+                    if isinstance(response.get("error"), dict) else None,
+                    operation=command, project=local_record.host_root.name,
+                    session_id=local_record.bound_session_id, client_pid=peer_pid,
+                )
             if request is not None and self._test_terminate_checkpoint_service_after_commit(
                 request, response,
             ):
@@ -511,7 +682,10 @@ class EnvironmentRPCServer:
             except OSError:
                 pass
 
-    def _grant(self, request: dict[str, Any], peer_uid: int) -> _GrantRecord:
+    def _grant(
+        self, request: dict[str, Any], peer_uid: int,
+        peer_pid: int | None = None,
+    ) -> _GrantRecord:
         token = request.get("grant")
         if not isinstance(token, str) or len(token) > 128:
             raise ControlError("ENVIRONMENT_AUTHORITY_DENIED", "Environment capability is missing")
@@ -520,6 +694,14 @@ class EnvironmentRPCServer:
             record = self._grants.get(token_digest)
         if record is None or record.uid != peer_uid or time.monotonic() >= record.expires_at:
             raise ControlError("ENVIRONMENT_AUTHORITY_DENIED", "Environment capability is expired or unknown")
+        if record.client_pid is not None and (
+            peer_pid != record.client_pid
+            or self._proc_start_ticks(record.client_pid) != record.client_start_ticks
+        ):
+            raise ControlError(
+                "ENVIRONMENT_AUTHORITY_DENIED",
+                "local Environment capability belongs to another MCP process execution",
+            )
         return record
 
     def _map_client_path(self, value: str, record: _GrantRecord, cwd: Path) -> Path:
@@ -2080,10 +2262,15 @@ class EnvironmentRPCServer:
         except (OSError, IndexError):
             return None
 
+    @staticmethod
+    def _peer_process_cwd(pid: int) -> Path:
+        return Path(f"/proc/{pid}/cwd").resolve(strict=True)
+
     def _host_process_inventory(
         self, *, owner_session_id: str, repository: str,
         checkout: str | None = None, current_grant_id: str,
         tracked_job_roots: list[dict[str, object]] | None = None,
+        current_peer_identity: dict[str, object] | None = None,
     ) -> tuple[list[dict[str, object]], list[dict[str, object]],
                list[dict[str, object]], int, int, str | None, bool,
                dict[str, object]]:
@@ -2103,7 +2290,9 @@ class EnvironmentRPCServer:
             }
         (excluded_pids, excluded_processes, exclusion_complete,
          exclusion_reasons) = (
-            self._current_request_process_inventory(current_grant_id, entries)
+            self._current_request_process_inventory(
+                current_grant_id, entries, current_peer_identity,
+            )
         )
         (tracked_excluded_pids, tracked_excluded_processes,
          tracked_exclusion_complete, tracked_exclusion_reasons) = (
@@ -2289,6 +2478,7 @@ class EnvironmentRPCServer:
 
     def _current_request_process_inventory(
         self, current_grant_id: str, entries: list[Path],
+        peer_identity: dict[str, object] | None = None,
     ) -> tuple[set[int], list[dict[str, object]], bool, list[str]]:
         """Identify the exact active terminal request tree by its host grant."""
         identities_method = getattr(
@@ -2299,19 +2489,21 @@ class EnvironmentRPCServer:
         )
         if callable(identities_method):
             identities = identities_method(current_grant_id)
-            return self._process_tree_exclusions(
-                identities, entries, reason_prefix="request_process",
-            )
         elif callable(roots_method):
             roots = set(roots_method(current_grant_id))
             identities = [
                 {"pid": pid, "start_ticks": None} for pid in roots
             ]
-            return self._process_tree_exclusions(
-                identities, entries, reason_prefix="request_process",
-            )
         else:
+            identities = []
+        if peer_identity is not None:
+            identities = [*identities, peer_identity]
+        if (not callable(identities_method) and not callable(roots_method)
+                and peer_identity is None):
             return set(), [], False, ["current_request_roots_unavailable"]
+        return self._process_tree_exclusions(
+            identities, entries, reason_prefix="request_process",
+        )
 
     def _process_tree_exclusions(
         self,
@@ -2446,6 +2638,9 @@ class EnvironmentRPCServer:
                 1 for request_id, session_id in self._active_request_sessions.items()
                 if session_id == owner_session_id and request_id != current_request_id
             )
+            current_peer_identity = self._active_request_peer_ids.get(
+                current_request_id,
+            )
         (processes, resident_services, excluded_request_processes,
          process_count, same_uid_count, boot_id, process_complete,
          process_diagnostics) = (
@@ -2453,6 +2648,7 @@ class EnvironmentRPCServer:
                 owner_session_id=owner_session_id, repository=repository,
                 checkout=checkout, current_grant_id=current_grant_id,
                 tracked_job_roots=tracked_job_roots,
+                current_peer_identity=current_peer_identity,
             )
         )
         services, service_count, services_complete = self._matching_user_services(
@@ -2558,9 +2754,15 @@ class EnvironmentRPCServer:
                 result.append(item)
         return result
 
-    def dispatch(self, request: dict[str, Any], *, peer_uid: int) -> dict[str, Any]:
+    def dispatch(
+        self, request: dict[str, Any], *, peer_uid: int,
+        peer_pid: int | None = None,
+    ) -> dict[str, Any]:
         try:
-            grant = self._grant(request, peer_uid)
+            grant = (
+                self._grant(request, peer_uid, peer_pid)
+                if peer_pid is not None else self._grant(request, peer_uid)
+            )
             request_id = request.get("request_id")
             if not isinstance(request_id, str) or not request_id.startswith("req_") or len(request_id) > 80:
                 raise ControlError("ENVIRONMENT_RPC_INVALID_REQUEST", "stable request identity is invalid")
@@ -2608,6 +2810,12 @@ class EnvironmentRPCServer:
                             return response
                     return response
                 self._active_requests.add(request_id)
+                if peer_pid is not None:
+                    peer_start_ticks = self._proc_start_ticks(peer_pid)
+                    if peer_start_ticks is not None:
+                        self._active_request_peer_ids[request_id] = {
+                            "pid": peer_pid, "start_ticks": peer_start_ticks,
+                        }
                 if request_session_id is not None:
                     self._active_request_sessions[request_id] = request_session_id
             session_id = request_session_id
@@ -2628,18 +2836,42 @@ class EnvironmentRPCServer:
                     with selection_lock:
                         if lock is None:
                             self._deny_fenced_session(session_id)
-                            response = self._dispatch_once(request, peer_uid=peer_uid)
+                            response = (
+                                self._dispatch_once(
+                                    request, peer_uid=peer_uid, peer_pid=peer_pid,
+                                ) if peer_pid is not None else self._dispatch_once(
+                                    request, peer_uid=peer_uid,
+                                )
+                            )
                         else:
                             with lock:
                                 self._deny_fenced_session(session_id)
-                                response = self._dispatch_once(request, peer_uid=peer_uid)
+                                response = (
+                                    self._dispatch_once(
+                                        request, peer_uid=peer_uid, peer_pid=peer_pid,
+                                    ) if peer_pid is not None else self._dispatch_once(
+                                        request, peer_uid=peer_uid,
+                                    )
+                                )
                 elif lock is None:
                     self._deny_fenced_session(session_id)
-                    response = self._dispatch_once(request, peer_uid=peer_uid)
+                    response = (
+                        self._dispatch_once(
+                            request, peer_uid=peer_uid, peer_pid=peer_pid,
+                        ) if peer_pid is not None else self._dispatch_once(
+                            request, peer_uid=peer_uid,
+                        )
+                    )
                 else:
                     with lock:
                         self._deny_fenced_session(session_id)
-                        response = self._dispatch_once(request, peer_uid=peer_uid)
+                        response = (
+                            self._dispatch_once(
+                                request, peer_uid=peer_uid, peer_pid=peer_pid,
+                            ) if peer_pid is not None else self._dispatch_once(
+                                request, peer_uid=peer_uid,
+                            )
+                        )
             except ControlError as error:
                 response = {"ok": False, "error": {
                     "code": error.code, "message": error.message,
@@ -2678,6 +2910,7 @@ class EnvironmentRPCServer:
                     self._request_records.popitem(last=False)
                 self._active_requests.discard(request_id)
                 self._active_request_sessions.pop(request_id, None)
+                self._active_request_peer_ids.pop(request_id, None)
                 self._request_condition.notify_all()
             return response
         except ControlError as error:
@@ -2862,8 +3095,14 @@ class EnvironmentRPCServer:
             ttl_hours=ttl_hours,
         )
 
-    def _dispatch_once(self, request: dict[str, Any], *, peer_uid: int) -> dict[str, Any]:
-        record = self._grant(request, peer_uid)
+    def _dispatch_once(
+        self, request: dict[str, Any], *, peer_uid: int,
+        peer_pid: int | None = None,
+    ) -> dict[str, Any]:
+        record = (
+            self._grant(request, peer_uid, peer_pid)
+            if peer_pid is not None else self._grant(request, peer_uid)
+        )
         client_cwd = request.get("cwd")
         if not isinstance(client_cwd, str) or not client_cwd.startswith("/"):
             raise ControlError("ENVIRONMENT_RPC_INVALID_REQUEST", "client cwd must be absolute sandbox path")
@@ -2874,6 +3113,14 @@ class EnvironmentRPCServer:
         cwd = (record.host_root / relative).resolve(strict=True)
         if cwd != record.host_root and record.host_root not in cwd.parents:
             raise ControlError("ENVIRONMENT_WORKSPACE_ESCAPE", "client cwd escapes its granted host root")
+        if record.working_root is not None:
+            try:
+                cwd.relative_to(record.working_root)
+            except ValueError as error:
+                raise ControlError(
+                    "ENVIRONMENT_WORKSPACE_ESCAPE",
+                    "local Environment operation must remain inside its selected working directory",
+                ) from error
         if not cwd.is_dir():
             raise ControlError("ENVIRONMENT_WORKSPACE_MISSING", "client cwd is unavailable in the host namespace")
         argv = self._translate_argv(request.get("argv"), cwd, record)

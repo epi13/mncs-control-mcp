@@ -96,6 +96,14 @@ process still needs an authorized Store persistence transport. The endpoint
 never exposes Store paths or file descriptors to the sandbox.
 `env_status` and `system_status` report its live availability; a missing
 endpoint does not trigger file persistence or direct Store writes.
+Local Codex stdio clients may request the same owner-issued project grant
+through an explicit bootstrap message. Control authenticates the Unix peer
+PID and UID, admits only a configured immediate project, confines the grant to
+one selected project directory, and rejects its use from another process
+identity. The stable MCP wrapper exposes named lifecycle operations with
+operation-specific argument validation; it does not proxy shell or arbitrary
+CLI input. These calls use the existing Store owner and are recorded in the
+Control audit log.
 The project-scoped CLI bridge permits `complete` only for a session owned by
 the grant's authenticated principal. Environment records completion intent
 before lifecycle transition and claim release; `--retry-pending` reconciles

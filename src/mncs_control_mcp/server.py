@@ -94,6 +94,7 @@ def build_server(config: ControlConfig | None = None) -> Any:
     environment_sessions = EnvironmentService(selected)
     environment_rpc = EnvironmentRPCServer(
         selected, environment_sessions, policy, process_manager=processes,
+        audit_log=audit,
     )
     environment_rpc.start()
     environment_sessions.authenticated_principal_id = environment_rpc.principal_id
