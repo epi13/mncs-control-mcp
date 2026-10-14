@@ -321,6 +321,22 @@ class LocalEnvironmentMCP:
         context = self._contexts.get(key)
         if context is not None:
             return context
+        if not cwd:
+            existing = [
+                (existing_cwd, existing_context)
+                for (existing_project, existing_cwd), existing_context
+                in self._contexts.items()
+                if existing_project == project
+            ]
+            if len(existing) == 1:
+                # Codex can omit the optional cwd field on a later call. Keep
+                # the one project context already selected in this process so
+                # that omission does not switch an isolated worktree to root.
+                return existing[0][1]
+            if len(existing) > 1:
+                raise ValueError(
+                    "cwd is required because this MCP process has multiple contexts for the project"
+                )
         request = {
             "action": "local-project-grant", "project": project,
             "cwd": cwd or None,
@@ -341,9 +357,50 @@ class LocalEnvironmentMCP:
     def _response_error(self, response: dict[str, Any]) -> Any:
         error = response.get("error")
         if not isinstance(error, dict):
-            return {"ok": False, "error": {"code": "ENVIRONMENT_RPC_FAILED",
-                                             "message": "Control returned an invalid Environment response"}}
-        return {"ok": False, "error": error}
+            error = {
+                "code": "ENVIRONMENT_RPC_FAILED",
+                "message": "Control returned an invalid Environment response",
+            }
+        code = str(error.get("code", "ENVIRONMENT_RPC_FAILED"))[:128]
+        message = str(error.get("message", "Environment operation failed"))[:1200]
+        details = error.get("details")
+        if code == "ENVIRONMENT_SESSION_SELECTION_REQUIRED" and isinstance(details, dict):
+            details = self._compact_continuation(details)
+        elif isinstance(details, dict):
+            allowed = {
+                "next", "status", "operation", "campaign_id", "claim_id",
+                "repository", "expected_version", "version", "session_id",
+                "selected_session_id", "required_project", "action", "target",
+                "reason", "publication_completed", "conflict_kind", "stage",
+            }
+            compact_details: dict[str, Any] = {}
+            for key in allowed:
+                value = details.get(key)
+                if isinstance(value, str):
+                    compact_details[key] = value[:1024]
+                elif key in details and (isinstance(value, (bool, int, float)) or value is None):
+                    compact_details[key] = value
+            if len(compact_details) < len(details):
+                compact_details["details_truncated"] = True
+            details = compact_details
+        bounded_error: dict[str, Any] = {"code": code, "message": message}
+        if details:
+            bounded_error["details"] = details
+        result = {"ok": False, "error": bounded_error}
+        encoded = json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        if len(encoded) > MAX_TOOL_RESULT_BYTES:
+            next_step = details.get("next") if isinstance(details, dict) else None
+            bounded_error["message"] = message[:512]
+            bounded_error["details"] = {
+                "details_truncated": True,
+                **({"next": next_step[:512]} if isinstance(next_step, str) else {}),
+            }
+            result = {"ok": False, "error": bounded_error}
+            encoded = json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+            if len(encoded) > MAX_TOOL_RESULT_BYTES:
+                bounded_error.pop("details", None)
+                bounded_error["message"] = message[:512]
+        return result
 
     @staticmethod
     def _payload(response: dict[str, Any]) -> Any:
@@ -381,39 +438,58 @@ class LocalEnvironmentMCP:
     @staticmethod
     def _compact_continuation(payload: dict[str, Any]) -> dict[str, Any]:
         rows = payload.get("continuations")
-        compact_rows: list[dict[str, Any]] = []
-        if isinstance(rows, list):
-            for row in rows[:32]:
-                if not isinstance(row, dict):
+        if not isinstance(rows, list):
+            rows = []
+        campaigns = payload.get("campaigns")
+        if not rows and isinstance(campaigns, list):
+            for campaign in campaigns[:32]:
+                if not isinstance(campaign, dict):
                     continue
-                item = {
-                    key: row[key]
-                    for key in (
-                        "campaign_id", "campaign_session_ids", "current_campaign_consumer",
-                        "authorized_consumers", "lifecycle", "latest_checkpoint",
-                        "claim_ids", "work_intent", "evidence_count", "evidence_truncated",
-                        "delivery", "repositories", "project_reference",
-                    )
-                    if key in row
+                nested = campaign.get("continuations")
+                campaign_id = campaign.get("campaign_id")
+                if isinstance(nested, list):
+                    for continuation in nested[:32 - len(rows)]:
+                        if isinstance(continuation, dict):
+                            rows.append({
+                                **continuation,
+                                "campaign_id": continuation.get("campaign_id", campaign_id),
+                            })
+                elif isinstance(campaign_id, str):
+                    rows.append(campaign)
+                if len(rows) >= 32:
+                    break
+        compact_rows: list[dict[str, Any]] = []
+        for row in rows[:32]:
+            if not isinstance(row, dict):
+                continue
+            item = {
+                key: row[key]
+                for key in (
+                    "campaign_id", "campaign_session_ids", "current_campaign_consumer",
+                    "authorized_consumers", "lifecycle", "latest_checkpoint",
+                    "claim_ids", "work_intent", "evidence_count", "evidence_truncated",
+                    "delivery", "repositories", "project_reference",
+                )
+                if key in row
+            }
+            if isinstance(item.get("delivery"), dict):
+                delivery = item["delivery"]
+                item["delivery"] = {
+                    key: delivery[key]
+                    for key in ("status", "reason", "repositories_count", "repositories_truncated")
+                    if key in delivery
                 }
-                if isinstance(item.get("delivery"), dict):
-                    delivery = item["delivery"]
-                    item["delivery"] = {
-                        key: delivery[key]
-                        for key in ("status", "reason", "repositories_count", "repositories_truncated")
-                        if key in delivery
+            if isinstance(item.get("repositories"), list):
+                item["repositories"] = [
+                    {
+                        key: repository[key]
+                        for key in ("repository", "branch", "head", "status")
+                        if key in repository
                     }
-                if isinstance(item.get("repositories"), list):
-                    item["repositories"] = [
-                        {
-                            key: repository[key]
-                            for key in ("repository", "branch", "head", "status")
-                            if key in repository
-                        }
-                        for repository in item["repositories"][:16]
-                        if isinstance(repository, dict)
-                    ]
-                compact_rows.append(item)
+                    for repository in item["repositories"][:16]
+                    if isinstance(repository, dict)
+                ]
+            compact_rows.append(item)
         selected = LocalEnvironmentMCP._selected_session(payload)
         compact = {
             key: payload[key]
@@ -421,6 +497,24 @@ class LocalEnvironmentMCP:
                         "continuations_count", "continuations_truncated", "next")
             if key in payload
         }
+        campaign_statuses = payload.get("campaign_statuses")
+        if isinstance(campaign_statuses, list):
+            compact["campaign_statuses"] = [
+                {
+                    key: status[key]
+                    for key in ("campaign_id", "status", "continuations_truncated")
+                    if key in status
+                }
+                for status in campaign_statuses[:32]
+                if isinstance(status, dict)
+            ]
+        elif isinstance(campaigns, list):
+            compact["campaign_statuses"] = [
+                {"campaign_id": campaign["campaign_id"]}
+                for campaign in campaigns[:32]
+                if isinstance(campaign, dict)
+                and isinstance(campaign.get("campaign_id"), str)
+            ]
         if selected is not None:
             compact["selected_session_id"] = selected
         compact["continuations"] = compact_rows

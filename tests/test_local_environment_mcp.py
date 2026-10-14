@@ -104,6 +104,93 @@ def test_continuation_response_omits_large_workspace_inventory() -> None:
     assert "live_repository_observation" not in response["result"]["continuations"][0]
 
 
+def test_project_context_reuses_one_selected_worktree_when_cwd_is_omitted(
+    tmp_path: Path,
+) -> None:
+    bridge = object.__new__(LocalEnvironmentMCP)
+    selected = _ProjectContext(
+        "secret", "/workspace/mncs-compiler/.worktrees/selected",
+        selected_session_id="ses_selected",
+    )
+    bridge._contexts = {("mncs-compiler", ".worktrees/selected"): selected}
+    bridge.socket_path = tmp_path / "unused.sock"
+
+    assert bridge._context("mncs-compiler", "") is selected
+
+
+def test_project_context_requires_cwd_when_multiple_contexts_exist(
+    tmp_path: Path,
+) -> None:
+    bridge = object.__new__(LocalEnvironmentMCP)
+    bridge._contexts = {
+        ("mncs-compiler", "."): _ProjectContext("root", "/workspace/mncs-compiler"),
+        ("mncs-compiler", ".worktrees/selected"): _ProjectContext(
+            "worktree", "/workspace/mncs-compiler/.worktrees/selected",
+        ),
+    }
+    bridge.socket_path = tmp_path / "unused.sock"
+
+    with pytest.raises(ValueError, match="cwd is required"):
+        bridge._context("mncs-compiler", "")
+
+
+def test_selection_error_is_bounded_and_keeps_campaign_choices() -> None:
+    bridge = object.__new__(LocalEnvironmentMCP)
+    campaigns = [
+        {
+            "campaign_id": f"cmp_campaign_{index}",
+            "continuations": [{
+                "campaign_session_ids": [f"ses_session_{index}"],
+                "lifecycle": "active",
+                "live_repository_observation": {
+                    "worktree_registrations": [
+                        {"path": f"/workspace/tree-{item}"} for item in range(1000)
+                    ],
+                },
+            }],
+        }
+        for index in range(5)
+    ]
+    response = bridge._response_error({"error": {
+        "code": "ENVIRONMENT_SESSION_SELECTION_REQUIRED",
+        "message": "Environment continuation did not select one session",
+        "details": {
+            "status": "ambiguous-campaigns",
+            "repository": "mncs-compiler",
+            "campaigns_count": len(campaigns),
+            "continuations_count": len(campaigns),
+            "campaign_statuses": [
+                {"campaign_id": campaign["campaign_id"], "status": "ready"}
+                for campaign in campaigns
+            ],
+            "campaigns": campaigns,
+        },
+    }})
+
+    assert len(json.dumps(response, ensure_ascii=False).encode("utf-8")) < MAX_TOOL_RESULT_BYTES
+    details = response["error"]["details"]
+    assert details["campaign_statuses"][0] == {
+        "campaign_id": "cmp_campaign_0", "status": "ready",
+    }
+    assert details["continuations"][0] == {
+        "campaign_session_ids": ["ses_session_0"],
+        "lifecycle": "active",
+        "campaign_id": "cmp_campaign_0",
+    }
+
+
+def test_generic_owner_error_details_are_bounded() -> None:
+    bridge = object.__new__(LocalEnvironmentMCP)
+    response = bridge._response_error({"error": {
+        "code": "ENVIRONMENT_OWNER_LIVENESS_UNKNOWN",
+        "message": "liveness is unknown",
+        "details": {"large_inventory": "x" * (MAX_TOOL_RESULT_BYTES * 2)},
+    }})
+
+    assert len(json.dumps(response).encode("utf-8")) < MAX_TOOL_RESULT_BYTES
+    assert response["error"]["details"] == {"details_truncated": True}
+
+
 def test_local_rpc_bootstrap_binds_capability_to_process_and_working_tree(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
