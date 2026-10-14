@@ -464,6 +464,11 @@ class ProcessManager:
                         or repository.lower() in command
                     )
                 if related:
+                    request_roots = getattr(self, "_request_processes", {})
+                    tracked_identity = (
+                        request_roots.get(grant_id, {}).get(job.process.pid)
+                        if grant_id and job.process is not None else None
+                    )
                     rows.append({
                         "job_id": job.job_id,
                         "status": job.status,
@@ -471,6 +476,7 @@ class ProcessManager:
                         "scope": job.scope,
                         "kind": job.kind,
                         "pid": job.process.pid if job.process is not None else None,
+                        "start_ticks": tracked_identity,
                     })
             return rows
 

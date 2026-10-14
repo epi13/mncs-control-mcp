@@ -1749,6 +1749,7 @@ class EnvironmentRPCServer:
     def _host_process_inventory(
         self, *, owner_session_id: str, repository: str,
         checkout: str | None = None, current_grant_id: str,
+        tracked_job_roots: list[dict[str, object]] | None = None,
     ) -> tuple[list[dict[str, object]], list[dict[str, object]],
                list[dict[str, object]], int, int, str | None, bool,
                dict[str, object]]:
@@ -1762,12 +1763,22 @@ class EnvironmentRPCServer:
         except OSError:
             return [], [], [], 0, 0, None, False, {
                 "request_process_tree_complete": False,
+                "tracked_job_process_tree_complete": False,
+                "tracked_job_processes_excluded": [],
                 "incomplete_reasons": [{"reason": "host_procfs_unavailable", "count": 1}],
             }
         (excluded_pids, excluded_processes, exclusion_complete,
          exclusion_reasons) = (
             self._current_request_process_inventory(current_grant_id, entries)
         )
+        (tracked_excluded_pids, tracked_excluded_processes,
+         tracked_exclusion_complete, tracked_exclusion_reasons) = (
+            self._process_tree_exclusions(
+                tracked_job_roots or [], entries,
+                reason_prefix="tracked_job_process",
+            )
+        )
+        excluded_pids.update(tracked_excluded_pids)
         repository_root = (self.config.workspace_root / repository).resolve()
         scope_root = Path(checkout).resolve(strict=False) if checkout else None
         owner_marker = owner_session_id.encode("ascii", errors="ignore")
@@ -1793,6 +1804,10 @@ class EnvironmentRPCServer:
             incomplete_counts[reason] = incomplete_counts.get(reason, 0) + 1
         if not exclusion_complete:
             mark_incomplete("current_request_process_tree_incomplete")
+        for reason in tracked_exclusion_reasons:
+            incomplete_counts[reason] = incomplete_counts.get(reason, 0) + 1
+        if not tracked_exclusion_complete:
+            mark_incomplete("tracked_job_process_tree_incomplete")
         for entry in entries:
             if not entry.name.isdigit():
                 continue
@@ -1930,6 +1945,8 @@ class EnvironmentRPCServer:
                 len([item for item in entries if item.name.isdigit()]),
                 same_uid_examined, boot_id, complete, {
                     "request_process_tree_complete": exclusion_complete,
+                "tracked_job_process_tree_complete": tracked_exclusion_complete,
+                "tracked_job_processes_excluded": tracked_excluded_processes,
                     "incomplete_reasons": [
                         {"reason": reason, "count": count}
                         for reason, count in sorted(incomplete_counts.items())
@@ -1948,20 +1965,37 @@ class EnvironmentRPCServer:
         )
         if callable(identities_method):
             identities = identities_method(current_grant_id)
-            root_start_ticks: dict[int, str | None] = {}
-            for item in identities:
-                if not isinstance(item, dict) or type(item.get("pid")) is not int:
-                    return set(), [], False, ["request_process_root_identity_invalid"]
-                start_ticks = item.get("start_ticks")
-                if start_ticks is not None and not isinstance(start_ticks, str):
-                    return set(), [], False, ["request_process_root_identity_invalid"]
-                root_start_ticks[item["pid"]] = start_ticks
-            roots = set(root_start_ticks)
+            return self._process_tree_exclusions(
+                identities, entries, reason_prefix="request_process",
+            )
         elif callable(roots_method):
             roots = set(roots_method(current_grant_id))
-            root_start_ticks = {pid: None for pid in roots}
+            identities = [
+                {"pid": pid, "start_ticks": None} for pid in roots
+            ]
+            return self._process_tree_exclusions(
+                identities, entries, reason_prefix="request_process",
+            )
         else:
             return set(), [], False, ["current_request_roots_unavailable"]
+
+    def _process_tree_exclusions(
+        self,
+        identities: list[dict[str, object]],
+        entries: list[Path],
+        *,
+        reason_prefix: str,
+    ) -> tuple[set[int], list[dict[str, object]], bool, list[str]]:
+        """Exclude only verified descendants of host-tracked process roots."""
+        root_start_ticks: dict[int, str | None] = {}
+        for item in identities:
+            if not isinstance(item, dict) or type(item.get("pid")) is not int:
+                return set(), [], False, [f"{reason_prefix}_root_identity_invalid"]
+            start_ticks = item.get("start_ticks")
+            if start_ticks is not None and not isinstance(start_ticks, str):
+                return set(), [], False, [f"{reason_prefix}_root_identity_invalid"]
+            root_start_ticks[item["pid"]] = start_ticks
+        roots = set(root_start_ticks)
         if not roots:
             return set(), [], True, []
         parents: dict[int, int] = {}
@@ -1983,22 +2017,22 @@ class EnvironmentRPCServer:
             except (OSError, StopIteration, ValueError, IndexError):
                 if entry.exists():
                     complete = False
-                    reasons.append("request_process_parent_observation_unreadable")
+                    reasons.append(f"{reason_prefix}_parent_observation_unreadable")
         missing_roots = [pid for pid in roots if pid in present and pid not in parents]
         if missing_roots:
             complete = False
-            reasons.append("request_process_root_unreadable")
+            reasons.append(f"{reason_prefix}_root_unreadable")
         excluded: set[int] = set()
         for pid in roots.intersection(parents):
             expected_ticks = root_start_ticks.get(pid)
             if expected_ticks is None:
                 complete = False
-                reasons.append("request_process_root_identity_unavailable")
+                reasons.append(f"{reason_prefix}_root_identity_unavailable")
                 continue
             observed_ticks = self._proc_start_ticks(pid)
             if observed_ticks != expected_ticks:
                 complete = False
-                reasons.append("request_process_root_identity_changed")
+                reasons.append(f"{reason_prefix}_root_identity_changed")
                 continue
             excluded.add(pid)
         while True:
@@ -2014,7 +2048,7 @@ class EnvironmentRPCServer:
             start_ticks = self._proc_start_ticks(pid)
             if start_ticks is None:
                 complete = False
-                reasons.append("request_process_start_identity_unavailable")
+                reasons.append(f"{reason_prefix}_start_identity_unavailable")
                 continue
             identities.append({"pid": pid, "start_ticks": start_ticks})
         return excluded, identities, complete, reasons
@@ -2068,6 +2102,11 @@ class EnvironmentRPCServer:
             grant_sessions=grant_sessions,
             checkout=checkout,
         )
+        tracked_job_roots = [
+            {"pid": item.get("pid"), "start_ticks": item.get("start_ticks")}
+            for item in jobs
+            if type(item.get("pid")) is int
+        ]
         with self._request_condition:
             active_requests = sum(
                 1 for request_id, session_id in self._active_request_sessions.items()
@@ -2079,6 +2118,7 @@ class EnvironmentRPCServer:
             self._host_process_inventory(
                 owner_session_id=owner_session_id, repository=repository,
                 checkout=checkout, current_grant_id=current_grant_id,
+                tracked_job_roots=tracked_job_roots,
             )
         )
         services, service_count, services_complete = self._matching_user_services(

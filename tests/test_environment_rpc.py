@@ -451,6 +451,11 @@ def test_recovery_process_inventory_excludes_only_its_current_terminal_tree(
         cwd=checkout,
         start_new_session=True,
     )
+    tracked_job = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)", str(project)],
+        cwd=tmp_path,
+        start_new_session=True,
+    )
     owner = subprocess.Popen(
         [sys.executable, "-c", "import time; time.sleep(30)"],
         cwd=checkout,
@@ -483,11 +488,20 @@ def test_recovery_process_inventory_excludes_only_its_current_terminal_tree(
             repository=repository,
             checkout=str(checkout),
             current_grant_id="grant-current",
+            tracked_job_roots=[{
+                "pid": tracked_job.pid,
+                "start_ticks": ProcessManager._process_start_ticks(tracked_job.pid),
+            }],
         )
         excluded_ids = {item["pid"] for item in excluded}
         assert complete is True
         assert diagnostics == {
             "request_process_tree_complete": True,
+            "tracked_job_process_tree_complete": True,
+            "tracked_job_processes_excluded": [{
+                "pid": tracked_job.pid,
+                "start_ticks": ProcessManager._process_start_ticks(tracked_job.pid),
+            }],
             "incomplete_reasons": [],
         }
         assert current.pid in excluded_ids
@@ -499,7 +513,7 @@ def test_recovery_process_inventory_excludes_only_its_current_terminal_tree(
             os.killpg(current.pid, 15)
         except ProcessLookupError:
             pass
-        for process in (current, owner, disjoint):
+        for process in (current, tracked_job, owner, disjoint):
             try:
                 process.terminate()
             except ProcessLookupError:
@@ -545,6 +559,8 @@ def test_host_process_inventory_explains_an_incomplete_request_tree(
     assert inventory[6] is False
     assert inventory[7] == {
         "request_process_tree_complete": False,
+        "tracked_job_process_tree_complete": True,
+        "tracked_job_processes_excluded": [],
         "incomplete_reasons": [
             {"reason": "current_request_process_tree_incomplete", "count": 1},
             {"reason": "request_process_root_unreadable", "count": 1},
