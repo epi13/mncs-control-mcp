@@ -70,11 +70,15 @@ def test_claim_release_mapping_is_explicit_and_bounded() -> None:
         )
 
 
-def test_campaign_continuation_selects_only_one_unambiguous_session() -> None:
+def test_campaign_continuation_trusts_only_control_selected_session() -> None:
+    assert LocalEnvironmentMCP._selected_session({
+        "status": "ready",
+        "selected_session_id": "ses_selected",
+    }) == "ses_selected"
     assert LocalEnvironmentMCP._selected_session({
         "status": "ready",
         "continuations": [{"campaign_session_ids": ["ses_selected"]}],
-    }) == "ses_selected"
+    }) is None
     assert LocalEnvironmentMCP._selected_session({
         "status": "ready",
         "continuations": [{"campaign_session_ids": ["ses_one", "ses_two"]}],
@@ -85,6 +89,7 @@ def test_continuation_response_omits_large_workspace_inventory() -> None:
     payload = {
         "status": "ready",
         "repository": "mncs-compiler",
+        "selected_session_id": "ses_selected",
         "continuations": [{
             "campaign_id": "cmp_compiler",
             "campaign_session_ids": ["ses_selected"],

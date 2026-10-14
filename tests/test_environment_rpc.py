@@ -2643,7 +2643,6 @@ def test_explicit_linked_campaign_selection_binds_fresh_project_grant(
         "continuations_truncated": False,
         "continuations": [{
             "session_id": session_id,
-            "campaign_id": campaign_id,
             "campaign_session_ids": [session_id],
             "definition_id": "env_explicit_campaign",
             "workspace_root": str(workspace),
@@ -2728,7 +2727,7 @@ def test_explicit_linked_campaign_selection_binds_fresh_project_grant(
 
 
 @pytest.mark.parametrize(
-    ("continuation_count", "reference_status", "row_campaign_id"),
+    ("continuation_count", "reference_status", "capsule_campaign_id"),
     [
         (2, "linked", "cmp_explicit_campaign_binding"),
         (1, "same_campaign_only", "cmp_explicit_campaign_binding"),
@@ -2738,7 +2737,7 @@ def test_explicit_linked_campaign_selection_binds_fresh_project_grant(
 def test_explicit_campaign_selection_does_not_bind_ambiguous_or_unlinked_rows(
     continuation_count: int,
     reference_status: str,
-    row_campaign_id: str,
+    capsule_campaign_id: str,
     tmp_path: Path,
 ) -> None:
     workspace = tmp_path / "projects"
@@ -2747,7 +2746,6 @@ def test_explicit_campaign_selection_does_not_bind_ambiguous_or_unlinked_rows(
     campaign_id = "cmp_explicit_campaign_binding"
     row = {
         "session_id": "ses_explicit_campaign_binding",
-        "campaign_id": row_campaign_id,
         "campaign_session_ids": ["ses_explicit_campaign_binding"],
         "lifecycle": "active",
         "project_reference": {
@@ -2756,7 +2754,7 @@ def test_explicit_campaign_selection_does_not_bind_ambiguous_or_unlinked_rows(
         },
     }
     capsule = {
-        "campaign_id": campaign_id,
+        "campaign_id": capsule_campaign_id,
         "repository": "mncs-environment",
         "status": "ready",
         "continuations_count": continuation_count,

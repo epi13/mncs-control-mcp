@@ -424,16 +424,6 @@ class LocalEnvironmentMCP:
             value = payload.get(key)
             if isinstance(value, str) and SESSION_RE.fullmatch(value):
                 return value
-        if payload.get("status") != "ready":
-            return None
-        continuations = payload.get("continuations")
-        if not isinstance(continuations, list) or len(continuations) != 1:
-            return None
-        session_ids = continuations[0].get("campaign_session_ids")
-        if (isinstance(session_ids, list) and len(session_ids) == 1
-                and isinstance(session_ids[0], str)
-                and SESSION_RE.fullmatch(session_ids[0])):
-            return session_ids[0]
         return None
 
     @staticmethod

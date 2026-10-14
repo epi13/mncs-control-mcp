@@ -4291,7 +4291,8 @@ class EnvironmentRPCServer:
         capsule = self._select_project_campaign_context(capsule, record, project)
         selected_session = capsule.get("selected_session_id")
         if (selected_session is None and campaign_id is not None
-                and capsule.get("status") == "ready"):
+                and capsule.get("status") == "ready"
+                and capsule.get("campaign_id") == campaign_id):
             continuations = capsule.get("continuations")
             continuation_count = capsule.get(
                 "continuations_count",
@@ -4318,8 +4319,6 @@ class EnvironmentRPCServer:
                 if (
                     isinstance(candidate_session_id, str)
                     and re.fullmatch(r"ses_[A-Za-z0-9_-]{1,120}", candidate_session_id)
-                    and isinstance(continuation.get("campaign_id"), str)
-                    and continuation["campaign_id"] == campaign_id
                     and isinstance(campaign_session_ids, list)
                     and candidate_session_id in campaign_session_ids
                     and isinstance(project_reference, dict)
