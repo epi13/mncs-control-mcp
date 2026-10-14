@@ -961,6 +961,21 @@ def test_artifact_read_is_bound_to_environment_selected_project_session(
     ]
     assert authorized_sessions[-1] == ("ses_selected", "principal-agent")
 
+    forge_capability = "mncs-forge:provider-artifact-execution"
+    forge_binding_id = "cap_" + "d" * 16
+    forge_read = server.dispatch({
+        **base,
+        "request_id": "req_artifact_read_forge_receipt",
+        "argv": ["artifact-read", "ses_selected", forge_capability,
+                 forge_binding_id, "forge-execution-receipt.json"],
+    }, peer_uid=0)
+    assert forge_read["ok"] is True
+    assert calls[2][0][-5:] == [
+        "artifact-read", "ses_selected", forge_capability,
+        forge_binding_id, "forge-execution-receipt.json",
+    ]
+    assert authorized_sessions[-1] == ("ses_selected", "principal-agent")
+
     summary_capability = "mncs-system-monitor:system-observability"
     summary_binding_id = "cap_" + "c" * 16
     summary_path = "system-observability-summary.json"
@@ -971,7 +986,7 @@ def test_artifact_read_is_bound_to_environment_selected_project_session(
                  summary_binding_id, summary_path],
     }, peer_uid=0)
     assert wrong_summary_session["error"]["code"] == "ENVIRONMENT_AUTHORITY_DENIED"
-    assert len(calls) == 2
+    assert len(calls) == 3
 
     extra_summary_argument = server.dispatch({
         **base,
@@ -980,7 +995,7 @@ def test_artifact_read_is_bound_to_environment_selected_project_session(
                  summary_binding_id, summary_path, "unexpected"],
     }, peer_uid=0)
     assert extra_summary_argument["error"]["code"] == "ENVIRONMENT_AUTHORITY_DENIED"
-    assert len(calls) == 2
+    assert len(calls) == 3
 
     summary_read = server.dispatch({
         **base,
@@ -990,7 +1005,7 @@ def test_artifact_read_is_bound_to_environment_selected_project_session(
     }, peer_uid=0)
     assert summary_read["ok"] is True
     assert summary_read["result"]["exit_code"] == 0
-    assert calls[2][0][-5:] == [
+    assert calls[3][0][-5:] == [
         "artifact-read", "ses_selected", summary_capability,
         summary_binding_id, summary_path,
     ]
@@ -1019,6 +1034,8 @@ def test_artifact_read_is_bound_to_environment_selected_project_session(
          "system-resource-sample.json"],
         ["artifact-read", "ses_selected", decision_capability, decision_binding_id,
          "system-resource-sample.json"],
+        ["artifact-read", "ses_selected", forge_capability, forge_binding_id,
+         "forge-failure.json"],
     )):
         rejected = server.dispatch({
             **base,
@@ -1026,7 +1043,7 @@ def test_artifact_read_is_bound_to_environment_selected_project_session(
             "argv": argv,
         }, peer_uid=0)
         assert rejected["error"]["code"] == "ENVIRONMENT_AUTHORITY_DENIED"
-    assert len(calls) == 3
+    assert len(calls) == 4
 
 
 def test_project_session_mutations_require_exact_continuation_selection(

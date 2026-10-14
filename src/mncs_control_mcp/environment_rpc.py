@@ -624,6 +624,8 @@ class EnvironmentRPCServer:
             self._authorize_campaign_state_argv(argv, record)
         if command == "artifact-read":
             allowed_artifacts = {
+                ("mncs-forge:provider-artifact-execution",
+                 "forge-execution-receipt.json"),
                 ("mncs-system-monitor:system-resource-sample",
                  "system-resource-sample.json"),
                 ("mncs-system-monitor:system-observability",
@@ -637,7 +639,7 @@ class EnvironmentRPCServer:
                     or not re.fullmatch(r"cap_[0-9a-f]{16}", argv[3])):
                 raise ControlError(
                     "ENVIRONMENT_AUTHORITY_DENIED",
-                    "Control exposes only the declared Monitor and Automation artifacts",
+                    "Control exposes only the declared Forge, Monitor and Automation artifacts",
                     details={"required": [
                         "artifact-read", "<selected-session>", "<capability>",
                         "<capability-binding-id>", "<declared-artifact-file>",
