@@ -42,6 +42,8 @@ ALLOWED_INVOKE_CAPABILITIES = frozenset({
     "mncs-environment:ambient-projection-coherence",
     "mncs-environment:projection-evidence-inspection",
     "mncs-environment:campaign-state-inspection",
+    "mncs-compiler:compiler-producer",
+    "mncs-forge:canonical-vm-work",
     "mncs-system-monitor:system-resource-sample",
     "mncs-system-monitor:system-observability",
     "mncs-automation:automation-resource-headroom-evaluation",

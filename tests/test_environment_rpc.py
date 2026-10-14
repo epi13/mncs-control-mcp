@@ -3699,3 +3699,89 @@ def test_task_selector_selects_saved_project_context_over_current_default(
     assert projected["selected_session_id"] == "ses_saved_context"
     assert projected["selection_basis"] == "authenticated-task-selector"
     assert record.bound_session_id == "ses_saved_context"
+
+
+@pytest.mark.parametrize(
+    "capability",
+    [
+        "mncs-compiler:compiler-producer",
+        "mncs-forge:canonical-vm-work",
+    ],
+)
+def test_project_rpc_exposes_recovered_compiler_and_forge_capabilities(
+    capability: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "projects"
+    project = workspace / "mncs-environment"
+    project.mkdir(parents=True)
+    token = "recovered-compiler-forge-capability"
+
+    class Store:
+        def load_snapshot(self, session_id: str) -> dict[str, str]:
+            assert session_id == "ses_recovered"
+            return {"authenticated_principal_id": "principal-agent"}
+
+        def close(self) -> None:
+            pass
+
+    class Environment:
+        state_dir = tmp_path / "state"
+        environment_path = tmp_path / "environment"
+
+        def _pkg(self) -> object:
+            return object()
+
+        def _store(self, _pkg: object) -> Store:
+            return Store()
+
+    server = EnvironmentRPCServer(
+        ControlConfig(
+            workspace_root=workspace,
+            repositories={"environment": "mncs-environment"},
+            sandbox_home=tmp_path / "home",
+            environment_rpc_socket=tmp_path / "rpc" / "environment.sock",
+        ),
+        environment_service=Environment(),
+        policy=object(),
+    )
+    project_grant = _GrantRecord(
+        grant_id="recovered-project-grant",
+        principal_id="principal-agent",
+        host_root=project,
+        sandbox_root="/workspace/mncs-environment",
+        scope="project",
+        uid=0,
+        expires_at=time.monotonic() + 60,
+        token_file=tmp_path / "grant",
+        bound_session_id="ses_recovered",
+    )
+    server._grants[hashlib.sha256(token.encode()).hexdigest()] = project_grant
+    calls: list[tuple[list[str], dict[str, object]]] = []
+
+    def run(argv: list[str], **kwargs: object) -> SimpleNamespace:
+        calls.append((argv, kwargs))
+        return SimpleNamespace(returncode=0, stdout='{"status":"ok"}\n', stderr="")
+
+    monkeypatch.setattr("mncs_control_mcp.environment_rpc.subprocess.run", run)
+    request = {
+        "grant": token,
+        "request_id": "req_recovered_capability_" + capability.split(":", 1)[0],
+        "argv": ["invoke", "ses_recovered", capability],
+        "cwd": "/workspace/mncs-environment",
+    }
+
+    response = server.dispatch(request, peer_uid=0)
+
+    assert response["ok"] is True
+    assert json.loads(response["result"]["stdout"]) == {"status": "ok"}
+    assert calls[0][0][-3:] == ["invoke", "ses_recovered", capability]
+    assert calls[0][1]["env"]["MNCS_ENV_AUTH_PRINCIPAL_ID"] == "principal-agent"
+
+    unsupported = server.dispatch({
+        **request,
+        "request_id": "req_unapproved_compiler_build",
+        "argv": ["invoke", "ses_recovered", "mncs-compiler:compiler-build"],
+    }, peer_uid=0)
+    assert unsupported["ok"] is False
+    assert unsupported["error"]["code"] == "ENVIRONMENT_OPERATION_UNAVAILABLE"
+    assert len(calls) == 1
