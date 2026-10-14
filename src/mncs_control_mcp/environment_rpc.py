@@ -1274,6 +1274,82 @@ class EnvironmentRPCServer:
             return False
         return checkout.resolve(strict=True).parent == campaign_root
 
+    def _validated_project_entry_context(
+        self,
+        record: _GrantRecord,
+        repository: str,
+        definition_id: Any,
+        workspace_root: Any,
+        definition_source: Any,
+    ) -> tuple[str, str] | None:
+        """Return an entry context only when its root is owner-mapped.
+
+        Standard entries use the configured workspace root. An explicit
+        single-repository campaign may use its nested root after Control
+        revalidates the exact Environment definition and checkout inventory.
+        This lets the subsequent lifecycle operation remain bound to the
+        context Environment just entered without broadening the project grant.
+        """
+        if (not isinstance(definition_id, str)
+                or not re.fullmatch(r"env_[0-9a-f]{16}", definition_id)
+                or not isinstance(workspace_root, str)
+                or not workspace_root):
+            return None
+        try:
+            configured_root = Path(self.config.workspace_root).expanduser().resolve(
+                strict=True
+            )
+        except OSError:
+            return None
+        if workspace_root == str(configured_root):
+            return definition_id, workspace_root
+        if record.scope != "project" or not isinstance(definition_source, str):
+            return None
+
+        source_path = Path(definition_source).expanduser()
+        if not source_path.is_absolute():
+            return None
+        try:
+            source_stat = source_path.lstat()
+            if not stat.S_ISREG(source_stat.st_mode):
+                return None
+            definition_path = source_path.resolve(strict=True)
+            project_root = record.host_root.expanduser().resolve(strict=True)
+            definition_path.relative_to(project_root)
+            if source_path.parent.is_symlink():
+                return None
+            definition = json.loads(definition_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, UnicodeDecodeError, json.JSONDecodeError):
+            return None
+        if not isinstance(definition, dict):
+            return None
+        try:
+            authorized_campaign_root = self._project_campaign_root_is_authorized(
+                definition, definition_path, repository, project_root,
+            )
+        except (OSError, RuntimeError, TypeError, ValueError):
+            return None
+        if not authorized_campaign_root:
+            return None
+
+        try:
+            campaign_root = definition_path.parent.resolve(strict=True)
+            identity_loader = getattr(self.environment_service, "_pkg", None)
+            package = identity_loader() if callable(identity_loader) else None
+            identity_function = getattr(
+                getattr(package, "identity", None), "environment_id", None,
+            )
+            if (workspace_root != str(campaign_root)
+                    or not callable(identity_function)
+                    or identity_function(definition) != definition_id):
+                return None
+        except Exception:
+            # Entry is already durable. Failure to validate an optional
+            # selection projection must leave the execution unbound, not turn
+            # that successful entry into an ambiguous tool result.
+            return None
+        return definition_id, workspace_root
+
     def _authorize_project_verification_invocation(
         self, argv: list[str], record: _GrantRecord,
     ) -> bool:
@@ -3137,19 +3213,20 @@ class EnvironmentRPCServer:
             if isinstance(entry_configuration, dict) else None
         )
         entry_workspace_root = payload.get("workspace_root")
-        project_context = None
-        if (record.scope in {"project", "workspace"}
-                and isinstance(entry_definition_id, str)
-                and entry_definition_id.startswith("env_")
-                and len(entry_definition_id) == 20
-                and all(char in "0123456789abcdef" for char in entry_definition_id[4:])
-                and isinstance(entry_workspace_root, str)):
-            try:
-                configured_root = Path(self.config.workspace_root).expanduser().resolve(strict=True)
-            except OSError:
-                configured_root = None
-            if configured_root is not None and entry_workspace_root == str(configured_root):
-                project_context = (entry_definition_id, entry_workspace_root)
+        entry_definition_source = (
+            entry_configuration.get("source")
+            if isinstance(entry_configuration, dict) else None
+        )
+        project_context = (
+            self._validated_project_entry_context(
+                record,
+                project,
+                entry_definition_id,
+                entry_workspace_root,
+                entry_definition_source,
+            )
+            if project is not None else None
+        )
         if project_error is not None:
             payload["control_project_continuation"] = {
                 "schema_version": "mncs.control.project-entry-continuation/1",

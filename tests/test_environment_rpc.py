@@ -12,6 +12,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest import mock
 
 import pytest
@@ -1969,6 +1970,149 @@ def test_project_entry_returns_campaign_capsule_without_changing_entry_authority
                 "ses_selected", "ses_other_context",
             ]
     assert calls == [("mncs-environment", "cmp_test")]
+
+
+def test_nested_single_repository_campaign_entry_binds_only_revalidated_context(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "projects"
+    project = workspace / "mncs-control-mcp"
+    campaign_root = project / ".worktrees" / "campaign-context"
+    checkout = campaign_root / "mncs-control-mcp"
+    checkout.mkdir(parents=True)
+    (checkout / ".git").write_text("gitdir: /sandbox/control\n", encoding="utf-8")
+    definition_path = campaign_root / "environment.json"
+    definition = {
+        "workspace_scope": {
+            "kind": "campaign",
+            "selection": "explicit",
+            "max_directories": 4,
+        },
+        "intent": {
+            "repositories": ["mncs-control-mcp"],
+            "protected_repositories": [],
+        },
+    }
+    definition_path.write_text(json.dumps(definition), encoding="utf-8")
+    definition_id = "env_5555555555555555"
+    session_id = "ses_nested_campaign"
+    capsule = {
+        "schema_version": "mncs.control.campaign-continuation/1",
+        "campaign_id": "cmp_nested_campaign",
+        "repository": "mncs-control-mcp",
+        "status": "ready",
+        "continuations_count": 1,
+        "continuations_truncated": False,
+        "continuations": [{
+            "session_id": session_id,
+            "lifecycle": "active",
+            "definition_id": definition_id,
+            "workspace_root": str(campaign_root),
+            "project_reference": {"status": "linked"},
+            "claim_ids": [],
+            "claims": [],
+        }],
+        "next": "continue the selected session",
+    }
+    entry_result = {
+        "session_id": session_id,
+        "lifecycle": "active",
+        "configuration": {
+            "definition_id": definition_id,
+            "source": str(definition_path),
+        },
+        "workspace_root": str(campaign_root),
+        "continuation": {"identity": "cmp_nested_campaign"},
+    }
+
+    class Identity:
+        @staticmethod
+        def environment_id(_definition: dict[str, Any]) -> str:
+            return definition_id
+
+    class Environment:
+        state_dir = tmp_path / "state"
+        environment_path = tmp_path / "environment"
+        authenticated_principal_id = "principal-test"
+
+        @staticmethod
+        def _pkg():
+            return SimpleNamespace(identity=Identity)
+
+        @staticmethod
+        def campaign_continuation(repository: str, campaign_id: str | None = None):
+            assert repository == "mncs-control-mcp"
+            assert campaign_id == "cmp_nested_campaign"
+            return json.loads(json.dumps(capsule))
+
+    server = EnvironmentRPCServer(
+        ControlConfig(
+            workspace_root=workspace,
+            sandbox_home=tmp_path / "home",
+            environment_rpc_socket=tmp_path / "rpc" / "environment.sock",
+        ),
+        environment_service=Environment(),
+        policy=object(),
+    )
+    token = "nested-campaign-entry-grant"
+    record = _GrantRecord(
+        grant_id="nested-campaign-entry-grant",
+        principal_id="principal-test",
+        host_root=project,
+        sandbox_root="/workspace/mncs-control-mcp",
+        scope="project",
+        uid=0,
+        expires_at=time.monotonic() + 60,
+        token_file=tmp_path / "grant",
+    )
+    server._grants[hashlib.sha256(token.encode()).hexdigest()] = record
+    add_second_checkout = False
+    second_checkout = campaign_root / "mncs-language"
+
+    def run(argv, **_kwargs):
+        assert argv[-2:] == ["--workspace", str(campaign_root)]
+        if add_second_checkout:
+            second_checkout.mkdir()
+            (second_checkout / ".git").write_text(
+                "gitdir: /sandbox/language\n", encoding="utf-8",
+            )
+        return SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps(entry_result) + "\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr("mncs_control_mcp.environment_rpc.subprocess.run", run)
+    request = {
+        "grant": token,
+        "request_id": "req_nested_campaign_entry",
+        "argv": [
+            "enter", "--definition",
+            "/workspace/mncs-control-mcp/.worktrees/campaign-context/environment.json",
+            "--campaign-id", "cmp_nested_campaign",
+        ],
+        "cwd": "/workspace/mncs-control-mcp",
+    }
+
+    response = server.dispatch(request, peer_uid=0)
+    assert response["ok"] is True
+    result = json.loads(response["result"]["stdout"])
+    assert result["control_project_continuation"]["selected_session_id"] == session_id
+    assert result["control_project_continuation"]["selection_basis"] == (
+        "authenticated-project-environment-definition"
+    )
+    assert record.bound_session_id == session_id
+
+    # A checkout added after entry validation invalidates binding before the
+    # caller can mutate the newly selected campaign in this execution.
+    add_second_checkout = True
+    raced_request = {**request, "request_id": "req_nested_campaign_entry_race"}
+    raced = server.dispatch(raced_request, peer_uid=0)
+    assert raced["ok"] is True
+    assert second_checkout.is_dir()
+    raced_result = json.loads(raced["result"]["stdout"])
+    assert raced_result["control_project_continuation"].get("selected_session_id") is None
+    assert record.bound_session_id is None
 
 
 def test_ambiguous_project_entry_returns_bounded_campaign_choices(
