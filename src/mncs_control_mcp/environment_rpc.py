@@ -945,7 +945,17 @@ class EnvironmentRPCServer:
                                 "ENVIRONMENT_WORKSPACE_ESCAPE",
                                 "project grant is not an immediate child of the configured workspace",
                             )
-                        translated.extend(["--workspace", str(configured_root)])
+                        entry_workspace = configured_root
+                        if (isinstance(scope, dict)
+                                and scope.get("kind") == "campaign"):
+                            # A project campaign definition may live in an
+                            # isolated directory inside the granted checkout.
+                            # The authorizer above proves that this root
+                            # contains only the granted repository, so keep
+                            # discovery inside that campaign instead of
+                            # widening it to every workspace checkout.
+                            entry_workspace = definition_path.parent.resolve(strict=True)
+                        translated.extend(["--workspace", str(entry_workspace)])
         elif command == "claims":
             for option in ("--worktree",):
                 map_path_option(option)
@@ -1114,27 +1124,34 @@ class EnvironmentRPCServer:
         repositories: Any,
         record: _GrantRecord,
     ) -> bool:
-        """Allow a project to select its declared toolchain checkouts read-only.
+        """Allow project entry within its own checkout and declared toolchains.
 
         A project grant remains the only writable repository. Extra workspace
-        roots are allowed only when the project's own capability declarations
-        consume them as toolchains and its Environment intent marks every one
-        protected. This lets a native runner use sibling Compiler/Language/VM
-        checkouts without granting those repositories mutation authority.
+        roots are read-only and allowed only when the project's own capability
+        declarations consume them as toolchains and its Environment intent
+        marks every one protected. Explicit campaign roots inside the granted
+        checkout are allowed only when they contain that checkout alone.
         """
         repository = record.host_root.name
+        if (not isinstance(definition, dict)
+                or not isinstance(definition_path, Path)):
+            return False
+        scope = definition.get("workspace_scope")
+        intent = definition.get("intent")
+        if isinstance(scope, dict) and scope.get("kind") == "campaign":
+            return EnvironmentRPCServer._project_campaign_root_is_authorized(
+                definition, definition_path, repository, record.host_root,
+            )
         if repositories == [repository]:
             return True
-        if (not isinstance(definition, dict)
-                or not isinstance(definition_path, Path)
-                or not isinstance(repositories, list)
+        if not isinstance(scope, dict) or not isinstance(intent, dict):
+            return False
+        if (not isinstance(repositories, list)
                 or len(repositories) > 32
                 or any(not isinstance(item, str) or not item for item in repositories)):
             return False
         if len(set(repositories)) != len(repositories):
             return False
-        scope = definition.get("workspace_scope")
-        intent = definition.get("intent")
         if (not isinstance(scope, dict) or scope.get("kind") != "workspace"
                 or not isinstance(intent, dict)
                 or intent.get("repositories") != [repository]):
@@ -1181,6 +1198,81 @@ class EnvironmentRPCServer:
                     declared_toolchains.add(toolchain_repository)
         declared_toolchains.discard(repository)
         return extras <= declared_toolchains
+
+    @staticmethod
+    def _project_campaign_root_is_authorized(
+        definition: dict[str, Any],
+        definition_path: Path,
+        repository: str,
+        host_root: Path,
+    ) -> bool:
+        """Keep explicit campaign entry inside one granted checkout.
+
+        Campaign scopes without a repository list normally discover beneath
+        their definition's directory. A project grant may use that form only
+        when the intent names exactly the granted repository and the scoped
+        directory contains exactly one immediate Git checkout with that
+        repository's alias.
+        """
+        scope = definition.get("workspace_scope")
+        intent = definition.get("intent")
+        if (not isinstance(scope, dict)
+                or scope.get("kind") != "campaign"
+                or scope.get("selection") != "explicit"
+                or set(scope) - {"kind", "selection", "max_directories"}
+                or not isinstance(intent, dict)
+                or intent.get("repositories") != [repository]
+                or definition.get("workspace_provider")
+                or definition.get("managed_checkouts") is not None
+                or definition.get("workspace_root", ".") not in (None, "", ".")):
+            return False
+
+        max_directories = scope.get("max_directories", 1)
+        if (type(max_directories) is not int
+                or max_directories < 1
+                or max_directories > 4):
+            return False
+
+        protected = intent.get("protected_repositories", [])
+        if (not isinstance(protected, list)
+                or len(set(item for item in protected if isinstance(item, str)))
+                != len(protected)
+                or any(not isinstance(item, str) or not item
+                       or item in (".", "..") or Path(item).name != item
+                       or "/" in item or "\\" in item
+                       for item in protected)):
+            return False
+
+        project_root = host_root.expanduser().resolve(strict=True)
+        if definition_path.is_symlink() or definition_path.parent.is_symlink():
+            return False
+        campaign_root = definition_path.parent.resolve(strict=True)
+        try:
+            campaign_root.relative_to(project_root)
+        except ValueError:
+            return False
+        if campaign_root == project_root or (campaign_root / ".git").exists():
+            return False
+
+        try:
+            checkouts = [
+                child for child in campaign_root.iterdir()
+                if child.is_dir() and not child.is_symlink()
+                and (child / ".git").exists()
+            ]
+        except OSError:
+            return False
+        if len(checkouts) != 1:
+            return False
+        checkout = checkouts[0]
+        if (checkout.name != repository
+                or (checkout / ".git").is_symlink()):
+            return False
+        try:
+            checkout.resolve(strict=True).relative_to(project_root)
+        except (OSError, ValueError):
+            return False
+        return checkout.resolve(strict=True).parent == campaign_root
 
     def _authorize_project_verification_invocation(
         self, argv: list[str], record: _GrantRecord,

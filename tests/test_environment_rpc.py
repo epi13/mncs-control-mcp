@@ -1228,6 +1228,77 @@ def test_project_campaign_entry_rejects_definition_scope_widening(
     assert raised.value.code == "ENVIRONMENT_AUTHORITY_DENIED"
 
 
+def test_project_campaign_entry_maps_single_checkout_inside_grant(
+    tmp_path: Path,
+) -> None:
+    projects = tmp_path / "projects"
+    project = projects / "mncs-compiler"
+    campaign_root = project / ".worktrees" / "native-app-readiness"
+    checkout = campaign_root / "mncs-compiler"
+    checkout.mkdir(parents=True)
+    (checkout / ".git").write_text("gitdir: /sandbox/admin\n", encoding="utf-8")
+    definition = campaign_root / "environment.json"
+    definition.write_text(json.dumps({
+        "name": "mncs-compiler-campaign",
+        "forbidden_actions": ["delete"],
+        "workspace_scope": {
+            "kind": "campaign",
+            "selection": "explicit",
+            "max_directories": 4,
+        },
+        "intent": {
+            "repositories": ["mncs-compiler"],
+            "protected_repositories": ["mncs-memory"],
+        },
+    }), encoding="utf-8")
+    server = EnvironmentRPCServer(
+        ControlConfig(
+            workspace_root=projects,
+            sandbox_home=tmp_path / "home",
+            environment_rpc_socket=tmp_path / "rpc" / "environment.sock",
+        ),
+        environment_service=SimpleNamespace(state_dir=tmp_path / "state"),
+        policy=object(),
+    )
+    grant = _GrantRecord(
+        grant_id="project-campaign-root-entry",
+        principal_id="principal-test",
+        host_root=project,
+        sandbox_root="/workspace/mncs-compiler",
+        scope="project",
+        uid=0,
+        expires_at=time.monotonic() + 60,
+        token_file=tmp_path / "grant",
+    )
+
+    translated = server._translate_argv(
+        ["enter", "--definition",
+         "/workspace/mncs-compiler/.worktrees/native-app-readiness/environment.json",
+         "--campaign-id", "cmp_test"],
+        project,
+        grant,
+    )
+
+    assert translated == [
+        "enter", "--definition", str(definition), "--campaign-id", "cmp_test",
+        "--workspace", str(campaign_root),
+    ]
+
+    # Any second repository checkout would widen discovery beyond the grant.
+    sibling = campaign_root / "mncs-language"
+    sibling.mkdir()
+    (sibling / ".git").write_text("gitdir: /sandbox/language\n", encoding="utf-8")
+    with pytest.raises(ControlError, match="may select only its granted repository") as raised:
+        server._translate_argv(
+            ["enter", "--definition",
+             "/workspace/mncs-compiler/.worktrees/native-app-readiness/environment.json",
+             "--campaign-id", "cmp_test"],
+            project,
+            grant,
+        )
+    assert raised.value.code == "ENVIRONMENT_AUTHORITY_DENIED"
+
+
 def test_project_grant_returns_authenticated_campaign_capsule(tmp_path: Path) -> None:
     workspace = tmp_path / "projects"
     project = workspace / "mncs-environment"
