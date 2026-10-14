@@ -863,6 +863,8 @@ def test_ordinary_claim_acquisition_builds_same_operator_worktree_recovery(
 
     assert result["status"] == "recovered"
     request = server._perform_claim_recovery.call_args.args[0]
+    assert server._perform_claim_recovery.call_args.kwargs["request_id"] != "req_ordinary_claim"
+    assert server._perform_claim_recovery.call_args.kwargs["current_request_id"] == "req_ordinary_claim"
     assert request["claim_id"] == claim["claim_id"]
     assert request["expected_version"] == claim["version"]
     assert request["recovery_basis"] == "same-principal-host-liveness"
@@ -965,7 +967,13 @@ def test_same_operator_recovery_uses_host_liveness_and_narrows_scope(
         "process_complete": True, "services": [], "user_units_examined": 3,
         "services_complete": True, "resident_services": [],
     }
-    monkeypatch.setattr(server, "_recovery_liveness_snapshot", lambda **_kwargs: observation)
+    liveness_calls: list[dict[str, object]] = []
+
+    def observe_liveness(**kwargs: object) -> dict[str, object]:
+        liveness_calls.append(kwargs)
+        return observation
+
+    monkeypatch.setattr(server, "_recovery_liveness_snapshot", observe_liveness)
     monkeypatch.setattr(server, "_proc_start_ticks", lambda _pid: "1200")
     monkeypatch.setattr(server, "_revoke_owner_session_grants", lambda _owner: 0)
 
@@ -982,9 +990,16 @@ def test_same_operator_recovery_uses_host_liveness_and_narrows_scope(
         },
         record=record,
         request_id="req_auto_recover_scope",
+        current_request_id="req_outer_environment_rpc",
     )
 
     assert result["status"] == "recovered"
+    assert len(liveness_calls) == 2
+    assert all(
+        call["current_request_id"] == "req_outer_environment_rpc"
+        for call in liveness_calls
+    )
+    assert service.recover_claim.call_args.kwargs["request_id"] == "req_auto_recover_scope"
     authorization = service.recover_claim.call_args.kwargs["authorization"]
     assert authorization["schema_version"] == "mncs.environment.control-owner-claim-recovery/2"
     assert authorization["recovery_basis"] == "same-principal-host-liveness"

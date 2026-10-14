@@ -1789,6 +1789,7 @@ class EnvironmentRPCServer:
         *,
         record: _GrantRecord,
         request_id: str,
+        current_request_id: str | None = None,
     ) -> dict[str, Any]:
         """Fence the exact former owner, attest host liveness, then call Environment."""
         session_id = str(recovery_request["session_id"])
@@ -1810,6 +1811,7 @@ class EnvironmentRPCServer:
         ))
         approval_reference = recovery_request.get("approval_reference")
         owner_consumer_id = str(recovery_request["owner_consumer_id"])
+        liveness_request_id = current_request_id or request_id
 
         with self._lock:
             old_lock = self._session_locks.setdefault(owner_session_id, threading.RLock())
@@ -1901,7 +1903,7 @@ class EnvironmentRPCServer:
             before = self._recovery_liveness_snapshot(
                 owner_session_id=owner_session_id,
                 repository=repository,
-                current_request_id=request_id,
+                current_request_id=liveness_request_id,
                 current_grant_id=record.grant_id,
                 checkout=source_checkout,
             )
@@ -1936,7 +1938,7 @@ class EnvironmentRPCServer:
             after = self._recovery_liveness_snapshot(
                 owner_session_id=owner_session_id,
                 repository=repository,
-                current_request_id=request_id,
+                current_request_id=liveness_request_id,
                 current_grant_id=record.grant_id,
                 checkout=source_checkout,
             )
@@ -3167,6 +3169,7 @@ class EnvironmentRPCServer:
             recovery_request,
             record=record,
             request_id=recovery_request_id,
+            current_request_id=request_id,
         )
 
     def acquire_claim(
