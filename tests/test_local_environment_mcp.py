@@ -65,6 +65,17 @@ def test_claim_release_mapping_is_explicit_and_bounded() -> None:
         )
 
 
+def test_campaign_continuation_selects_only_one_unambiguous_session() -> None:
+    assert LocalEnvironmentMCP._selected_session({
+        "status": "ready",
+        "continuations": [{"campaign_session_ids": ["ses_selected"]}],
+    }) == "ses_selected"
+    assert LocalEnvironmentMCP._selected_session({
+        "status": "ready",
+        "continuations": [{"campaign_session_ids": ["ses_one", "ses_two"]}],
+    }) is None
+
+
 def test_local_rpc_bootstrap_binds_capability_to_process_and_working_tree(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

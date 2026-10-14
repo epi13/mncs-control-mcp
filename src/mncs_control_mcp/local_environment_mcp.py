@@ -357,6 +357,26 @@ class LocalEnvironmentMCP:
                 return None
         return result
 
+    @staticmethod
+    def _selected_session(payload: Any) -> str | None:
+        if not isinstance(payload, dict):
+            return None
+        for key in ("selected_session_id", "session_id"):
+            value = payload.get(key)
+            if isinstance(value, str) and SESSION_RE.fullmatch(value):
+                return value
+        if payload.get("status") != "ready":
+            return None
+        continuations = payload.get("continuations")
+        if not isinstance(continuations, list) or len(continuations) != 1:
+            return None
+        session_ids = continuations[0].get("campaign_session_ids")
+        if (isinstance(session_ids, list) and len(session_ids) == 1
+                and isinstance(session_ids[0], str)
+                and SESSION_RE.fullmatch(session_ids[0])):
+            return session_ids[0]
+        return None
+
     def _select_session(
         self, context: _ProjectContext, project: str, values: dict[str, Any],
     ) -> dict[str, Any] | None:
@@ -376,9 +396,8 @@ class LocalEnvironmentMCP:
         if response.get("ok") is not True:
             return response
         payload = self._payload(response)
-        session_id = payload.get("selected_session_id") if isinstance(payload, dict) else None
-        if (isinstance(session_id, str) and SESSION_RE.fullmatch(session_id)
-                and payload.get("status") == "ready"):
+        session_id = self._selected_session(payload)
+        if session_id is not None:
             context.selected_session_id = session_id
             return None
         return {
@@ -434,8 +453,8 @@ class LocalEnvironmentMCP:
             if response.get("ok") is True:
                 payload = self._payload(response)
                 if operation in {"enter", "continuation"} and isinstance(payload, dict):
-                    candidate = payload.get("session_id") or payload.get("selected_session_id")
-                    if isinstance(candidate, str) and SESSION_RE.fullmatch(candidate):
+                    candidate = self._selected_session(payload)
+                    if candidate is not None:
                         context.selected_session_id = candidate
             else:
                 error = response.get("error")
