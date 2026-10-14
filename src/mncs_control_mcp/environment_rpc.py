@@ -1542,15 +1542,20 @@ class EnvironmentRPCServer:
                 "ENVIRONMENT_RPC_INVALID_REQUEST",
                 "campaign-state requires one Environment session identity",
             )
-        environment_project = self.config.repositories.get(
-            "environment", "mncs-environment"
-        )
-        if (record.scope != "project"
-                or self._project_repository(record) != environment_project):
+        if record.scope != "project":
             raise ControlError(
                 "ENVIRONMENT_AUTHORITY_DENIED",
-                "campaign-state paging is available only through the Environment project grant",
-                details={"required_project": environment_project},
+                "campaign-state paging requires an authenticated project grant",
+            )
+        if record.bound_session_id != argv[1]:
+            raise ControlError(
+                "ENVIRONMENT_AUTHORITY_DENIED",
+                "campaign-state paging requires the session selected by this project's authenticated continuation",
+                details={
+                    "session_id": argv[1],
+                    "selected_session_id": record.bound_session_id,
+                    "next": "run project continuation and read only its selected session",
+                },
             )
 
         seen: set[str] = set()

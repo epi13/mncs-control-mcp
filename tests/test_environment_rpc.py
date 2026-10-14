@@ -2976,6 +2976,15 @@ def test_project_rpc_exposes_session_authorized_read_operations_and_reports_unkn
     assert calls[7][1]["env"]["MNCS_ENV_AUTH_PRINCIPAL_ID"] == "principal-agent"
     assert calls[7][1]["env"]["MNCS_ENV_RPC_REQUEST_ID"] == "req_project_campaign_state_page"
 
+    for selected_session in (None, "ses_other"):
+        project_grant.bound_session_id = selected_session
+        with pytest.raises(ControlError) as denied_campaign_state:
+            server._authorize_campaign_state_argv(
+                ["campaign-state", "ses_health"], project_grant,
+            )
+        assert denied_campaign_state.value.code == "ENVIRONMENT_AUTHORITY_DENIED"
+    project_grant.bound_session_id = "ses_health"
+
     for invalid_argv in (
         ["campaign-state", "ses_health", "--evidence-limit", "129"],
         ["campaign-state", "ses_health", "--evidence-offset", "0",
@@ -3083,6 +3092,101 @@ def test_project_rpc_exposes_session_authorized_read_operations_and_reports_unkn
     assert unsupported["error"]["details"]["status"] == "unknown"
     assert unsupported["error"]["details"]["operation"] == "doctor"
     assert len(calls) == 8
+
+
+def test_campaign_state_read_uses_the_bound_compiler_project_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "projects"
+    project = workspace / "mncs-compiler"
+    project.mkdir(parents=True)
+    token = "compiler-campaign-state-grant"
+
+    class Store:
+        def load_snapshot(self, session_id: str) -> dict[str, str]:
+            assert session_id == "ses_compiler"
+            return {"authenticated_principal_id": "principal-agent"}
+
+        def close(self) -> None:
+            pass
+
+    class Environment:
+        state_dir = tmp_path / "state"
+        environment_path = tmp_path / "environment"
+
+        def _pkg(self) -> object:
+            return object()
+
+        def _store(self, _pkg: object) -> Store:
+            return Store()
+
+    server = EnvironmentRPCServer(
+        ControlConfig(
+            workspace_root=workspace,
+            repositories={"environment": "mncs-environment"},
+            sandbox_home=tmp_path / "home",
+            environment_rpc_socket=tmp_path / "rpc" / "environment.sock",
+        ),
+        environment_service=Environment(),
+        policy=object(),
+    )
+    project_grant = _GrantRecord(
+        grant_id="compiler-campaign-state-grant",
+        principal_id="principal-agent",
+        host_root=project,
+        sandbox_root="/workspace/mncs-compiler",
+        scope="project",
+        uid=0,
+        expires_at=time.monotonic() + 60,
+        token_file=tmp_path / "grant",
+        bound_session_id="ses_compiler",
+    )
+    server._grants[hashlib.sha256(token.encode()).hexdigest()] = project_grant
+    calls: list[list[str]] = []
+
+    def run(argv: list[str], **_kwargs: object) -> SimpleNamespace:
+        calls.append(argv)
+        return SimpleNamespace(
+            returncode=0,
+            stdout='{"evidence_count":1,"evidence_offset":0,"evidence_limit":1}\n',
+            stderr="",
+        )
+
+    monkeypatch.setattr("mncs_control_mcp.environment_rpc.subprocess.run", run)
+    request = {
+        "grant": token,
+        "request_id": "req_compiler_campaign_state",
+        "argv": [
+            "campaign-state", "ses_compiler", "--evidence-offset", "0",
+            "--evidence-limit", "1",
+        ],
+        "cwd": "/workspace/mncs-compiler",
+    }
+    response = server.dispatch(request, peer_uid=0)
+    assert response["ok"] is True
+    assert json.loads(response["result"]["stdout"]) == {
+        "evidence_count": 1, "evidence_offset": 0, "evidence_limit": 1,
+    }
+    assert calls[0][-6:] == [
+        "campaign-state", "ses_compiler", "--evidence-offset", "0",
+        "--evidence-limit", "1",
+    ]
+
+    project_grant.bound_session_id = "ses_other"
+    denied = server.dispatch({
+        **request,
+        "request_id": "req_compiler_campaign_state_wrong_session",
+    }, peer_uid=0)
+    assert denied["error"]["code"] == "ENVIRONMENT_AUTHORITY_DENIED"
+    assert len(calls) == 1
+
+    project_grant.bound_session_id = None
+    unbound = server.dispatch({
+        **request,
+        "request_id": "req_compiler_campaign_state_unbound",
+    }, peer_uid=0)
+    assert unbound["error"]["code"] == "ENVIRONMENT_AUTHORITY_DENIED"
+    assert len(calls) == 1
 
 
 def test_project_rpc_invokes_only_its_fixed_verification_capabilities(
