@@ -2817,6 +2817,92 @@ def test_project_rpc_exposes_session_authorized_read_operations_and_reports_unkn
     assert len(calls) == 8
 
 
+def test_project_rpc_invokes_only_its_fixed_verification_capabilities(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "projects"
+    project = workspace / "mncs-compiler"
+    project.mkdir(parents=True)
+    token = "compiler-project-verification-grant"
+
+    class Store:
+        def load_snapshot(self, _session_id: str) -> dict[str, str]:
+            return {"authenticated_principal_id": "principal-agent"}
+
+        def close(self) -> None:
+            pass
+
+    class Environment:
+        state_dir = tmp_path / "state"
+        environment_path = tmp_path / "environment"
+
+        def _pkg(self) -> object:
+            return object()
+
+        def _store(self, _pkg: object) -> Store:
+            return Store()
+
+    server = EnvironmentRPCServer(
+        ControlConfig(
+            workspace_root=workspace,
+            repositories={"environment": "mncs-environment"},
+            sandbox_home=tmp_path / "home",
+            environment_rpc_socket=tmp_path / "rpc" / "environment.sock",
+        ),
+        environment_service=Environment(),
+        policy=object(),
+    )
+    project_grant = _GrantRecord(
+        grant_id="compiler-project-verification-grant",
+        principal_id="principal-agent",
+        host_root=project,
+        sandbox_root="/workspace/mncs-compiler",
+        scope="project",
+        uid=0,
+        expires_at=time.monotonic() + 60,
+        token_file=tmp_path / "grant",
+        bound_session_id="ses_compiler",
+    )
+    server._grants[hashlib.sha256(token.encode()).hexdigest()] = project_grant
+    calls: list[tuple[list[str], dict[str, object]]] = []
+
+    def run(argv: list[str], **kwargs: object) -> SimpleNamespace:
+        calls.append((argv, kwargs))
+        return SimpleNamespace(returncode=0, stdout='{"status":"pass"}\n', stderr="")
+
+    monkeypatch.setattr("mncs_control_mcp.environment_rpc.subprocess.run", run)
+    request = {
+        "grant": token,
+        "request_id": "req_compiler_project_verification",
+        "argv": [
+            "invoke", "ses_compiler",
+            "mncs-compiler:verification-executor/mncs-compiler.native-application-incremental-cache",
+        ],
+        "cwd": "/workspace/mncs-compiler",
+    }
+
+    accepted = server.dispatch(request, peer_uid=0)
+    assert accepted["ok"] is True
+    assert json.loads(accepted["result"]["stdout"]) == {"status": "pass"}
+    assert calls[0][0][-3:] == request["argv"]
+    assert calls[0][1]["env"]["MNCS_ENV_AUTH_PRINCIPAL_ID"] == "principal-agent"
+
+    rejected_argv = [
+        ["invoke", "ses_compiler", "mncs-test:verification-executor/native-test-provider"],
+        ["invoke", "ses_compiler", request["argv"][2], "--unbounded-argument"],
+        ["invoke", "ses_other", request["argv"][2]],
+        ["invoke", "ses_compiler", "mncs-language:compile"],
+    ]
+    for index, argv in enumerate(rejected_argv):
+        rejected = server.dispatch({
+            **request,
+            "request_id": f"req_compiler_project_verification_rejected_{index}",
+            "argv": argv,
+        }, peer_uid=0)
+        assert rejected["ok"] is False
+    assert len(calls) == 1
+
+
 def test_project_rpc_exposes_session_bound_system_observability(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

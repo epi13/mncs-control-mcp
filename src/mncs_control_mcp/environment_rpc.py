@@ -677,7 +677,11 @@ class EnvironmentRPCServer:
                     "ENVIRONMENT_RPC_INVALID_REQUEST",
                     "capability invocation requires one Environment session identity and capability",
                 )
-            if argv[2] not in ALLOWED_INVOKE_CAPABILITIES:
+            project_verification = self._authorize_project_verification_invocation(
+                argv, record,
+            )
+            if (argv[2] not in ALLOWED_INVOKE_CAPABILITIES
+                    and not project_verification):
                 raise ControlError(
                     "ENVIRONMENT_OPERATION_UNAVAILABLE",
                     "Control does not expose this Environment capability",
@@ -698,7 +702,7 @@ class EnvironmentRPCServer:
                 "mncs-forge:compiler-vm-scheduled-work",
             }:
                 self._authorize_compiler_loop_invocation(argv, record)
-            elif len(argv) != 3:
+            elif not project_verification and len(argv) != 3:
                 raise ControlError(
                     "ENVIRONMENT_AUTHORITY_DENIED",
                     "Control exposes this capability only with its session-bound declared invocation",
@@ -706,29 +710,31 @@ class EnvironmentRPCServer:
                         "invoke", "<authorized-session>", argv[2],
                     ]},
                 )
-            elif (argv[2] == "mncs-system-monitor:system-observability"
+            elif (not project_verification
+                  and argv[2] == "mncs-system-monitor:system-observability"
                   and record.bound_session_id != argv[1]):
                 raise ControlError(
                     "ENVIRONMENT_AUTHORITY_DENIED",
                     "System Monitor observability requires the session selected by this grant's authenticated continuation",
                     details={"next": "run project continuation and use its selected session"},
                 )
-            environment_project = self.config.repositories.get(
-                "environment", "mncs-environment"
-            )
-            if record.scope != "project":
-                raise ControlError(
-                    "ENVIRONMENT_AUTHORITY_DENIED",
-                    "this Environment capability is exposed only through the Environment project grant",
-                    details={"required_project": environment_project},
+            if not project_verification:
+                environment_project = self.config.repositories.get(
+                    "environment", "mncs-environment"
                 )
-            selected_project = self._project_repository(record)
-            if selected_project != environment_project:
-                raise ControlError(
-                    "ENVIRONMENT_AUTHORITY_DENIED",
-                    "this Environment capability is exposed only through the Environment project grant",
-                    details={"required_project": environment_project},
-                )
+                if record.scope != "project":
+                    raise ControlError(
+                        "ENVIRONMENT_AUTHORITY_DENIED",
+                        "this Environment capability is exposed only through the Environment project grant",
+                        details={"required_project": environment_project},
+                    )
+                selected_project = self._project_repository(record)
+                if selected_project != environment_project:
+                    raise ControlError(
+                        "ENVIRONMENT_AUTHORITY_DENIED",
+                        "this Environment capability is exposed only through the Environment project grant",
+                        details={"required_project": environment_project},
+                    )
         translated = list(argv)
 
         if command == "scope-grant":
@@ -1070,6 +1076,42 @@ class EnvironmentRPCServer:
                     translated[index] = "--repository=" + str(repository)
                 index += 1
         return translated
+
+    def _authorize_project_verification_invocation(
+        self, argv: list[str], record: _GrantRecord,
+    ) -> bool:
+        """Allow one repository's own fixed verification capabilities.
+
+        The stable CLI bridge must let a project run its declared bounded
+        checks without adding every new verification name to Control's
+        deployment allowlist. The capability remains bound to the selected
+        session and the project grant; Environment resolves the descriptor,
+        effects, and writable repository authority before it starts a provider.
+        Raw argv and cross-project providers are deliberately excluded.
+        """
+        if record.scope != "project" or len(argv) < 3:
+            return False
+        repository = self._project_repository(record)
+        prefix = f"{repository}:verification-executor/"
+        capability = argv[2]
+        if not capability.startswith(prefix):
+            return False
+        name = capability[len(prefix):]
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,159}", name):
+            return False
+        if len(argv) != 3:
+            raise ControlError(
+                "ENVIRONMENT_AUTHORITY_DENIED",
+                "project verification invokes only its fixed declared arguments",
+                details={"capability": capability},
+            )
+        if record.bound_session_id != argv[1]:
+            raise ControlError(
+                "ENVIRONMENT_AUTHORITY_DENIED",
+                "project verification requires the session selected by this grant's authenticated continuation",
+                details={"next": "run project continuation and use its selected session"},
+            )
+        return True
 
     def _authorize_compiler_loop_invocation(
         self, argv: list[str], record: _GrantRecord,
