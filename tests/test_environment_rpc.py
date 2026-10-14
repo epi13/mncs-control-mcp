@@ -2457,6 +2457,49 @@ def test_project_rpc_exposes_only_typed_resource_headroom_evaluation(
     assert server.dispatch(request, peer_uid=0) == response
     assert len(calls) == 1
 
+    compiler_loop_invocations = [
+        ["invoke", "ses_resource", "mncs-forge:provider-artifact-execution"],
+        ["invoke", "ses_resource", "mncs-system-monitor:system-resource-sample",
+         "--input-artifact", "forge-receipt",
+         "mncs-forge:provider-artifact-execution", "cap_0123456789abcdef",
+         "forge-execution-receipt.json"],
+        ["invoke", "ses_resource", "mncs-forge:compiler-vm-scheduled-work",
+         "--input-artifact", "automation-decision",
+         "mncs-automation:automation-resource-headroom-evaluation",
+         "cap_0123456789abcdef", "resource-headroom-decision.json",
+         "--input-artifact", "forge-receipt",
+         "mncs-forge:provider-artifact-execution", "cap_0123456789abcdef",
+         "forge-execution-receipt.json"],
+    ]
+    for index, argv in enumerate(compiler_loop_invocations):
+        accepted = server.dispatch({
+            **request,
+            "request_id": f"req_compiler_loop_invoke_{index}",
+            "argv": argv,
+        }, peer_uid=0)
+        assert accepted["ok"] is True
+        assert calls[-1][0][-len(argv):] == argv
+
+    rejected_compiler_loop_invocations = [
+        compiler_loop_invocations[1][:-1] + ["../forge-execution-receipt.json"],
+        compiler_loop_invocations[1][:6] + ["cap_invalid"] + compiler_loop_invocations[1][7:],
+        compiler_loop_invocations[2][:5] + [
+            "mncs-system-monitor:system-resource-sample",
+        ] + compiler_loop_invocations[2][6:],
+        compiler_loop_invocations[2][:-5],
+        compiler_loop_invocations[2][:-1] + ["../forge-execution-receipt.json"],
+        ["invoke", "ses_other", "mncs-forge:provider-artifact-execution"],
+        compiler_loop_invocations[2] + ["--unbounded"],
+    ]
+    for index, argv in enumerate(rejected_compiler_loop_invocations):
+        rejected = server.dispatch({
+            **request,
+            "request_id": f"req_compiler_loop_rejected_{index}",
+            "argv": argv,
+        }, peer_uid=0)
+        assert rejected["ok"] is False
+    assert len(calls) == 4
+
     bad_requests = [
         invocation_argv[:6] + ["cap_invalid"] + invocation_argv[7:],
         invocation_argv[:5] + ["mncs-forge:execution-receipts"] + invocation_argv[6:],
@@ -2471,7 +2514,7 @@ def test_project_rpc_exposes_only_typed_resource_headroom_evaluation(
             "argv": argv,
         }, peer_uid=0)
         assert rejected["ok"] is False
-    assert len(calls) == 1
+    assert len(calls) == 4
 
     grant.bound_session_id = "ses_other"
     wrong_session = server.dispatch({
@@ -2480,7 +2523,7 @@ def test_project_rpc_exposes_only_typed_resource_headroom_evaluation(
     }, peer_uid=0)
     assert wrong_session["ok"] is False
     assert wrong_session["error"]["code"] == "ENVIRONMENT_AUTHORITY_DENIED"
-    assert len(calls) == 1
+    assert len(calls) == 4
 
 
 def test_store_verify_rpc_is_session_bound_and_read_only(

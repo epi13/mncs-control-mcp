@@ -45,6 +45,8 @@ ALLOWED_INVOKE_CAPABILITIES = frozenset({
     "mncs-compiler:compiler-producer",
     "mncs-compiler:compiler-build",
     "mncs-forge:canonical-vm-work",
+    "mncs-forge:provider-artifact-execution",
+    "mncs-forge:compiler-vm-scheduled-work",
     "mncs-system-monitor:system-resource-sample",
     "mncs-system-monitor:system-observability",
     "mncs-automation:automation-resource-headroom-evaluation",
@@ -682,6 +684,12 @@ class EnvironmentRPCServer:
             )
             if resource_evaluation:
                 self._authorize_resource_headroom_invocation(argv, record)
+            elif argv[2] in {
+                "mncs-forge:provider-artifact-execution",
+                "mncs-system-monitor:system-resource-sample",
+                "mncs-forge:compiler-vm-scheduled-work",
+            }:
+                self._authorize_compiler_loop_invocation(argv, record)
             elif len(argv) != 3:
                 raise ControlError(
                     "ENVIRONMENT_AUTHORITY_DENIED",
@@ -1039,6 +1047,57 @@ class EnvironmentRPCServer:
                     translated[index] = "--repository=" + str(repository)
                 index += 1
         return translated
+
+    def _authorize_compiler_loop_invocation(
+        self, argv: list[str], record: _GrantRecord,
+    ) -> None:
+        """Expose only the selected session's exact typed Compiler evidence flow."""
+        capability = argv[2]
+        if record.bound_session_id != argv[1]:
+            raise ControlError(
+                "ENVIRONMENT_AUTHORITY_DENIED",
+                "Compiler integration invocation requires the session selected by this grant's authenticated continuation",
+                details={"next": "run project continuation and use its selected session"},
+            )
+        if capability == "mncs-forge:provider-artifact-execution":
+            allowed = len(argv) == 3
+        elif (capability == "mncs-system-monitor:system-resource-sample"
+              and len(argv) == 3):
+            allowed = True
+        elif capability == "mncs-system-monitor:system-resource-sample":
+            expected = [
+                "invoke", argv[1], capability, "--input-artifact", "forge-receipt",
+                "mncs-forge:provider-artifact-execution",
+            ]
+            allowed = (
+                len(argv) == 8
+                and argv[:6] == expected
+                and re.fullmatch(r"cap_[0-9a-f]{16}", argv[6]) is not None
+                and argv[7] == "forge-execution-receipt.json"
+            )
+        elif capability == "mncs-forge:compiler-vm-scheduled-work":
+            expected = [
+                "invoke", argv[1], capability, "--input-artifact", "automation-decision",
+                "mncs-automation:automation-resource-headroom-evaluation",
+            ]
+            allowed = (
+                len(argv) == 13
+                and argv[:6] == expected
+                and re.fullmatch(r"cap_[0-9a-f]{16}", argv[6]) is not None
+                and argv[7] == "resource-headroom-decision.json"
+                and argv[8:10] == ["--input-artifact", "forge-receipt"]
+                and argv[10] == "mncs-forge:provider-artifact-execution"
+                and re.fullmatch(r"cap_[0-9a-f]{16}", argv[11]) is not None
+                and argv[12] == "forge-execution-receipt.json"
+            )
+        else:
+            allowed = False
+        if not allowed:
+            raise ControlError(
+                "ENVIRONMENT_AUTHORITY_DENIED",
+                "Compiler integration invocation exceeds its typed artifact contract",
+                details={"capability": capability},
+            )
 
     def _authorize_resource_headroom_invocation(
         self, argv: list[str], record: _GrantRecord,
