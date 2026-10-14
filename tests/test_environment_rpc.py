@@ -433,6 +433,52 @@ def test_worktree_recovery_fence_leaves_disjoint_worktree_jobs_running(
     assert manager._cwd_overlaps_claim_recovery("mncs-compiler", second, "python test.py") is False
 
 
+def test_matching_user_services_uses_declared_worktree_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = tmp_path / "mncs-compiler"
+    checkout = project / ".worktrees" / "selected"
+    checkout.mkdir(parents=True)
+    output = "\n\n".join((
+        "Id=unrelated-name.service\nActiveState=active\nMainPID=101\n"
+        f"WorkingDirectory={checkout}",
+        "Id=mncs-codex.service\nActiveState=active\nMainPID=102\n"
+        "WorkingDirectory=/workspace/mncs-compiler/.worktrees/selected/src",
+        "Id=disjoint.service\nActiveState=active\nMainPID=103\n"
+        f"WorkingDirectory={project / '.worktrees' / 'disjoint'}",
+        "Id=repository-root.service\nActiveState=active\nMainPID=104\n"
+        f"WorkingDirectory={project}",
+        f"Id=stopped.service\nActiveState=inactive\nMainPID=0\n"
+        f"WorkingDirectory={checkout}",
+        "Id=ses_owner-helper.service\nActiveState=active\nMainPID=106\n"
+        f"WorkingDirectory={project / '.worktrees' / 'disjoint'}",
+    ))
+    monkeypatch.setattr(
+        environment_rpc_module.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout=output),
+    )
+    server = EnvironmentRPCServer(
+        ControlConfig(
+            workspace_root=tmp_path,
+            sandbox_home=tmp_path / "home",
+            environment_rpc_socket=tmp_path / "rpc" / "environment.sock",
+        ),
+        environment_service=SimpleNamespace(state_dir=tmp_path / "state"),
+        policy=object(),
+    )
+
+    matches, examined, complete = server._matching_user_services(
+        owner_session_id="ses_owner", repository="mncs-compiler",
+        checkout=str(checkout),
+    )
+
+    assert complete is True
+    assert examined == 6
+    assert matches == ["unrelated-name.service", "mncs-codex.service",
+                       "ses_owner-helper.service"]
+
+
 def test_recovery_process_inventory_excludes_only_its_current_terminal_tree(
     tmp_path: Path,
 ) -> None:

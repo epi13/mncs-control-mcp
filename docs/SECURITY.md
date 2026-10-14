@@ -231,6 +231,13 @@ outside the workspace and must be mode 0600. The service wrapper never prints th
 runtime key and only discovers an existing `SSH_AUTH_SOCK`; it does not create an
 agent or mount private keys.
 
+Claim recovery inspects same-UID process metadata from the Control host. A
+process in another mount namespace can make `/proc/<pid>/cwd` unreadable even
+when its command line and environment remain visible. For user services,
+recovery also reads systemd's active-unit metadata and blocks when a live
+`MainPID` has a declared `WorkingDirectory` inside the claimed worktree. It
+does not infer that such a process is gone from an unreadable procfs cwd link.
+
 The installer deliberately does not download an unverified tunnel binary, invent
 a tunnel ID, enable lingering, or run `sudo`. It creates/enables the user unit and
 reports the exact operator action for missing Bubblewrap, tunnel-client, keys,

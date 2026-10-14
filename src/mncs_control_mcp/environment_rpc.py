@@ -2741,24 +2741,87 @@ class EnvironmentRPCServer:
         self, *, owner_session_id: str, repository: str,
         checkout: str | None = None,
     ) -> tuple[list[str], int, bool]:
+        """Find live user services by identity or their declared checkout.
+
+        The Control owner runs in a private mount namespace. In that namespace,
+        Linux denies ``readlink(/proc/<pid>/cwd)`` for some same-UID processes
+        whose working directory is under the host home mount. systemd still
+        owns the service's declared WorkingDirectory, so inspect that bounded
+        metadata as a second host-side liveness source.
+        """
         try:
             completed = subprocess.run(
-                ["systemctl", "--user", "list-units", "--type=service",
-                 "--state=running", "--no-legend", "--no-pager"],
+                ["systemctl", "--user", "show", "--type=service",
+                 "--state=running", "--no-pager", "-p", "Id",
+                 "-p", "ActiveState", "-p", "MainPID",
+                 "-p", "WorkingDirectory"],
                 capture_output=True, text=True, timeout=4, check=False,
             )
         except (OSError, subprocess.TimeoutExpired):
             return [], 0, False
         if completed.returncode != 0:
             return [], 0, False
-        lines = [line.strip() for line in completed.stdout.splitlines() if line.strip()]
-        matches = [
-            line[:240] for line in lines
-            if owner_session_id in line
-            or (checkout and checkout.lower() in line.lower())
-            or (checkout is None and repository.lower() in line.lower())
-        ]
-        return matches, len(lines), True
+        workspace_root = self.config.workspace_root.expanduser().resolve(
+            strict=False,
+        )
+        sandbox_workspace = Path("/workspace")
+
+        def host_path(value: str) -> Path | None:
+            # systemd may prefix a configured working directory to indicate
+            # how it handles a missing path. Those prefixes are metadata, not
+            # part of the path to compare.
+            if value.startswith(("!", "-")) and len(value) > 1:
+                value = value[1:]
+            path = Path(value)
+            if not path.is_absolute():
+                return None
+            if workspace_root != sandbox_workspace:
+                try:
+                    relative = path.relative_to(sandbox_workspace)
+                except ValueError:
+                    pass
+                else:
+                    if ".." not in relative.parts:
+                        path = workspace_root / relative
+            return path.resolve(strict=False)
+
+        selected_checkout = host_path(checkout) if checkout else None
+        units: list[dict[str, str]] = []
+        for block in completed.stdout.split("\n\n"):
+            fields = dict(
+                line.partition("=")[::2]
+                for line in block.splitlines()
+                if "=" in line
+            )
+            unit_id = fields.get("Id", "")
+            if not unit_id:
+                continue
+            units.append(fields)
+
+        matches: list[str] = []
+        for fields in units:
+            unit_id = fields.get("Id", "")
+            if fields.get("ActiveState") != "active":
+                continue
+            try:
+                main_pid = int(fields.get("MainPID", "0"))
+            except ValueError:
+                main_pid = 0
+            if main_pid <= 0:
+                continue
+            matched = owner_session_id in unit_id
+            working_directory = fields.get("WorkingDirectory", "")
+            unit_cwd = host_path(working_directory) if working_directory else None
+            if selected_checkout is not None and unit_cwd is not None:
+                matched = matched or (
+                    unit_cwd == selected_checkout
+                    or selected_checkout in unit_cwd.parents
+                )
+            elif selected_checkout is None:
+                matched = matched or repository.lower() in unit_id.lower()
+            if matched:
+                matches.append(unit_id[:240])
+        return matches, len(units), True
 
     def _recovery_liveness_snapshot(
         self, *, owner_session_id: str, repository: str, current_request_id: str,
