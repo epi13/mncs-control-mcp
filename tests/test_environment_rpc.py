@@ -483,7 +483,7 @@ def test_recovery_process_inventory_excludes_only_its_current_terminal_tree(
     )
     try:
         (matches, _resident_services, excluded, _process_count,
-         _same_uid_count, _boot_id, complete) = server._host_process_inventory(
+         _same_uid_count, _boot_id, complete, diagnostics) = server._host_process_inventory(
             owner_session_id="ses_old_compiler",
             repository=repository,
             checkout=str(checkout),
@@ -491,6 +491,10 @@ def test_recovery_process_inventory_excludes_only_its_current_terminal_tree(
         )
         excluded_ids = {item["pid"] for item in excluded}
         assert complete is True
+        assert diagnostics == {
+            "request_process_tree_complete": True,
+            "incomplete_reasons": [],
+        }
         assert current.pid in excluded_ids
         assert owner.pid not in excluded_ids
         assert disjoint.pid not in excluded_ids
@@ -510,6 +514,47 @@ def test_recovery_process_inventory_excludes_only_its_current_terminal_tree(
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait(timeout=3)
+
+
+def test_host_process_inventory_explains_an_incomplete_request_tree(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "mncs-compiler"
+    checkout = project / ".worktrees" / "selected"
+    checkout.mkdir(parents=True)
+    manager = SimpleNamespace(
+        claim_recovery_request_roots=lambda _grant: [],
+        claim_recovery_job_candidates=lambda *_args, **_kwargs: [],
+    )
+    server = EnvironmentRPCServer(
+        ControlConfig(
+            workspace_root=tmp_path,
+            sandbox_home=tmp_path / "home",
+            environment_rpc_socket=tmp_path / "rpc" / "environment.sock",
+        ),
+        environment_service=SimpleNamespace(state_dir=tmp_path / "state"),
+        policy=object(),
+        process_manager=manager,
+    )
+    with mock.patch.object(
+        server, "_current_request_process_inventory",
+        return_value=(set(), [], False, ["request_process_root_unreadable"]),
+    ):
+        inventory = server._host_process_inventory(
+            owner_session_id="ses_owner",
+            repository="mncs-compiler",
+            checkout=str(checkout),
+            current_grant_id="grant-current",
+        )
+
+    assert inventory[6] is False
+    assert inventory[7] == {
+        "request_process_tree_complete": False,
+        "incomplete_reasons": [
+            {"reason": "current_request_process_tree_incomplete", "count": 1},
+            {"reason": "request_process_root_unreadable", "count": 1},
+        ],
+    }
 
 
 def test_claim_recovery_request_tracks_selected_continuation_session() -> None:

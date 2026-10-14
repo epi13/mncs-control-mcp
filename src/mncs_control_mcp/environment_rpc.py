@@ -1382,7 +1382,13 @@ class EnvironmentRPCServer:
                     "ENVIRONMENT_OWNER_LIVENESS_UNKNOWN",
                     "Control could not complete its host-side process and user-service inspection",
                     details={"host_process_view": before["process_complete"],
-                             "user_service_view": before["services_complete"]},
+                             "user_service_view": before["services_complete"],
+                             "process_diagnostics": before.get(
+                                 "process_diagnostics", {}
+                             ),
+                             "next": (
+                                 "repair the incomplete host process or user-service observation, then retry the same claim acquisition"
+                             )},
                 )
             if (before["jobs"] or before["active_requests"]
                     or before["processes"] or before["services"]):
@@ -1744,7 +1750,8 @@ class EnvironmentRPCServer:
         self, *, owner_session_id: str, repository: str,
         checkout: str | None = None, current_grant_id: str,
     ) -> tuple[list[dict[str, object]], list[dict[str, object]],
-               list[dict[str, object]], int, int, str | None, bool]:
+               list[dict[str, object]], int, int, str | None, bool,
+               dict[str, object]]:
         """Inspect the Control host's same-UID process view for retained work."""
         proc_root = Path("/proc")
         try:
@@ -1753,8 +1760,12 @@ class EnvironmentRPCServer:
                 encoding="ascii"
             ).strip()
         except OSError:
-            return [], [], [], 0, 0, None, False
-        excluded_pids, excluded_processes, exclusion_complete = (
+            return [], [], [], 0, 0, None, False, {
+                "request_process_tree_complete": False,
+                "incomplete_reasons": [{"reason": "host_procfs_unavailable", "count": 1}],
+            }
+        (excluded_pids, excluded_processes, exclusion_complete,
+         exclusion_reasons) = (
             self._current_request_process_inventory(current_grant_id, entries)
         )
         repository_root = (self.config.workspace_root / repository).resolve()
@@ -1768,8 +1779,20 @@ class EnvironmentRPCServer:
         matches: list[dict[str, object]] = []
         resident_services: list[dict[str, object]] = []
         same_uid_examined = 0
-        complete = (bool(re.fullmatch(r"[0-9a-f-]{36}", boot_id))
-                    and exclusion_complete)
+        complete = True
+        incomplete_counts: dict[str, int] = {}
+
+        def mark_incomplete(reason: str) -> None:
+            nonlocal complete
+            complete = False
+            incomplete_counts[reason] = incomplete_counts.get(reason, 0) + 1
+
+        if not re.fullmatch(r"[0-9a-f-]{36}", boot_id):
+            mark_incomplete("host_boot_identity_unavailable")
+        for reason in exclusion_reasons:
+            incomplete_counts[reason] = incomplete_counts.get(reason, 0) + 1
+        if not exclusion_complete:
+            mark_incomplete("current_request_process_tree_incomplete")
         for entry in entries:
             if not entry.name.isdigit():
                 continue
@@ -1814,7 +1837,7 @@ class EnvironmentRPCServer:
                 # Processes can exit between the host inventory reads. An
                 # unreadable same-user process is otherwise an unknown owner.
                 if entry.exists():
-                    complete = False
+                    mark_incomplete("same_uid_process_observation_unreadable")
                 continue
             argv = [item.decode("utf-8", errors="replace")
                     for item in cmdline.split(b"\x00") if item]
@@ -1851,7 +1874,7 @@ class EnvironmentRPCServer:
                             repository_root / ".worktrees",
                         )
                     except (OSError, ValueError):
-                        complete = False
+                        mark_incomplete("shared_repository_root_process_ambiguous")
             elif repository_marker in cmdline or repository_marker in environment:
                 reason = "repository-command-or-environment"
             elif cwd is not None:
@@ -1898,29 +1921,36 @@ class EnvironmentRPCServer:
                     "reason": reason,
                 })
             if reason is not None and start_ticks is None:
-                complete = False
+                mark_incomplete("matching_process_start_identity_unavailable")
             if reason is not None and not environment_readable and not repository_server:
                 # A repository-associated process with hidden session context
                 # cannot be proved unrelated to the displaced owner.
-                complete = False
+                mark_incomplete("matching_process_context_unreadable")
         return (matches, resident_services, excluded_processes,
                 len([item for item in entries if item.name.isdigit()]),
-                same_uid_examined, boot_id, complete)
+                same_uid_examined, boot_id, complete, {
+                    "request_process_tree_complete": exclusion_complete,
+                    "incomplete_reasons": [
+                        {"reason": reason, "count": count}
+                        for reason, count in sorted(incomplete_counts.items())
+                    ],
+                })
 
     def _current_request_process_inventory(
         self, current_grant_id: str, entries: list[Path],
-    ) -> tuple[set[int], list[dict[str, object]], bool]:
+    ) -> tuple[set[int], list[dict[str, object]], bool, list[str]]:
         """Identify the active terminal request tree by its host-owned grant."""
         roots_method = getattr(
             self.process_manager, "claim_recovery_request_roots", None,
         )
         if not callable(roots_method):
-            return set(), [], False
+            return set(), [], False, ["current_request_roots_unavailable"]
         roots = set(roots_method(current_grant_id))
         if not roots:
-            return set(), [], True
+            return set(), [], True, []
         parents: dict[int, int] = {}
         complete = True
+        reasons: list[str] = []
         present = {int(entry.name): entry for entry in entries if entry.name.isdigit()}
         for pid, entry in present.items():
             try:
@@ -1937,9 +1967,11 @@ class EnvironmentRPCServer:
             except (OSError, StopIteration, ValueError, IndexError):
                 if entry.exists():
                     complete = False
+                    reasons.append("request_process_parent_observation_unreadable")
         missing_roots = [pid for pid in roots if pid in present and pid not in parents]
         if missing_roots:
             complete = False
+            reasons.append("request_process_root_unreadable")
         excluded = {pid for pid in roots if pid in parents}
         while True:
             descendants = {
@@ -1954,9 +1986,10 @@ class EnvironmentRPCServer:
             start_ticks = self._proc_start_ticks(pid)
             if start_ticks is None:
                 complete = False
+                reasons.append("request_process_start_identity_unavailable")
                 continue
             identities.append({"pid": pid, "start_ticks": start_ticks})
-        return excluded, identities, complete
+        return excluded, identities, complete, reasons
 
     def _matching_user_services(
         self, *, owner_session_id: str, repository: str,
@@ -2013,7 +2046,8 @@ class EnvironmentRPCServer:
                 if session_id == owner_session_id and request_id != current_request_id
             )
         (processes, resident_services, excluded_request_processes,
-         process_count, same_uid_count, boot_id, process_complete) = (
+         process_count, same_uid_count, boot_id, process_complete,
+         process_diagnostics) = (
             self._host_process_inventory(
                 owner_session_id=owner_session_id, repository=repository,
                 checkout=checkout, current_grant_id=current_grant_id,
@@ -2034,6 +2068,7 @@ class EnvironmentRPCServer:
             "same_uid_processes_examined": same_uid_count,
             "host_boot_id": boot_id,
             "process_complete": process_complete,
+            "process_diagnostics": process_diagnostics,
             "services": services,
             "user_units_examined": service_count,
             "services_complete": services_complete,
