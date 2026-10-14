@@ -815,6 +815,11 @@ class EnvironmentRPCServer:
                     current = cwd
                     while current == record.host_root or record.host_root in current.parents:
                         candidate = current / ".mncs" / "environment.json"
+                        if candidate.is_symlink():
+                            raise ControlError(
+                                "ENVIRONMENT_WORKSPACE_ESCAPE",
+                                "discovered Environment definition must be a regular file",
+                            )
                         if candidate.is_file():
                             definition_path = candidate.resolve(strict=True)
                             if (
@@ -887,6 +892,16 @@ class EnvironmentRPCServer:
                                 "project-scoped Environment entry cannot override the owner-mapped workspace root",
                                 details={"repository": record.host_root.name},
                             )
+                        if definition_path is not None and not any(
+                            item == "--definition" or item.startswith("--definition=")
+                            for item in translated
+                        ):
+                            # The CLI would otherwise search from its explicit
+                            # workspace argument (the Projects root), skipping
+                            # the project-local definition found from the
+                            # granted checkout. Pass the exact owner-validated
+                            # file so entry selects the intended local scope.
+                            translated.extend(["--definition", str(definition_path)])
                         configured_root = Path(self.config.workspace_root).expanduser().resolve()
                         project_root = record.host_root.expanduser().resolve(strict=True)
                         if project_root.parent != configured_root:
