@@ -2281,12 +2281,28 @@ class EnvironmentRPCServer:
             return True
         return any(Path(argument).name.casefold() in names for argument in argv[:4])
 
+    @staticmethod
+    def _looks_like_codex_launcher_wrapper(
+        executable: str | None, argv: list[str],
+    ) -> bool:
+        executable_name = (
+            Path(executable).name.casefold() if executable
+            else Path(argv[0]).name.casefold() if argv else ""
+        )
+        return (
+            (executable_name in {"node", "nodejs"}
+             or executable_name.startswith("node-"))
+            and len(argv) > 1
+            and Path(argv[1]).name.casefold() in {"codex", "codex.js"}
+        )
+
     def _current_request_process_identity(self, peer_pid: int) -> dict[str, object] | None:
-        """Anchor liveness exclusion at the active Codex parent when present."""
+        """Anchor exclusion at this request's verified Codex execution root."""
         peer_start = self._proc_start_ticks(peer_pid)
         if peer_start is None:
             return None
         selected = {"pid": peer_pid, "start_ticks": peer_start}
+        codex_identity: dict[str, object] | None = None
         current_pid = peer_pid
         visited = {peer_pid}
         for _ in range(8):
@@ -2309,18 +2325,36 @@ class EnvironmentRPCServer:
                 ))
                 if parent_uid != os.getuid():
                     break
-                executable = os.readlink(parent / "exe")
-                argv = [item.decode("utf-8", errors="replace")
-                        for item in (parent / "cmdline").read_bytes().split(b"\x00") if item]
+                try:
+                    executable = os.readlink(parent / "exe")
+                except OSError:
+                    # Hardened Codex executions can hide /proc/<pid>/exe while
+                    # leaving the bounded argv view available to their owner.
+                    executable = None
+                try:
+                    argv = [item.decode("utf-8", errors="replace")
+                            for item in (parent / "cmdline").read_bytes().split(b"\x00")
+                            if item]
+                except OSError:
+                    argv = []
                 parent_start = self._proc_start_ticks(parent_pid)
-                if self._looks_like_codex_process(executable, argv):
+                if self._looks_like_codex_launcher_wrapper(executable, argv):
                     if parent_start is None:
                         return None
-                    return {"pid": parent_pid, "start_ticks": parent_start}
+                    if codex_identity is not None:
+                        # Include the per-execution Node shim above the CLI.
+                        # Its descendants are this request tree; stop before
+                        # the shared Codex app-server parent.
+                        return {"pid": parent_pid, "start_ticks": parent_start}
+                if (codex_identity is None
+                        and self._looks_like_codex_process(executable, argv)):
+                    if parent_start is None:
+                        return None
+                    codex_identity = {"pid": parent_pid, "start_ticks": parent_start}
                 current_pid = parent_pid
             except (OSError, StopIteration, ValueError, IndexError):
                 break
-        return selected
+        return codex_identity or selected
 
     @staticmethod
     def _peer_process_cwd(pid: int) -> Path:

@@ -317,6 +317,53 @@ def test_current_request_liveness_uses_only_verified_codex_ancestor(
         process.wait(timeout=3)
 
 
+def test_current_request_liveness_walks_hidden_executable_to_codex_wrapper(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    server = EnvironmentRPCServer(
+        ControlConfig(
+            workspace_root=tmp_path,
+            sandbox_home=tmp_path / "home",
+            environment_rpc_socket=tmp_path / "rpc" / "environment.sock",
+        ),
+        environment_service=SimpleNamespace(state_dir=tmp_path / "state"),
+        policy=object(),
+    )
+    parents = {101: 102, 102: 103, 103: 1}
+    command_lines = {
+        102: b"codex\x00exec\x00--json\x00",
+        103: b"node\x00/home/user/.local/bin/codex\x00--yolo\x00exec\x00",
+    }
+
+    def proc_status(path: Path, *, encoding: str = "utf-8") -> str:
+        pid = int(path.parent.name)
+        if path.name == "status" and pid in parents:
+            return f"Name:\ttest\nUid:\t{os.getuid()}\t{os.getuid()}\t{os.getuid()}\t{os.getuid()}\nPPid:\t{parents[pid]}\n"
+        raise FileNotFoundError(path)
+
+    def proc_cmdline(path: Path) -> bytes:
+        pid = int(path.parent.name)
+        if path.name == "cmdline" and pid in command_lines:
+            return command_lines[pid]
+        raise FileNotFoundError(path)
+
+    def proc_executable(path: str) -> str:
+        if path == "/proc/102/exe":
+            raise PermissionError(path)
+        if path == "/proc/103/exe":
+            return "/usr/bin/node-22"
+        raise FileNotFoundError(path)
+
+    monkeypatch.setattr(server, "_proc_start_ticks", lambda pid: str(pid))
+    monkeypatch.setattr(Path, "read_text", proc_status)
+    monkeypatch.setattr(Path, "read_bytes", proc_cmdline)
+    monkeypatch.setattr(os, "readlink", proc_executable)
+
+    identity = server._current_request_process_identity(101)
+
+    assert identity == {"pid": 103, "start_ticks": "103"}
+
+
 def test_local_bridge_uses_owner_resolved_context_without_leaking_grant(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
