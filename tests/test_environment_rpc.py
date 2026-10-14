@@ -603,13 +603,20 @@ def test_host_process_inventory_identifies_unreadable_matching_processes(
         process_manager=manager,
     )
     read_bytes = Path.read_bytes
+    readlink = os.readlink
 
     def hide_owner_environment(path: Path) -> bytes:
         if path == Path(f"/proc/{owner.pid}/environ"):
             raise PermissionError("fixture-hidden process environment")
         return read_bytes(path)
 
+    def report_sandbox_cwd_alias(path: str | os.PathLike[str], *args: object) -> str:
+        if os.fspath(path) == f"/proc/{owner.pid}/cwd":
+            return "/workspace/mncs-compiler/.worktrees/selected"
+        return readlink(path, *args)
+
     monkeypatch.setattr(Path, "read_bytes", hide_owner_environment)
+    monkeypatch.setattr(os, "readlink", report_sandbox_cwd_alias)
     try:
         owner_status = Path(f"/proc/{owner.pid}/status").read_text()
         owner_ppid = int(next(

@@ -2398,11 +2398,49 @@ class EnvironmentRPCServer:
             )
         )
         excluded_pids.update(tracked_excluded_pids)
-        repository_root = (self.config.workspace_root / repository).resolve()
-        scope_root = Path(checkout).resolve(strict=False) if checkout else None
+        workspace_root = self.config.workspace_root.resolve(strict=False)
+        sandbox_workspace_root = Path("/workspace")
+
+        def host_workspace_path(path: Path) -> Path:
+            """Translate the documented sandbox alias back to its host path."""
+            if workspace_root == sandbox_workspace_root:
+                return path
+            try:
+                relative = path.relative_to(sandbox_workspace_root)
+            except ValueError:
+                return path
+            if ".." in relative.parts:
+                return path
+            return workspace_root / relative
+
+        def sandbox_alias(path: Path) -> Path | None:
+            if workspace_root == sandbox_workspace_root:
+                return None
+            try:
+                relative = path.relative_to(workspace_root)
+            except ValueError:
+                return None
+            if ".." in relative.parts:
+                return None
+            return sandbox_workspace_root / relative
+
+        def path_markers(path: Path) -> list[bytes]:
+            markers = [str(path).encode("utf-8")]
+            alias = sandbox_alias(path)
+            if alias is not None:
+                markers.append(str(alias).encode("utf-8"))
+            return markers
+
+        repository_root = host_workspace_path(
+            self.config.workspace_root / repository
+        ).resolve()
+        scope_root = (
+            host_workspace_path(Path(checkout)).resolve(strict=False)
+            if checkout else None
+        )
         owner_marker = owner_session_id.encode("ascii", errors="ignore")
-        repository_marker = str(repository_root).encode("utf-8")
-        scope_marker = str(scope_root).encode("utf-8") if scope_root else None
+        repository_markers = path_markers(repository_root)
+        scope_markers = path_markers(scope_root) if scope_root else []
         module_name = (
             "mncs_" + repository.removeprefix("mncs-").replace("-", "_") + ".server"
         )
@@ -2487,41 +2525,48 @@ class EnvironmentRPCServer:
             reason = None
             if owner_marker and owner_marker in environment:
                 reason = "former-session-environment"
-            elif scope_marker is not None and (
-                    scope_marker in cmdline or scope_marker in environment):
+            elif scope_markers and any(
+                    marker in cmdline or marker in environment
+                    for marker in scope_markers):
                 reason = "selected-worktree-command-or-environment"
             elif scope_root is not None and cwd is not None:
                 try:
-                    Path(cwd).resolve().relative_to(scope_root)
+                    host_workspace_path(Path(cwd)).resolve().relative_to(scope_root)
                     reason = "selected-worktree-working-directory"
                 except (OSError, ValueError):
                     pass
                 if reason is None and executable is not None:
                     try:
-                        Path(executable).resolve().relative_to(scope_root)
+                        host_workspace_path(Path(executable)).resolve().relative_to(
+                            scope_root,
+                        )
                         reason = "selected-worktree-executable"
                     except (OSError, ValueError):
                         pass
-                if reason is None and repository_marker in cmdline:
+                if reason is None and any(
+                        marker in cmdline for marker in repository_markers):
                     # Shared repository-root commands are ambiguous; another
                     # distinct linked worktree is known disjoint below.
                     try:
-                        Path(cwd or "").resolve().relative_to(
+                        host_workspace_path(Path(cwd or "")).resolve().relative_to(
                             repository_root / ".worktrees",
                         )
                     except (OSError, ValueError):
                         mark_incomplete("shared_repository_root_process_ambiguous")
-            elif repository_marker in cmdline or repository_marker in environment:
+            elif any(marker in cmdline or marker in environment
+                     for marker in repository_markers):
                 reason = "repository-command-or-environment"
             elif cwd is not None:
                 try:
-                    Path(cwd).resolve().relative_to(repository_root)
+                    host_workspace_path(Path(cwd)).resolve().relative_to(repository_root)
                     reason = "repository-working-directory"
                 except (OSError, ValueError):
                     pass
             if reason is None and executable is not None:
                 try:
-                    Path(executable).resolve().relative_to(repository_root)
+                    host_workspace_path(Path(executable)).resolve().relative_to(
+                        repository_root,
+                    )
                     reason = "repository-executable"
                 except (OSError, ValueError):
                     pass
