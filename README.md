@@ -87,9 +87,9 @@ journalctl --user -u mncs-control-tunnel.service -f
 
 ### Connector manifest diagnostics
 
-`system_status.server.tool_surface` exposes a non-secret identity for the MCP tool-name surface: `tool_count`, `tool_names_sha256`, and whether the durable experiment, journal context, and Environment continuation APIs are present. `system_status.server.organization_context_configured` reports only whether an organization context reached the MCP child; it never returns the organization ID.
+`system_status.server.tool_surface` describes only the tools registered inside the running Control server. It exposes `tool_count`, `tool_names_sha256`, and whether the durable experiment, journal context, and Environment continuation APIs are registered there. `client_surface_observed` is false because an MCP server cannot inspect the caller's captured Codex tool list. `restart_required` compares the running server with its source checkout; it does not prove that Codex has refreshed its registration. `system_status.server.organization_context_configured` reports only whether an organization context reached the MCP child; it never returns the organization ID.
 
-If a fresh local doctor reports (for example) 86 tools while ChatGPT still exposes an older 50-tool connector manifest, the controller process is not the stale component. Refresh or re-register the ChatGPT connector and compare its visible tool surface again. Do not add an alternate experiment execution route merely to bypass a stale connector manifest.
+If typed `env_*` tools are absent from a caller's MCP snapshot, Environment work still uses the stable project-scoped terminal tools: run `python3 -B -m mncs_env.cli --help` or a supported lifecycle command from the selected Environment project. Control routes these CLI operations through the authenticated Environment RPC and its fixed allowlist; the CLI does not receive canonical Store paths or a general Store write interface. This path does not depend on adding one MCP tool for each Environment capability.
 
 ## Workspace and scope model
 

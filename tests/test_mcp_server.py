@@ -198,6 +198,8 @@ environment_rpc_socket = {str(environment_rpc_socket)!r}
         system = client.call("system_status", {})
         assert system["server"]["tool_surface"]["tool_count"] == len(names)
         assert system["server"]["tool_surface"]["tool_names_sha256"].startswith("sha256:")
+        assert system["server"]["tool_surface"]["registration_scope"] == "control-server"
+        assert system["server"]["tool_surface"]["client_surface_observed"] is False
         assert system["server"]["tool_surface"]["experiment_tools_present"] is True
         assert system["server"]["tool_surface"]["journal_context_tools_present"] is True
         assert system["server"]["tool_surface"]["environment_continuation_tools_present"] is True

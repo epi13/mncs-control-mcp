@@ -111,7 +111,11 @@ def build_server(config: ControlConfig | None = None) -> Any:
             "Protected Fedora developer workspace rooted at the configured Projects directory. "
             "Prefer structured file and Git tools; terminal_exec is the general sandboxed escape "
             "hatch. Project scope is the default. Workspace scope and network access are explicit "
-            "high-impact capabilities. Personal home and credential files are not mounted."
+            "high-impact capabilities. Personal home and credential files are not mounted. "
+            "For authorized Environment lifecycle operations, use the typed `mncs_env.cli` "
+            "entry point inside the selected project; Control forwards only its allowlisted "
+            "operations through authenticated Environment RPC. `system_status` reports this "
+            "server's registrations and cannot observe a Codex client's captured tool list."
         ),
     )
 
@@ -299,7 +303,7 @@ def build_server(config: ControlConfig | None = None) -> Any:
     def file_search(query: str, path: str = ".", glob: str = "*", regex: bool = False, case_sensitive: bool = True, limit: int | None = None) -> dict[str, object]:
         return invoke("file_search", files.search, query, path=path, glob=glob, regex=regex, case_sensitive=case_sensitive, limit=limit)  # type: ignore[return-value]
 
-    @server.tool(name="terminal_exec", description="Run an arbitrary Bash command inside the real Fedora workspace sandbox. Project scope is default; workspace scope and network are explicit.", annotations=annotation(read_only=False, destructive=True, open_world=True), structured_output=True)
+    @server.tool(name="terminal_exec", description="Run Bash inside the real Fedora workspace sandbox. Project scope is default; workspace scope and network are explicit. For Environment lifecycle work, use the typed mncs_env.cli entry point; Control forwards its allowlisted operations through authenticated RPC to canonical Store.", annotations=annotation(read_only=False, destructive=True, open_world=True), structured_output=True)
     def terminal_exec(command: str, cwd: str = ".", scope: str = "project", project: str | None = None, timeout: float | None = None, network: bool | None = None, environment: dict[str, str] | None = None) -> dict[str, object]:
         return invoke("terminal_exec", lambda: sandbox.run(command, scope=scope, project=project, cwd=cwd, timeout_seconds=timeout, network=network, environment=environment).as_dict(), audit_metadata={"command": command, "cwd": cwd, "scope": scope, "project": project, "network": network})  # type: ignore[return-value]
 
@@ -700,9 +704,9 @@ def build_server(config: ControlConfig | None = None) -> Any:
     def env_resume(session_id: str) -> dict[str, object]:
         return invoke("env_resume", environment_sessions.resume, session_id, audit_metadata={"session_id": session_id})  # type: ignore[return-value]
 
-    @server.tool(name="env_claim_acquire", description="Claim one workspace repository for a session; fails when another live session holds it.", annotations=mutate, structured_output=True)
+    @server.tool(name="env_claim_acquire", description="Claim the session's selected worktree. A same-operator orphan is recovered automatically only after Control proves its execution stopped.", annotations=mutate, structured_output=True)
     def env_claim_acquire(session_id: str, repository: str, reason: str = "", basis: str = "explicit-claim", ttl_hours: int = 24) -> dict[str, object]:
-        return invoke("env_claim_acquire", environment_sessions.acquire_claim, session_id, repository, reason=reason, basis=basis, ttl_hours=ttl_hours, audit_metadata={"session_id": session_id, "repository": repository})  # type: ignore[return-value]
+        return invoke("env_claim_acquire", environment_rpc.acquire_claim, session_id, repository, reason=reason, basis=basis, ttl_hours=ttl_hours, audit_metadata={"session_id": session_id, "repository": repository})  # type: ignore[return-value]
 
     @server.tool(name="env_claim_release", description="Release a workspace repository claim held by a session.", annotations=mutate, structured_output=True)
     def env_claim_release(session_id: str, repository: str, reason: str = "") -> dict[str, object]:

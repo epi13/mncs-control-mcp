@@ -13,6 +13,7 @@ import time
 from collections.abc import Callable
 from concurrent.futures import CancelledError, Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import BinaryIO
 
 from .config import ControlConfig
@@ -126,6 +127,7 @@ class ProcessManager:
         self._jobs: dict[str, TerminalJob] = {}
         self._environment_grants: dict[str, object] = {}
         self._claim_recovery_repositories: set[str] = set()
+        self._claim_recovery_checkouts: dict[str, Path] = {}
         self._external_futures: dict[str, Future[object]] = {}
         self._external_results: dict[str, object] = {}
         self._external_processes: dict[str, multiprocessing.Process] = {}
@@ -232,7 +234,10 @@ class ProcessManager:
                     "ENVIRONMENT_OWNER_RECOVERY_ACTIVE",
                     "workspace terminal jobs are paused during an owner claim recovery",
                 )
-            if resolution.project in self._claim_recovery_repositories:
+            if (resolution.project in self._claim_recovery_repositories
+                    and self._cwd_overlaps_claim_recovery(
+                        resolution.project, resolution.host_cwd, command,
+                    )):
                 raise ControlError(
                     "ENVIRONMENT_OWNER_RECOVERY_ACTIVE",
                     "project terminal jobs are paused during an owner claim recovery",
@@ -258,7 +263,10 @@ class ProcessManager:
                     "ENVIRONMENT_OWNER_RECOVERY_ACTIVE",
                     "workspace terminal jobs are paused during an owner claim recovery",
                 )
-            if resolution.project in self._claim_recovery_repositories:
+            if (resolution.project in self._claim_recovery_repositories
+                    and self._cwd_overlaps_claim_recovery(
+                        resolution.project, resolution.host_cwd, command,
+                    )):
                 if rpc is not None:
                     rpc.revoke_grant(rpc_grant)
                 raise ControlError(
@@ -407,6 +415,7 @@ class ProcessManager:
         current_grant_id: str,
         environment_project: str,
         grant_sessions: dict[str, str | None],
+        checkout: str | None = None,
     ) -> list[dict[str, object]]:
         """Return host-owned jobs that could still act on a repository claim."""
         with self._lock:
@@ -423,12 +432,29 @@ class ProcessManager:
                 cwd = job.cwd.lower()
                 related = (
                     job.scope == "workspace"
-                    or job.project == repository
-                    or f"/{repository.lower()}" in cwd
-                    or repository.lower() in command
                     or bound_session_id == owner_session_id
                     or (job.project == environment_project and bound_session_id is None)
                 )
+                if not related and checkout is not None and job.project == repository:
+                    host_root = self.policy.project_path(repository)
+                    sandbox_root = Path("/workspace") / repository
+                    try:
+                        job_host_cwd = host_root / Path(job.cwd).relative_to(sandbox_root)
+                        relative_checkout = Path(checkout).resolve().relative_to(host_root)
+                    except ValueError:
+                        related = True
+                    else:
+                        sandbox_checkout = (sandbox_root / relative_checkout).as_posix().lower()
+                        related = self._path_overlaps_claim_checkout(
+                            host_root, job_host_cwd, Path(checkout),
+                        ) or str(Path(checkout)).lower() in command \
+                            or sandbox_checkout in command or ".." in command
+                elif not related:
+                    related = (
+                        job.project == repository
+                        or f"/{repository.lower()}" in cwd
+                        or repository.lower() in command
+                    )
                 if related:
                     rows.append({
                         "job_id": job.job_id,
@@ -440,8 +466,63 @@ class ProcessManager:
                     })
             return rows
 
-    def begin_claim_recovery(self, repository: str) -> None:
-        """Prevent new terminal work for this repository through claim CAS."""
+    def claim_recovery_request_roots(self, current_grant_id: str) -> list[int]:
+        """Return host PIDs for the one terminal request carrying this grant.
+
+        A CLI lifecycle request reaches Control through a project terminal job.
+        Its own waiting client process must not be mistaken for a live former
+        owner merely because it is running from the checkout being recovered.
+        """
+        with self._lock:
+            roots = {
+                job.process.pid
+                for job in self._jobs.values()
+                if job.status == "running"
+                and job.process is not None
+                and getattr(self._environment_grants.get(job.job_id), "grant_id", None)
+                == current_grant_id
+            }
+        return sorted(roots)
+
+    def _path_overlaps_claim_checkout(
+        self, project_root: Path, candidate: Path, checkout: Path,
+    ) -> bool:
+        """Treat another linked worktree as disjoint; shared roots stay fenced."""
+        candidate = candidate.resolve(strict=False)
+        checkout = checkout.resolve(strict=False)
+        if candidate == checkout or candidate in checkout.parents or checkout in candidate.parents:
+            return True
+        worktree_root = project_root / ".worktrees"
+        try:
+            candidate.relative_to(worktree_root)
+            checkout.relative_to(worktree_root)
+        except ValueError:
+            return True
+        # Both paths are distinct directories under the repository's managed
+        # worktree root. Git coordinates their shared ref updates.
+        return False
+
+    def _cwd_overlaps_claim_recovery(self, repository: str | None,
+                                     host_cwd: Path, command: str) -> bool:
+        if repository is None:
+            return True
+        checkout = getattr(self, "_claim_recovery_checkouts", {}).get(repository)
+        if checkout is None:
+            return True
+        try:
+            relative = checkout.relative_to(self.policy.project_path(repository))
+        except ValueError:
+            return True
+        sandbox_checkout = (Path("/workspace") / repository / relative).as_posix()
+        if (str(checkout) in command or sandbox_checkout in command
+                or ".." in command):
+            return True
+        return self._path_overlaps_claim_checkout(
+            self.policy.project_path(repository), host_cwd, checkout,
+        )
+
+    def begin_claim_recovery(self, repository: str, *, checkout: str | None = None) -> None:
+        """Fence repository work, narrowed to one selected linked worktree when known."""
         with self._lock:
             if repository in self._claim_recovery_repositories:
                 raise ControlError(
@@ -450,10 +531,13 @@ class ProcessManager:
                     details={"repository": repository},
                 )
             self._claim_recovery_repositories.add(repository)
+            if checkout is not None:
+                self._claim_recovery_checkouts[repository] = Path(checkout).resolve(strict=False)
 
     def end_claim_recovery(self, repository: str) -> None:
         with self._lock:
             self._claim_recovery_repositories.discard(repository)
+            self._claim_recovery_checkouts.pop(repository, None)
 
     def record_external(
         self,

@@ -250,6 +250,8 @@ def test_tool_surface_manifest_is_stable_and_detects_experiment_api() -> None:
     assert expected == reordered
     assert expected["tool_count"] == 14
     assert expected["tool_names_sha256"].startswith("sha256:")
+    assert expected["registration_scope"] == "control-server"
+    assert expected["client_surface_observed"] is False
     assert expected["experiment_tools_present"] is True
     assert expected["journal_context_tools_present"] is False
     assert expected["environment_continuation_tools_present"] is False

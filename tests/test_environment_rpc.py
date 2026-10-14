@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import shutil
+import sys
 import subprocess
 import tempfile
 import threading
@@ -376,6 +377,7 @@ def test_process_manager_pauses_project_jobs_during_claim_recovery() -> None:
     )
     manager.policy = SimpleNamespace(resolve_scope=lambda **_kwargs: SimpleNamespace(
         scope="project", project="mncs-compiler",
+        host_cwd=Path("/workspace/mncs-compiler"),
     ))
     manager._lock = threading.RLock()
     manager._claim_recovery_repositories = {"mncs-compiler"}
@@ -390,6 +392,124 @@ def test_process_manager_pauses_project_jobs_during_claim_recovery() -> None:
             network=False,
         )
     assert raised.value.code == "ENVIRONMENT_OWNER_RECOVERY_ACTIVE"
+
+
+def test_worktree_recovery_fence_leaves_disjoint_worktree_jobs_running(
+    tmp_path: Path,
+) -> None:
+    from mncs_control_mcp.processes import ProcessManager
+
+    project = tmp_path / "mncs-compiler"
+    first = project / ".worktrees" / "first"
+    second = project / ".worktrees" / "second"
+    first.mkdir(parents=True)
+    second.mkdir(parents=True)
+    manager = ProcessManager.__new__(ProcessManager)
+    manager._lock = threading.RLock()
+    manager.policy = SimpleNamespace(project_path=lambda _repository: project)
+    manager._claim_recovery_repositories = {"mncs-compiler"}
+    manager._claim_recovery_checkouts = {"mncs-compiler": first}
+    manager._environment_grants = {}
+    manager._jobs = {
+        "first": SimpleNamespace(
+            job_id="first", status="running", command="python test.py",
+            cwd="/workspace/mncs-compiler/.worktrees/first", scope="project",
+            project="mncs-compiler", kind="terminal", process=SimpleNamespace(pid=101),
+        ),
+        "second": SimpleNamespace(
+            job_id="second", status="running", command="python test.py",
+            cwd="/workspace/mncs-compiler/.worktrees/second", scope="project",
+            project="mncs-compiler", kind="terminal", process=SimpleNamespace(pid=102),
+        ),
+    }
+
+    candidates = manager.claim_recovery_job_candidates(
+        "mncs-compiler", owner_session_id="ses_old_owner",
+        current_grant_id="current-grant", environment_project="mncs-environment",
+        grant_sessions={}, checkout=str(first),
+    )
+    assert [item["job_id"] for item in candidates] == ["first"]
+    assert manager._cwd_overlaps_claim_recovery("mncs-compiler", second, "python test.py") is False
+
+
+def test_recovery_process_inventory_excludes_only_its_current_terminal_tree(
+    tmp_path: Path,
+) -> None:
+    from mncs_control_mcp.processes import ProcessManager
+
+    repository = "mncs-compiler"
+    project = tmp_path / repository
+    checkout = project / ".worktrees" / "active"
+    disjoint_checkout = project / ".worktrees" / "disjoint"
+    checkout.mkdir(parents=True)
+    disjoint_checkout.mkdir(parents=True)
+    owner_environment = dict(os.environ)
+    owner_environment["MNCS_TEST_OWNER_SESSION"] = "ses_old_compiler"
+    current = subprocess.Popen(
+        [sys.executable, "-c",
+         "import subprocess,sys,time; subprocess.Popen([sys.executable,'-c','import time; time.sleep(30)']); time.sleep(30)"],
+        cwd=checkout,
+        start_new_session=True,
+    )
+    owner = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        cwd=checkout,
+        env=owner_environment,
+    )
+    disjoint = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)", str(project)],
+        cwd=disjoint_checkout,
+    )
+    manager = ProcessManager.__new__(ProcessManager)
+    manager._lock = threading.RLock()
+    manager._environment_grants = {
+        "current-request": SimpleNamespace(grant_id="grant-current"),
+    }
+    manager._jobs = {
+        "current-request": SimpleNamespace(
+            job_id="current-request", status="running",
+            process=current,
+        ),
+    }
+    server = EnvironmentRPCServer(
+        ControlConfig(
+            workspace_root=tmp_path,
+            sandbox_home=tmp_path / "home",
+            environment_rpc_socket=tmp_path / "rpc" / "environment.sock",
+        ),
+        environment_service=SimpleNamespace(state_dir=tmp_path / "state"),
+        policy=object(),
+        process_manager=manager,
+    )
+    try:
+        (matches, _resident_services, excluded, _process_count,
+         _same_uid_count, _boot_id, complete) = server._host_process_inventory(
+            owner_session_id="ses_old_compiler",
+            repository=repository,
+            checkout=str(checkout),
+            current_grant_id="grant-current",
+        )
+        excluded_ids = {item["pid"] for item in excluded}
+        assert complete is True
+        assert current.pid in excluded_ids
+        assert owner.pid not in excluded_ids
+        assert disjoint.pid not in excluded_ids
+        assert {item["pid"] for item in matches} == {owner.pid}
+    finally:
+        try:
+            os.killpg(current.pid, 15)
+        except ProcessLookupError:
+            pass
+        for process in (current, owner, disjoint):
+            try:
+                process.terminate()
+            except ProcessLookupError:
+                pass
+            try:
+                process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=3)
 
 
 def test_claim_recovery_request_tracks_selected_continuation_session() -> None:
@@ -439,6 +559,7 @@ def test_claim_recovery_refuses_a_live_former_owner_process(
         state_dir=tmp_path / "state",
         _pkg=lambda: SimpleNamespace(claims=SimpleNamespace(
             active_claims=lambda _records: {claim["claim_id"]: claim},
+            scopes_conflict=lambda left, right: "overlap" if left == right else "overlap",
             _alive=lambda _claim: True,
         )),
         _store=lambda _pkg: Store(),
@@ -459,6 +580,7 @@ def test_claim_recovery_refuses_a_live_former_owner_process(
     )
     observation = {
         "jobs": [], "grants": [], "active_requests": 0,
+        "current_request_processes_excluded": [],
         "processes": [{"pid": 777, "reason": "former-session-environment"}],
         "processes_examined": 4, "same_uid_processes_examined": 2,
         "host_boot_id": "00000000-0000-0000-0000-000000000000",
@@ -501,6 +623,241 @@ def test_claim_recovery_refuses_a_live_former_owner_process(
     service.recover_claim.assert_not_called()
     server.process_manager.end_claim_recovery.assert_called_once_with("mncs-compiler")
     assert "ses_old_compiler" not in server._fenced_sessions
+
+
+def test_ordinary_claim_acquisition_builds_same_operator_worktree_recovery(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "mncs-compiler"
+    checkout = project / ".worktrees" / "fresh-campaign"
+    checkout.mkdir(parents=True)
+    repository = "mncs-compiler"
+    owner_scope = {
+        "kind": "repository", "repository": repository, "checkout": None,
+        "branch": None, "paths": None, "exclusive": True,
+    }
+    claim = {
+        "claim_id": "claim:mncs-compiler", "version": 7, "status": "held",
+        "repository": repository, "session_id": "ses_old_owner",
+        "consumer_id": "old-agent", "scope": owner_scope,
+    }
+    principal = "same-local-operator"
+    requester_snapshot = {
+        "session_id": "ses_requester",
+        "authenticated_principal_id": principal,
+        "campaign": {"identity": "cmp_fresh_compiler"},
+        "workspace": {"root": str(project)},
+        "selected_checkouts": {repository: {
+            "path": str(checkout), "branch": "campaign/fresh", "clean": True,
+        }},
+    }
+    owner_snapshot = {
+        "session_id": "ses_old_owner",
+        "authenticated_principal_id": principal,
+    }
+
+    class Store:
+        def load_snapshot(self, session_id: str) -> dict:
+            return requester_snapshot if session_id == "ses_requester" else owner_snapshot
+
+        def read_claims(self) -> list[dict]:
+            return [claim]
+
+        def close(self) -> None:
+            pass
+
+    claims_api = SimpleNamespace(
+        normalize_scope=lambda scope, repo: {
+            "kind": scope.get("kind", "repository"),
+            "repository": repo,
+            "checkout": scope.get("checkout") if scope.get("kind") == "worktree" else None,
+            "branch": scope.get("branch"),
+            "paths": None,
+            "exclusive": bool(scope.get("exclusive", scope.get("kind") == "repository")),
+        },
+        active_claims=lambda _records: {claim["claim_id"]: claim},
+        scopes_conflict=lambda left, right: (
+            "repository-wide scope overlaps every checkout"
+            if right.get("kind") == "repository"
+            else "same checkout" if left.get("checkout") == right.get("checkout") else None
+        ),
+    )
+    package = SimpleNamespace(
+        claims=claims_api,
+        sessions=SimpleNamespace(Session=lambda _store, _session: SimpleNamespace(
+            effective_authority=lambda: {
+                "writable": [repository], "protected_repositories": [],
+            },
+        )),
+    )
+    service = SimpleNamespace(
+        state_dir=tmp_path / "state",
+        _pkg=lambda: package,
+        _store=lambda _pkg: Store(),
+    )
+    server = EnvironmentRPCServer(
+        ControlConfig(
+            workspace_root=tmp_path,
+            sandbox_home=tmp_path / "home",
+            environment_rpc_socket=tmp_path / "rpc" / "environment.sock",
+        ),
+        environment_service=service,
+        policy=object(),
+    )
+    record = _GrantRecord(
+        grant_id="same-principal-auto-recovery",
+        principal_id=principal,
+        host_root=project,
+        sandbox_root="/workspace/mncs-compiler",
+        scope="project",
+        uid=os.getuid(),
+        expires_at=time.monotonic() + 60,
+        token_file=tmp_path / "grant",
+        bound_session_id="ses_requester",
+    )
+    server._perform_claim_recovery = mock.Mock(return_value={
+        "status": "recovered", "claim": {"claim_id": "claim:mncs-compiler:worktree"},
+    })
+
+    result = server._auto_recover_same_operator_claim(
+        ["claims", "ses_requester", "--acquire", repository],
+        record=record,
+        request_id="req_ordinary_claim",
+    )
+
+    assert result["status"] == "recovered"
+    request = server._perform_claim_recovery.call_args.args[0]
+    assert request["claim_id"] == claim["claim_id"]
+    assert request["expected_version"] == claim["version"]
+    assert request["recovery_basis"] == "same-principal-host-liveness"
+    assert request["approval_reference"] is None
+    assert request["owner_scope"] == owner_scope
+    assert request["target_scope"] == {
+        "kind": "worktree", "repository": repository,
+        "checkout": str(checkout), "branch": "campaign/fresh",
+        "paths": None, "exclusive": False,
+    }
+    owner_snapshot["authenticated_principal_id"] = "another-operator"
+    assert server._auto_recover_same_operator_claim(
+        ["claims", "ses_requester", "--acquire", repository],
+        record=record,
+        request_id="req_foreign_owner_claim",
+    ) is None
+    server._perform_claim_recovery.assert_called_once()
+
+
+def test_same_operator_recovery_uses_host_liveness_and_narrows_scope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = "mncs-compiler"
+    checkout = tmp_path / "mncs-compiler" / ".worktrees" / "recovered"
+    checkout.mkdir(parents=True)
+    owner_scope = {
+        "kind": "repository", "repository": repository, "checkout": None,
+        "branch": None, "paths": None, "exclusive": True,
+    }
+    target_scope = {
+        "kind": "worktree", "repository": repository,
+        "checkout": str(checkout), "branch": "campaign/recovered",
+        "paths": None, "exclusive": False,
+    }
+    claim = {
+        "claim_id": "claim:mncs-compiler", "version": 7, "status": "held",
+        "repository": repository, "session_id": "ses_old_owner",
+        "consumer_id": "old-agent", "scope": owner_scope,
+    }
+
+    class Store:
+        def load_snapshot(self, session_id: str) -> dict:
+            if session_id == "ses_new_owner":
+                return {
+                    "authenticated_principal_id": "same-operator",
+                    "campaign": {"identity": "cmp_new_compiler"},
+                }
+            return {"authenticated_principal_id": "same-operator"}
+
+        def read_claims(self) -> list[dict]:
+            return [claim]
+
+        def close(self) -> None:
+            pass
+
+    claims_api = SimpleNamespace(
+        active_claims=lambda _records: {claim["claim_id"]: claim},
+        scopes_conflict=lambda left, right: (
+            "repository-wide scope overlaps every checkout"
+            if left.get("kind") == "repository" or right.get("kind") == "repository"
+            else "same checkout" if left.get("checkout") == right.get("checkout") else None
+        ),
+        _alive=lambda _claim: True,
+    )
+    service = SimpleNamespace(
+        state_dir=tmp_path / "state",
+        _pkg=lambda: SimpleNamespace(claims=claims_api),
+        _store=lambda _pkg: Store(),
+        recover_claim=mock.Mock(return_value={
+            "status": "recovered", "claim": {"claim_id": "claim:scoped"},
+        }),
+    )
+    process_manager = SimpleNamespace(
+        begin_claim_recovery=mock.Mock(),
+        end_claim_recovery=mock.Mock(),
+    )
+    server = EnvironmentRPCServer(
+        ControlConfig(
+            workspace_root=tmp_path,
+            sandbox_home=tmp_path / "home",
+            environment_rpc_socket=tmp_path / "rpc" / "environment.sock",
+        ),
+        environment_service=service,
+        policy=object(),
+        process_manager=process_manager,
+    )
+    record = _GrantRecord(
+        grant_id="fresh-session-grant", principal_id="same-operator",
+        host_root=tmp_path / "mncs-compiler",
+        sandbox_root="/workspace/mncs-compiler", scope="project",
+        uid=os.getuid(), expires_at=time.monotonic() + 60,
+        token_file=tmp_path / "grant",
+    )
+    observation = {
+        "jobs": [], "grants": [], "active_requests": 0,
+        "current_request_processes_excluded": [],
+        "processes": [], "processes_examined": 12,
+        "same_uid_processes_examined": 4,
+        "host_boot_id": "00000000-0000-0000-0000-000000000000",
+        "process_complete": True, "services": [], "user_units_examined": 3,
+        "services_complete": True, "resident_services": [],
+    }
+    monkeypatch.setattr(server, "_recovery_liveness_snapshot", lambda **_kwargs: observation)
+    monkeypatch.setattr(server, "_proc_start_ticks", lambda _pid: "1200")
+    monkeypatch.setattr(server, "_revoke_owner_session_grants", lambda _owner: 0)
+
+    result = server._perform_claim_recovery(
+        {
+            "session_id": "ses_new_owner", "campaign_id": "cmp_new_compiler",
+            "claim_id": claim["claim_id"], "repository": repository,
+            "owner_session_id": claim["session_id"],
+            "owner_consumer_id": claim["consumer_id"],
+            "expected_version": claim["version"],
+            "owner_scope": owner_scope, "target_scope": target_scope,
+            "recovery_basis": "same-principal-host-liveness",
+            "approval_reference": None, "reason": "resume abandoned work",
+        },
+        record=record,
+        request_id="req_auto_recover_scope",
+    )
+
+    assert result["status"] == "recovered"
+    authorization = service.recover_claim.call_args.kwargs["authorization"]
+    assert authorization["schema_version"] == "mncs.environment.control-owner-claim-recovery/2"
+    assert authorization["recovery_basis"] == "same-principal-host-liveness"
+    assert authorization["operator_approval_reference"] is None
+    assert authorization["owner_scope"] == owner_scope
+    assert authorization["target_scope"] == target_scope
+    assert authorization["host_observation"]["complete"] is True
+    process_manager.begin_claim_recovery.assert_called_once_with(repository)
+    process_manager.end_claim_recovery.assert_called_once_with(repository)
 
 
 def test_rpc_accepts_bounded_campaign_metadata_and_rejects_oversized_arguments(

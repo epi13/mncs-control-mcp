@@ -45,6 +45,8 @@ def tool_surface_manifest(names: Iterable[str]) -> dict[str, Any]:
     digest = hashlib.sha256(("\n".join(ordered) + "\n").encode("utf-8")).hexdigest()
     return {
         "schema": "mncs-control.tool-surface.v0.1",
+        "registration_scope": "control-server",
+        "client_surface_observed": False,
         "tool_count": len(ordered),
         "tool_names_sha256": f"sha256:{digest}",
         "experiment_tools_present": _EXPERIMENT_TOOLS <= set(ordered),

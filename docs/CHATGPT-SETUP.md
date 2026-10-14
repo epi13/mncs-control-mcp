@@ -259,11 +259,15 @@ The same value can be stored as `CONTROL_PLANE_ORGANIZATION_ID` in
 organization context as a required failure and passes it to `tunnel-client
 doctor`, preventing a misleading locally healthy / remotely unauthorized state.
 
-For connector-schema troubleshooting, compare the ChatGPT-visible tool list with
-`system_status.server.tool_surface`. The server reports a stable tool count and
-SHA-256 over sorted tool names. A mismatch means the remote connector registration
-is stale even if Control's runtime/source revisions match; refresh or re-register
-the connector instead of changing Harness/Fabric execution semantics.
+`system_status.server.tool_surface` describes Control's own registered tools and
+cannot inspect the calling Codex process's captured tool list. `restart_required`
+compares the running Control child with its source checkout; neither field proves
+that the MCP client refreshed its schema. If typed `env_*` tools are absent from
+the caller, use the already-registered project terminal tool to run
+`python3 -B -m mncs_env.cli ...` from the authorized project. Control forwards
+only its fixed Environment CLI allowlist through authenticated RPC, so normal
+entry, checkpoint, claim, and continuation work does not depend on refreshing
+one MCP registration for each new Environment operation.
 
 ## Updates
 

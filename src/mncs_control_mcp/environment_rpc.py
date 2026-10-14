@@ -1251,10 +1251,21 @@ class EnvironmentRPCServer:
         session_id = str(recovery_request["session_id"])
         owner_session_id = str(recovery_request["owner_session_id"])
         repository = str(recovery_request["repository"])
+        source_scope = recovery_request.get("owner_scope")
+        source_checkout = (
+            str(source_scope.get("checkout"))
+            if isinstance(source_scope, dict)
+            and source_scope.get("kind") == "worktree"
+            and isinstance(source_scope.get("checkout"), str)
+            else None
+        )
         claim_id = str(recovery_request["claim_id"])
         expected_version = int(recovery_request["expected_version"])
         campaign_id = str(recovery_request["campaign_id"])
-        approval_reference = str(recovery_request["approval_reference"])
+        recovery_basis = str(recovery_request.get(
+            "recovery_basis", "operator-approved-config",
+        ))
+        approval_reference = recovery_request.get("approval_reference")
         owner_consumer_id = str(recovery_request["owner_consumer_id"])
 
         with self._lock:
@@ -1276,7 +1287,10 @@ class EnvironmentRPCServer:
                 "Control cannot fence new project jobs during claim recovery",
             )
         try:
-            begin_repository_fence(repository)
+            if source_checkout is None:
+                begin_repository_fence(repository)
+            else:
+                begin_repository_fence(repository, checkout=source_checkout)
         except ControlError:
             with self._lock:
                 self._fenced_sessions.discard(owner_session_id)
@@ -1307,25 +1321,36 @@ class EnvironmentRPCServer:
                         or requester_snapshot.get("authenticated_principal_id") != record.principal_id):
                     raise ControlError(
                         "ENVIRONMENT_AUTHORITY_DENIED",
-                        "the recovery requester no longer matches the approved campaign principal",
+                        "the recovery requester no longer matches the authenticated campaign principal",
                     )
+                owner_scope = latest.get("scope") if isinstance(latest, dict) else None
+                target_scope = recovery_request.get("target_scope", owner_scope)
                 if (not isinstance(latest, dict)
                         or latest.get("status") != "held"
                         or latest.get("version") != expected_version
                         or latest.get("repository") != repository
                         or latest.get("session_id") != owner_session_id
                         or latest.get("consumer_id") != owner_consumer_id
-                        or latest.get("scope", {}).get("kind") != "repository"
-                        or latest.get("scope", {}).get("exclusive") is not True):
+                        or not isinstance(owner_scope, dict)
+                        or owner_scope != recovery_request.get("owner_scope", owner_scope)
+                        or not isinstance(target_scope, dict)
+                        or pkg.claims.scopes_conflict(owner_scope, target_scope) is None):
                     raise ControlError(
                         "ENVIRONMENT_CLAIM_CONFLICT",
-                        "canonical Store no longer contains the exact approved held claim generation",
+                        "canonical Store no longer contains the exact overlapping held claim generation",
                         details={"claim_id": claim_id, "expected_version": expected_version},
+                    )
+                if (recovery_basis == "same-principal-host-liveness"
+                        and owner_snapshot.get("authenticated_principal_id")
+                        != record.principal_id):
+                    raise ControlError(
+                        "ENVIRONMENT_AUTHORITY_DENIED",
+                        "automatic claim recovery is limited to the same authenticated operator",
                     )
                 if not pkg.claims._alive(latest):
                     raise ControlError(
                         "ENVIRONMENT_CLAIM_CONFLICT",
-                        "the approved claim lease is no longer active",
+                        "the claim lease is no longer active",
                     )
             finally:
                 store.close()
@@ -1335,6 +1360,7 @@ class EnvironmentRPCServer:
                 repository=repository,
                 current_request_id=request_id,
                 current_grant_id=record.grant_id,
+                checkout=source_checkout,
             )
             if not before["process_complete"] or not before["services_complete"]:
                 raise ControlError(
@@ -1363,6 +1389,7 @@ class EnvironmentRPCServer:
                 repository=repository,
                 current_request_id=request_id,
                 current_grant_id=record.grant_id,
+                checkout=source_checkout,
             )
             if (not after["process_complete"] or not after["services_complete"]
                     or after["jobs"] or after["grants"] or after["active_requests"]
@@ -1380,7 +1407,7 @@ class EnvironmentRPCServer:
                 )
 
             host_observation: dict[str, Any] = {
-                "schema_version": "mncs.control.host-execution-liveness/1",
+                "schema_version": "mncs.control.host-execution-liveness/2",
                 "observed_at": datetime.now(UTC).isoformat(timespec="seconds"),
                 "host_boot_id": str(after["host_boot_id"]),
                 "control_owner_pid": os.getpid(),
@@ -1393,6 +1420,9 @@ class EnvironmentRPCServer:
                 "active_owner_grants": len(after["grants"]),
                 "revoked_owner_grants": revoked,
                 "active_owner_requests": int(after["active_requests"]),
+                "current_request_processes_excluded": after[
+                    "current_request_processes_excluded"
+                ],
                 "matching_processes": after["processes"],
                 "matching_user_services": after["services"],
                 "resident_services": after["resident_services"],
@@ -1404,16 +1434,19 @@ class EnvironmentRPCServer:
                     "Control host process identity could not be established",
                 )
             authorization: dict[str, Any] = {
-                "schema_version": "mncs.environment.control-owner-claim-recovery/1",
+                "schema_version": "mncs.environment.control-owner-claim-recovery/2",
                 "campaign_id": campaign_id,
                 "requester_session_id": session_id,
                 "requester_principal_id": record.principal_id,
+                "recovery_basis": recovery_basis,
                 "operator_approval_reference": approval_reference,
                 "claim_id": claim_id,
                 "repository": repository,
                 "expected_claim_version": expected_version,
                 "owner_session_id": owner_session_id,
                 "owner_consumer_id": owner_consumer_id,
+                "owner_scope": owner_scope,
+                "target_scope": target_scope,
                 "host_observation": host_observation,
                 "host_observation_digest": self._digest_object(host_observation),
             }
@@ -1421,7 +1454,8 @@ class EnvironmentRPCServer:
                 key: authorization[key]
                 for key in (
                     "schema_version", "campaign_id", "requester_session_id",
-                    "requester_principal_id", "operator_approval_reference",
+                    "requester_principal_id", "recovery_basis",
+                    "operator_approval_reference", "owner_scope", "target_scope",
                     "claim_id", "repository", "expected_claim_version",
                     "owner_session_id", "owner_consumer_id",
                 )
@@ -1693,7 +1727,9 @@ class EnvironmentRPCServer:
 
     def _host_process_inventory(
         self, *, owner_session_id: str, repository: str,
-    ) -> tuple[list[dict[str, object]], list[dict[str, object]], int, int, str | None, bool]:
+        checkout: str | None = None, current_grant_id: str,
+    ) -> tuple[list[dict[str, object]], list[dict[str, object]],
+               list[dict[str, object]], int, int, str | None, bool]:
         """Inspect the Control host's same-UID process view for retained work."""
         proc_root = Path("/proc")
         try:
@@ -1702,22 +1738,30 @@ class EnvironmentRPCServer:
                 encoding="ascii"
             ).strip()
         except OSError:
-            return [], [], 0, 0, None, False
+            return [], [], [], 0, 0, None, False
+        excluded_pids, excluded_processes, exclusion_complete = (
+            self._current_request_process_inventory(current_grant_id, entries)
+        )
         repository_root = (self.config.workspace_root / repository).resolve()
+        scope_root = Path(checkout).resolve(strict=False) if checkout else None
         owner_marker = owner_session_id.encode("ascii", errors="ignore")
         repository_marker = str(repository_root).encode("utf-8")
+        scope_marker = str(scope_root).encode("utf-8") if scope_root else None
         module_name = (
             "mncs_" + repository.removeprefix("mncs-").replace("-", "_") + ".server"
         )
         matches: list[dict[str, object]] = []
         resident_services: list[dict[str, object]] = []
         same_uid_examined = 0
-        complete = bool(re.fullmatch(r"[0-9a-f-]{36}", boot_id))
+        complete = (bool(re.fullmatch(r"[0-9a-f-]{36}", boot_id))
+                    and exclusion_complete)
         for entry in entries:
             if not entry.name.isdigit():
                 continue
             pid = int(entry.name)
             if pid == os.getpid():
+                continue
+            if pid in excluded_pids:
                 continue
             try:
                 status = (entry / "status").read_text(encoding="utf-8")
@@ -1769,6 +1813,30 @@ class EnvironmentRPCServer:
             reason = None
             if owner_marker and owner_marker in environment:
                 reason = "former-session-environment"
+            elif scope_marker is not None and (
+                    scope_marker in cmdline or scope_marker in environment):
+                reason = "selected-worktree-command-or-environment"
+            elif scope_root is not None and cwd is not None:
+                try:
+                    Path(cwd).resolve().relative_to(scope_root)
+                    reason = "selected-worktree-working-directory"
+                except (OSError, ValueError):
+                    pass
+                if reason is None and executable is not None:
+                    try:
+                        Path(executable).resolve().relative_to(scope_root)
+                        reason = "selected-worktree-executable"
+                    except (OSError, ValueError):
+                        pass
+                if reason is None and repository_marker in cmdline:
+                    # Shared repository-root commands are ambiguous; another
+                    # distinct linked worktree is known disjoint below.
+                    try:
+                        Path(cwd or "").resolve().relative_to(
+                            repository_root / ".worktrees",
+                        )
+                    except (OSError, ValueError):
+                        complete = False
             elif repository_marker in cmdline or repository_marker in environment:
                 reason = "repository-command-or-environment"
             elif cwd is not None:
@@ -1820,12 +1888,64 @@ class EnvironmentRPCServer:
                 # A repository-associated process with hidden session context
                 # cannot be proved unrelated to the displaced owner.
                 complete = False
-        return (matches, resident_services,
+        return (matches, resident_services, excluded_processes,
                 len([item for item in entries if item.name.isdigit()]),
                 same_uid_examined, boot_id, complete)
 
+    def _current_request_process_inventory(
+        self, current_grant_id: str, entries: list[Path],
+    ) -> tuple[set[int], list[dict[str, object]], bool]:
+        """Identify the active terminal request tree by its host-owned grant."""
+        roots_method = getattr(
+            self.process_manager, "claim_recovery_request_roots", None,
+        )
+        if not callable(roots_method):
+            return set(), [], False
+        roots = set(roots_method(current_grant_id))
+        if not roots:
+            return set(), [], True
+        parents: dict[int, int] = {}
+        complete = True
+        present = {int(entry.name): entry for entry in entries if entry.name.isdigit()}
+        for pid, entry in present.items():
+            try:
+                status = (entry / "status").read_text(encoding="utf-8")
+                uid_line = next(
+                    line for line in status.splitlines() if line.startswith("Uid:")
+                )
+                if int(uid_line.split()[1]) != os.getuid():
+                    continue
+                parent_line = next(
+                    line for line in status.splitlines() if line.startswith("PPid:")
+                )
+                parents[pid] = int(parent_line.split()[1])
+            except (OSError, StopIteration, ValueError, IndexError):
+                if entry.exists():
+                    complete = False
+        missing_roots = [pid for pid in roots if pid in present and pid not in parents]
+        if missing_roots:
+            complete = False
+        excluded = {pid for pid in roots if pid in parents}
+        while True:
+            descendants = {
+                pid for pid, parent in parents.items()
+                if parent in excluded and pid not in excluded
+            }
+            if not descendants:
+                break
+            excluded.update(descendants)
+        identities: list[dict[str, object]] = []
+        for pid in sorted(excluded):
+            start_ticks = self._proc_start_ticks(pid)
+            if start_ticks is None:
+                complete = False
+                continue
+            identities.append({"pid": pid, "start_ticks": start_ticks})
+        return excluded, identities, complete
+
     def _matching_user_services(
         self, *, owner_session_id: str, repository: str,
+        checkout: str | None = None,
     ) -> tuple[list[str], int, bool]:
         try:
             completed = subprocess.run(
@@ -1840,13 +1960,15 @@ class EnvironmentRPCServer:
         lines = [line.strip() for line in completed.stdout.splitlines() if line.strip()]
         matches = [
             line[:240] for line in lines
-            if owner_session_id in line or repository.lower() in line.lower()
+            if owner_session_id in line
+            or (checkout and checkout.lower() in line.lower())
+            or (checkout is None and repository.lower() in line.lower())
         ]
         return matches, len(lines), True
 
     def _recovery_liveness_snapshot(
         self, *, owner_session_id: str, repository: str, current_request_id: str,
-        current_grant_id: str,
+        current_grant_id: str, checkout: str | None = None,
     ) -> dict[str, Any]:
         if self.process_manager is None:
             raise ControlError(
@@ -1868,20 +1990,23 @@ class EnvironmentRPCServer:
                 "environment", "mncs-environment",
             ),
             grant_sessions=grant_sessions,
+            checkout=checkout,
         )
         with self._request_condition:
             active_requests = sum(
                 1 for request_id, session_id in self._active_request_sessions.items()
                 if session_id == owner_session_id and request_id != current_request_id
             )
-        (processes, resident_services, process_count, same_uid_count,
-         boot_id, process_complete) = (
+        (processes, resident_services, excluded_request_processes,
+         process_count, same_uid_count, boot_id, process_complete) = (
             self._host_process_inventory(
                 owner_session_id=owner_session_id, repository=repository,
+                checkout=checkout, current_grant_id=current_grant_id,
             )
         )
         services, service_count, services_complete = self._matching_user_services(
             owner_session_id=owner_session_id, repository=repository,
+            checkout=checkout,
         )
         return {
             "jobs": jobs,
@@ -1889,6 +2014,7 @@ class EnvironmentRPCServer:
             "active_requests": active_requests,
             "processes": processes,
             "resident_services": resident_services,
+            "current_request_processes_excluded": excluded_request_processes,
             "processes_examined": process_count,
             "same_uid_processes_examined": same_uid_count,
             "host_boot_id": boot_id,
@@ -2120,6 +2246,170 @@ class EnvironmentRPCServer:
                 details={"session_id": session_id},
             )
 
+    def _auto_recover_same_operator_claim(
+        self, argv: list[str], *, record: _GrantRecord, request_id: str,
+    ) -> dict[str, Any] | None:
+        """Recover one exact conflicting scope when its same-operator owner is gone.
+
+        This is part of ordinary claim acquisition. It is limited to a single
+        overlapping claim for the authenticated principal, the selected
+        session's writable repository, and a complete Control host-liveness
+        observation. Foreign owners and ambiguous overlap remain protected.
+        """
+        if not argv or argv[0] != "claims" or len(argv) < 3:
+            return
+        if record.scope != "project":
+            return
+        acquire_indexes = [
+            index for index, item in enumerate(argv)
+            if item == "--acquire" and index + 1 < len(argv)
+        ]
+        acquire_values = [
+            item.partition("=")[2] for item in argv
+            if item.startswith("--acquire=")
+        ]
+        if len(acquire_indexes) + len(acquire_values) != 1:
+            return
+        repository = (
+            argv[acquire_indexes[0] + 1]
+            if acquire_indexes else acquire_values[0]
+        )
+        session_id = argv[1]
+        if (not re.fullmatch(r"ses_[A-Za-z0-9_-]{1,120}", session_id)
+                or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,119}", repository)):
+            return
+        if self._project_repository(record) != repository:
+            return
+        # Keep explicit custom scopes and recovery policies on their existing
+        # paths; this routine handles only the ordinary selected-checkout lease.
+        if any(item == "--scope" or item.startswith("--scope=") for item in argv):
+            return
+        basis_values: list[str] = []
+        for index, item in enumerate(argv):
+            if item == "--basis" and index + 1 < len(argv):
+                basis_values.append(argv[index + 1])
+            elif item.startswith("--basis="):
+                basis_values.append(item.partition("=")[2])
+        if basis_values and basis_values != ["explicit-claim"]:
+            return
+
+        package_loader = getattr(self.environment_service, "_pkg", None)
+        store_factory = getattr(self.environment_service, "_store", None)
+        if not callable(package_loader) or not callable(store_factory):
+            return
+        pkg = package_loader()
+        store = store_factory(pkg)
+        try:
+            requester_snapshot = store.load_snapshot(session_id)
+            if (not isinstance(requester_snapshot, dict)
+                    or requester_snapshot.get("authenticated_principal_id")
+                    != record.principal_id):
+                return
+            requester = pkg.sessions.Session(store, session_id)
+            authority = requester.effective_authority()
+            if (repository in authority.get("protected_repositories", [])
+                    or repository not in authority.get("writable", [])):
+                return
+            selected = requester_snapshot.get("selected_checkouts", {}).get(repository)
+            if isinstance(selected, dict) and isinstance(selected.get("path"), str):
+                checkout = Path(selected["path"])
+                if not checkout.is_absolute():
+                    root = Path(str(requester_snapshot.get("workspace", {}).get("root", "")))
+                    checkout = root / checkout
+                target_scope = pkg.claims.normalize_scope({
+                    "kind": "worktree",
+                    "checkout": str(checkout.resolve(strict=True)),
+                    "branch": selected.get("branch"),
+                    "exclusive": False,
+                }, repository)
+            else:
+                target_scope = pkg.claims.normalize_scope(None, repository)
+
+            active = pkg.claims.active_claims(store.read_claims())
+            conflicts = [
+                (claim_id, claim) for claim_id, claim in active.items()
+                if claim.get("session_id") != session_id
+                and claim.get("repository") == repository
+                and pkg.claims.scopes_conflict(target_scope, claim.get("scope", {}))
+                is not None
+            ]
+            if len(conflicts) != 1:
+                return
+            claim_id, owner = conflicts[0]
+            owner_session_id = owner.get("session_id")
+            if not isinstance(owner_session_id, str) or not owner_session_id:
+                return
+            owner_snapshot = store.load_snapshot(owner_session_id)
+            if (not isinstance(owner_snapshot, dict)
+                    or owner_snapshot.get("authenticated_principal_id")
+                    != record.principal_id):
+                return
+            campaign_id = (requester_snapshot.get("campaign") or {}).get("identity")
+            if not isinstance(campaign_id, str) or not campaign_id:
+                return
+            recovery_request = {
+                "session_id": session_id,
+                "campaign_id": campaign_id,
+                "claim_id": claim_id,
+                "repository": repository,
+                "owner_session_id": owner_session_id,
+                "owner_consumer_id": str(owner.get("consumer_id", "")),
+                "expected_version": int(owner.get("version", 0)),
+                "owner_scope": dict(owner.get("scope", {})),
+                "target_scope": target_scope,
+                "recovery_basis": "same-principal-host-liveness",
+                "approval_reference": None,
+                "reason": "same operator resumed this selected scope after Control proved no owner execution remained",
+            }
+            recovery_request_id = "req_" + hashlib.sha256(
+                f"{request_id}:{claim_id}:{owner.get('version')}:{target_scope}".encode()
+            ).hexdigest()[:32]
+        finally:
+            close = getattr(store, "close", None)
+            if callable(close):
+                close()
+        return self._perform_claim_recovery(
+            recovery_request,
+            record=record,
+            request_id=recovery_request_id,
+        )
+
+    def acquire_claim(
+        self, session_id: str, repository: str, *, reason: str = "",
+        basis: str = "explicit-claim", ttl_hours: int = 24,
+    ) -> dict[str, Any]:
+        """Apply the same host-fenced orphan recovery to the typed Control tool."""
+        root = Path(self.config.workspace_root).expanduser().resolve(strict=True)
+        project_root = (root / repository).resolve(strict=True)
+        if project_root.parent != root or not project_root.is_dir():
+            raise ControlError(
+                "ENVIRONMENT_PROJECT_UNKNOWN",
+                "claim acquisition requires one configured project checkout",
+            )
+        record = _GrantRecord(
+            grant_id="mcp-" + secrets.token_hex(12),
+            principal_id=self.principal_id,
+            host_root=project_root,
+            sandbox_root=f"/workspace/{repository}",
+            scope="project",
+            uid=os.getuid(),
+            expires_at=time.monotonic() + 30,
+            token_file=self.token_root / "typed-claim-operation",
+            bound_session_id=session_id,
+        )
+        recovered = self._auto_recover_same_operator_claim(
+            ["claims", session_id, "--acquire", repository,
+             "--reason", reason, "--basis", basis],
+            record=record,
+            request_id="req_" + secrets.token_hex(16),
+        )
+        if recovered is not None:
+            return recovered["claim"]
+        return self.environment_service.acquire_claim(
+            session_id, repository, reason=reason, basis=basis,
+            ttl_hours=ttl_hours,
+        )
+
     def _dispatch_once(self, request: dict[str, Any], *, peer_uid: int) -> dict[str, Any]:
         record = self._grant(request, peer_uid)
         client_cwd = request.get("cwd")
@@ -2281,6 +2571,17 @@ class EnvironmentRPCServer:
                             "claim transfer needs exactly one target session",
                         )
                     self._authorize_session(transfer_target, record.principal_id)
+                recovered = self._auto_recover_same_operator_claim(
+                    argv, record=record, request_id=request_id,
+                )
+                if recovered is not None:
+                    return {"ok": True, "result": {
+                        "stdout": json.dumps(
+                            recovered["claim"], ensure_ascii=False, sort_keys=True,
+                        ),
+                        "stderr": "",
+                        "exit_code": 0,
+                    }}
         cli_source = self.environment_service.environment_path
         program = "from mncs_env.cli import main; raise SystemExit(main())"
         process_env = {
