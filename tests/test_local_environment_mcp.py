@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -150,6 +152,45 @@ def test_local_rpc_bootstrap_binds_capability_to_process_and_working_tree(
             }, peer_uid=os.getuid(), peer_pid=os.getpid())
     finally:
         server.close()
+
+
+def test_current_request_liveness_uses_only_verified_codex_ancestor(
+    tmp_path: Path,
+) -> None:
+    assert EnvironmentRPCServer._looks_like_codex_process(
+        "/usr/bin/codex", ["codex", "exec"],
+    )
+    assert not EnvironmentRPCServer._looks_like_codex_process(
+        "/usr/bin/python3", ["python3", "-m", "mncs_control_mcp.local_environment_mcp"],
+    )
+
+    process = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(10)"],
+        cwd=tmp_path,
+    )
+    server = EnvironmentRPCServer(
+        ControlConfig(
+            workspace_root=tmp_path,
+            sandbox_home=tmp_path / "home",
+            environment_rpc_socket=tmp_path / "rpc" / "environment.sock",
+        ),
+        environment_service=SimpleNamespace(state_dir=tmp_path / "state"),
+        policy=object(),
+    )
+    try:
+        identity = server._current_request_process_identity(process.pid)
+        assert identity is not None
+        assert identity["start_ticks"] == server._proc_start_ticks(identity["pid"])
+        if identity["pid"] == process.pid:
+            assert identity["start_ticks"] == server._proc_start_ticks(process.pid)
+        else:
+            executable = os.readlink(f"/proc/{identity['pid']}/exe")
+            argv = [item.decode("utf-8", errors="replace") for item in
+                    Path(f"/proc/{identity['pid']}/cmdline").read_bytes().split(b"\x00") if item]
+            assert EnvironmentRPCServer._looks_like_codex_process(executable, argv)
+    finally:
+        process.terminate()
+        process.wait(timeout=3)
 
 
 def test_local_bridge_uses_owner_resolved_context_without_leaking_grant(

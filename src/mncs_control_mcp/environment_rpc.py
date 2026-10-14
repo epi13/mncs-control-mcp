@@ -2275,6 +2275,54 @@ class EnvironmentRPCServer:
             return None
 
     @staticmethod
+    def _looks_like_codex_process(executable: str | None, argv: list[str]) -> bool:
+        names = {"codex", "codex-cli"}
+        if executable and Path(executable).name.casefold() in names:
+            return True
+        return any(Path(argument).name.casefold() in names for argument in argv[:4])
+
+    def _current_request_process_identity(self, peer_pid: int) -> dict[str, object] | None:
+        """Anchor liveness exclusion at the active Codex parent when present."""
+        peer_start = self._proc_start_ticks(peer_pid)
+        if peer_start is None:
+            return None
+        selected = {"pid": peer_pid, "start_ticks": peer_start}
+        current_pid = peer_pid
+        visited = {peer_pid}
+        for _ in range(8):
+            try:
+                status_lines = Path(f"/proc/{current_pid}/status").read_text(
+                    encoding="utf-8",
+                ).splitlines()
+                parent_pid = int(next(
+                    line.split()[1] for line in status_lines
+                    if line.startswith("PPid:")
+                ))
+                if parent_pid <= 1 or parent_pid in visited:
+                    break
+                visited.add(parent_pid)
+                parent = Path(f"/proc/{parent_pid}")
+                parent_status = (parent / "status").read_text(encoding="utf-8").splitlines()
+                parent_uid = int(next(
+                    line.split()[1] for line in parent_status
+                    if line.startswith("Uid:")
+                ))
+                if parent_uid != os.getuid():
+                    break
+                executable = os.readlink(parent / "exe")
+                argv = [item.decode("utf-8", errors="replace")
+                        for item in (parent / "cmdline").read_bytes().split(b"\x00") if item]
+                parent_start = self._proc_start_ticks(parent_pid)
+                if self._looks_like_codex_process(executable, argv):
+                    if parent_start is None:
+                        return None
+                    return {"pid": parent_pid, "start_ticks": parent_start}
+                current_pid = parent_pid
+            except (OSError, StopIteration, ValueError, IndexError):
+                break
+        return selected
+
+    @staticmethod
     def _peer_process_cwd(pid: int) -> Path:
         return Path(f"/proc/{pid}/cwd").resolve(strict=True)
 
@@ -2823,11 +2871,10 @@ class EnvironmentRPCServer:
                     return response
                 self._active_requests.add(request_id)
                 if peer_pid is not None:
-                    peer_start_ticks = self._proc_start_ticks(peer_pid)
-                    if peer_start_ticks is not None:
-                        self._active_request_peer_ids[request_id] = {
-                            "pid": peer_pid, "start_ticks": peer_start_ticks,
-                        }
+                    self._active_request_peer_ids[request_id] = (
+                        self._current_request_process_identity(peer_pid)
+                        or {"pid": peer_pid, "start_ticks": None}
+                    )
                 if request_session_id is not None:
                     self._active_request_sessions[request_id] = request_session_id
             session_id = request_session_id
