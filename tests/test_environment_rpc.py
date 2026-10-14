@@ -498,6 +498,8 @@ def test_recovery_process_inventory_excludes_only_its_current_terminal_tree(
         assert complete is True
         assert diagnostics == {
             "request_process_tree_complete": True,
+            "current_request_process_root": None,
+            "current_request_processes_excluded": excluded,
             "tracked_job_process_tree_complete": True,
             "tracked_job_processes_excluded": [{
                 "pid": tracked_job.pid,
@@ -562,6 +564,8 @@ def test_host_process_inventory_explains_an_incomplete_request_tree(
     assert inventory[6] is False
     assert inventory[7] == {
         "request_process_tree_complete": False,
+        "current_request_process_root": None,
+        "current_request_processes_excluded": [],
         "tracked_job_process_tree_complete": True,
         "tracked_job_processes_excluded": [],
         "unreadable_match_count": 0,

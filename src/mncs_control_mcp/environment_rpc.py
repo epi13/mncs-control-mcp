@@ -2575,6 +2575,8 @@ class EnvironmentRPCServer:
                 len([item for item in entries if item.name.isdigit()]),
                 same_uid_examined, boot_id, complete, {
                     "request_process_tree_complete": exclusion_complete,
+                    "current_request_process_root": current_peer_identity,
+                    "current_request_processes_excluded": excluded_processes,
                     "tracked_job_process_tree_complete": tracked_exclusion_complete,
                     "tracked_job_processes_excluded": tracked_excluded_processes,
                     "unreadable_match_count": unreadable_match_count,
