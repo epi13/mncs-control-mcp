@@ -82,6 +82,18 @@ def _requires_selected_session_for_mutation(command: str, argv: list[Any]) -> bo
     return False
 
 
+def _safe_relative_artifact_path(value: Any) -> bool:
+    """Accept a bounded relative path; Environment checks the binding whitelist."""
+    if (not isinstance(value, str) or not value or len(value) > 1024
+            or "\\" in value or "\x00" in value):
+        return False
+    return all(
+        segment not in {".", ".."}
+        and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", segment)
+        for segment in value.split("/")
+    )
+
+
 @dataclass(frozen=True)
 class EnvironmentRPCGrant:
     token_digest: str
@@ -641,11 +653,15 @@ class EnvironmentRPCServer:
             }
             if (len(argv) != 5
                     or not re.fullmatch(r"ses_[A-Za-z0-9_-]{1,120}", argv[1])
-                    or (argv[2], argv[4]) not in allowed_artifacts
-                    or not re.fullmatch(r"cap_[0-9a-f]{16}", argv[3])):
+                    or not re.fullmatch(
+                        r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}:[A-Za-z0-9][A-Za-z0-9._/-]{0,255}",
+                        argv[2],
+                    )
+                    or not re.fullmatch(r"cap_[0-9a-f]{16}", argv[3])
+                    or not _safe_relative_artifact_path(argv[4])):
                 raise ControlError(
                     "ENVIRONMENT_AUTHORITY_DENIED",
-                    "Control exposes only the declared Forge, Monitor and Automation artifacts",
+                    "artifact read arguments must identify one bounded relative Store artifact",
                     details={"required": [
                         "artifact-read", "<selected-session>", "<capability>",
                         "<capability-binding-id>", "<declared-artifact-file>",
@@ -657,12 +673,24 @@ class EnvironmentRPCServer:
             environment_project = self.config.repositories.get(
                 "environment", "mncs-environment"
             )
-            if (record.scope != "project"
-                    or self._project_repository(record) != environment_project):
+            if record.scope != "project":
                 raise ControlError(
                     "ENVIRONMENT_AUTHORITY_DENIED",
-                    "capability artifact reads require the Environment project grant",
-                    details={"required_project": environment_project},
+                    "capability artifact reads require a project grant",
+                )
+            project_repository = self._project_repository(record)
+            own_project_capability = argv[2].startswith(project_repository + ":")
+            canonical_artifact = (argv[2], argv[4]) in allowed_artifacts
+            if (not own_project_capability
+                    and not (project_repository == environment_project
+                             and canonical_artifact)):
+                raise ControlError(
+                    "ENVIRONMENT_AUTHORITY_DENIED",
+                    "project artifact reads require the project's own capability or an established Environment integration artifact",
+                    details={
+                        "project": project_repository,
+                        "required_project_for_shared_artifacts": environment_project,
+                    },
                 )
             if record.bound_session_id != argv[1]:
                 raise ControlError(
@@ -886,10 +914,12 @@ class EnvironmentRPCServer:
                             if isinstance(scope, dict)
                             else None
                         )
-                        if repositories != [record.host_root.name]:
+                        if not self._project_entry_scope_is_authorized(
+                            definition, definition_path, repositories, record,
+                        ):
                             raise ControlError(
                                 "ENVIRONMENT_AUTHORITY_DENIED",
-                                "project-scoped Environment entry must declare only its granted repository",
+                                "project-scoped Environment entry may select only its granted repository and declared protected toolchains",
                                 details={"repository": record.host_root.name},
                             )
                         if definition.get("workspace_root", ".") not in (None, "", "."):
@@ -1077,6 +1107,81 @@ class EnvironmentRPCServer:
                 index += 1
         return translated
 
+    @staticmethod
+    def _project_entry_scope_is_authorized(
+        definition: Any,
+        definition_path: Path | None,
+        repositories: Any,
+        record: _GrantRecord,
+    ) -> bool:
+        """Allow a project to select its declared toolchain checkouts read-only.
+
+        A project grant remains the only writable repository. Extra workspace
+        roots are allowed only when the project's own capability declarations
+        consume them as toolchains and its Environment intent marks every one
+        protected. This lets a native runner use sibling Compiler/Language/VM
+        checkouts without granting those repositories mutation authority.
+        """
+        repository = record.host_root.name
+        if repositories == [repository]:
+            return True
+        if (not isinstance(definition, dict)
+                or not isinstance(definition_path, Path)
+                or not isinstance(repositories, list)
+                or len(repositories) > 32
+                or any(not isinstance(item, str) or not item for item in repositories)):
+            return False
+        if len(set(repositories)) != len(repositories):
+            return False
+        scope = definition.get("workspace_scope")
+        intent = definition.get("intent")
+        if (not isinstance(scope, dict) or scope.get("kind") != "workspace"
+                or not isinstance(intent, dict)
+                or intent.get("repositories") != [repository]):
+            return False
+        selected = set(repositories)
+        extras = selected - {repository}
+        if repository not in selected or not extras:
+            return False
+        protected = intent.get("protected_repositories")
+        if (not isinstance(protected, list)
+                or any(not isinstance(item, str) or not item for item in protected)
+                or len(set(protected)) != len(protected)
+                or set(protected) != extras):
+            return False
+
+        project_root = definition_path.parent.parent
+        manifest_path = project_root / ".mncs" / "project.json"
+        if manifest_path.is_symlink() or not manifest_path.is_file():
+            return False
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            return False
+        contracts = manifest.get("contracts", {}).get("provides", []) \
+            if isinstance(manifest, dict) else []
+        if not isinstance(contracts, list):
+            return False
+        declared_toolchains: set[str] = set()
+        for contract in contracts:
+            invocation = contract.get("invocation") if isinstance(contract, dict) else None
+            if not isinstance(invocation, dict):
+                continue
+            candidates: list[Any] = []
+            if "toolchain" in invocation:
+                candidates.append(invocation["toolchain"])
+            toolchains = invocation.get("toolchains")
+            if isinstance(toolchains, dict):
+                candidates.extend(toolchains.values())
+            for candidate in candidates:
+                if not isinstance(candidate, dict):
+                    continue
+                toolchain_repository = candidate.get("repository")
+                if isinstance(toolchain_repository, str) and toolchain_repository:
+                    declared_toolchains.add(toolchain_repository)
+        declared_toolchains.discard(repository)
+        return extras <= declared_toolchains
+
     def _authorize_project_verification_invocation(
         self, argv: list[str], record: _GrantRecord,
     ) -> bool:
@@ -1092,6 +1197,20 @@ class EnvironmentRPCServer:
         if record.scope != "project" or len(argv) < 3:
             return False
         repository = self._project_repository(record)
+        if repository == "mncs-test" and argv[2] == "mncs-test:canonical-vm-tests":
+            if len(argv) != 3:
+                raise ControlError(
+                    "ENVIRONMENT_AUTHORITY_DENIED",
+                    "the canonical Test VM capability uses only its declared invocation",
+                    details={"capability": argv[2]},
+                )
+            if record.bound_session_id != argv[1]:
+                raise ControlError(
+                    "ENVIRONMENT_AUTHORITY_DENIED",
+                    "canonical Test VM invocation requires the session selected by this grant's authenticated continuation",
+                    details={"next": "run project continuation and use its selected session"},
+                )
+            return True
         prefix = f"{repository}:verification-executor/"
         capability = argv[2]
         if not capability.startswith(prefix):

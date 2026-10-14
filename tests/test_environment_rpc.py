@@ -1218,7 +1218,7 @@ def test_project_campaign_entry_rejects_definition_scope_widening(
         token_file=tmp_path / "grant",
     )
 
-    with pytest.raises(ControlError, match="must declare only its granted repository") as raised:
+    with pytest.raises(ControlError, match="declared protected toolchains") as raised:
         server._translate_argv(
             ["enter", "--definition", "entry.json", "--campaign-id", "cmp_test"],
             project,
@@ -1582,6 +1582,59 @@ def test_artifact_read_is_bound_to_environment_selected_project_session(
         }, peer_uid=0)
         assert rejected["error"]["code"] == "ENVIRONMENT_AUTHORITY_DENIED"
     assert len(calls) == 7
+
+
+def test_project_grant_can_read_only_its_own_bounded_artifact_namespace(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "projects"
+    project = workspace / "mncs-test"
+    project.mkdir(parents=True)
+
+    class Environment:
+        state_dir = tmp_path / "state"
+        environment_path = tmp_path / "environment"
+
+    server = EnvironmentRPCServer(
+        ControlConfig(
+            workspace_root=workspace,
+            repositories={"environment": "mncs-environment"},
+            sandbox_home=tmp_path / "home",
+            environment_rpc_socket=tmp_path / "rpc" / "environment.sock",
+        ),
+        environment_service=Environment(),
+        policy=object(),
+    )
+    record = _GrantRecord(
+        grant_id="test-artifact-read-grant",
+        principal_id="principal-agent",
+        host_root=project,
+        sandbox_root="/workspace/mncs-test",
+        scope="project",
+        uid=0,
+        expires_at=time.monotonic() + 60,
+        token_file=tmp_path / "grant",
+        bound_session_id="ses_selected",
+    )
+    capability = "mncs-test:verification-executor/mncs-test.native-application-build-vm"
+    binding_id = "cap_0123456789abcdef"
+    path = "native-application-build-vm/native-application-build-vm-result.json"
+    translated = server._translate_argv(
+        ["artifact-read", "ses_selected", capability, binding_id, path],
+        project,
+        record,
+    )
+    assert translated[-5:] == [
+        "artifact-read", "ses_selected", capability, binding_id, path,
+    ]
+
+    for invalid in (
+        ["artifact-read", "ses_selected", capability, binding_id, "../secret"],
+        ["artifact-read", "ses_selected", "mncs-language:compile", binding_id, path],
+        ["artifact-read", "ses_other", capability, binding_id, path],
+    ):
+        with pytest.raises(ControlError):
+            server._translate_argv(invalid, project, record)
 
 
 def test_project_session_mutations_require_exact_continuation_selection(
@@ -2903,6 +2956,84 @@ def test_project_rpc_invokes_only_its_fixed_verification_capabilities(
     assert len(calls) == 1
 
 
+def test_project_rpc_invokes_the_declared_canonical_test_vm_capability(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "projects"
+    project = workspace / "mncs-test"
+    project.mkdir(parents=True)
+    token = "test-project-canonical-vm-grant"
+
+    class Store:
+        def load_snapshot(self, _session_id: str) -> dict[str, str]:
+            return {"authenticated_principal_id": "principal-agent"}
+
+        def close(self) -> None:
+            pass
+
+    class Environment:
+        state_dir = tmp_path / "state"
+        environment_path = tmp_path / "environment"
+
+        def _pkg(self) -> object:
+            return object()
+
+        def _store(self, _pkg: object) -> Store:
+            return Store()
+
+    server = EnvironmentRPCServer(
+        ControlConfig(
+            workspace_root=workspace,
+            repositories={"environment": "mncs-environment"},
+            sandbox_home=tmp_path / "home",
+            environment_rpc_socket=tmp_path / "rpc" / "environment.sock",
+        ),
+        environment_service=Environment(),
+        policy=object(),
+    )
+    server._grants[hashlib.sha256(token.encode()).hexdigest()] = _GrantRecord(
+        grant_id="test-project-canonical-vm-grant",
+        principal_id="principal-agent",
+        host_root=project,
+        sandbox_root="/workspace/mncs-test",
+        scope="project",
+        uid=0,
+        expires_at=time.monotonic() + 60,
+        token_file=tmp_path / "grant",
+        bound_session_id="ses_test",
+    )
+    calls: list[list[str]] = []
+
+    def run(argv: list[str], **_kwargs: object) -> SimpleNamespace:
+        calls.append(argv)
+        return SimpleNamespace(returncode=0, stdout='{"status":"pass"}\n', stderr="")
+
+    monkeypatch.setattr("mncs_control_mcp.environment_rpc.subprocess.run", run)
+    request = {
+        "grant": token,
+        "request_id": "req_test_canonical_vm",
+        "argv": ["invoke", "ses_test", "mncs-test:canonical-vm-tests"],
+        "cwd": "/workspace/mncs-test",
+    }
+
+    accepted = server.dispatch(request, peer_uid=0)
+    assert accepted["ok"] is True
+    assert calls[0][-3:] == request["argv"]
+
+    for index, argv in enumerate((
+        ["invoke", "ses_other", "mncs-test:canonical-vm-tests"],
+        ["invoke", "ses_test", "mncs-test:canonical-vm-tests", "--arbitrary"],
+        ["invoke", "ses_test", "mncs-language:compile"],
+    )):
+        rejected = server.dispatch({
+            **request,
+            "request_id": f"req_test_canonical_vm_rejected_{index}",
+            "argv": argv,
+        }, peer_uid=0)
+        assert rejected["ok"] is False
+    assert len(calls) == 1
+
+
 def test_project_rpc_exposes_session_bound_system_observability(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3629,12 +3760,19 @@ def test_entry_preserves_and_bounds_configured_workspace_root(tmp_path: Path) ->
 def test_project_entry_maps_workspace_without_campaign_id(tmp_path: Path) -> None:
     projects = tmp_path / "projects"
     project = projects / "mncs-environment"
-    project.mkdir(parents=True)
-    definition = project / "environment.json"
+    (project / ".mncs").mkdir(parents=True)
+    definition = project / ".mncs" / "environment.json"
     definition.write_text(
         json.dumps({"workspace_scope": {"repositories": ["mncs-environment"]}}),
         encoding="utf-8",
     )
+    (project / ".mncs" / "project.json").write_text(json.dumps({
+        "contracts": {"provides": [{"invocation": {"toolchains": {
+            "MNCS_COMPILER_CHECKOUT": {"repository": "mncs-compiler", "path": "."},
+            "MNCS_LANGUAGE": {"repository": "mncs-language", "path": "target/release/mncs"},
+            "MNCS_VM_CHECKOUT": {"repository": "mncs-vm", "path": "."},
+        }}}]},
+    }), encoding="utf-8")
     server = EnvironmentRPCServer(
         ControlConfig(
             workspace_root=projects,
@@ -3656,7 +3794,7 @@ def test_project_entry_maps_workspace_without_campaign_id(tmp_path: Path) -> Non
     )
 
     translated = server._translate_argv(
-        ["enter", "--definition", "/workspace/mncs-environment/environment.json"],
+        ["enter", "--definition", "/workspace/mncs-environment/.mncs/environment.json"],
         project,
         grant,
     )
@@ -3666,14 +3804,43 @@ def test_project_entry_maps_workspace_without_campaign_id(tmp_path: Path) -> Non
     ]
 
     definition.write_text(
-        json.dumps({"workspace_scope": {"repositories": [
-            "mncs-environment", "mncs-compiler",
-        ]}}),
+        json.dumps({
+            "workspace_scope": {"kind": "workspace", "repositories": [
+                "mncs-environment", "mncs-compiler", "mncs-language", "mncs-vm",
+            ]},
+            "intent": {
+                "repositories": ["mncs-environment"],
+                "protected_repositories": ["mncs-compiler", "mncs-language", "mncs-vm"],
+            },
+        }),
         encoding="utf-8",
     )
-    with pytest.raises(ControlError) as raised:
+    translated = server._translate_argv(
+        ["enter", "--definition", "/workspace/mncs-environment/.mncs/environment.json"],
+        project,
+        grant,
+    )
+    assert translated == [
+        "enter", "--definition", str(definition), "--workspace", str(projects),
+    ]
+
+    # A protected but undeclared checkout is not a toolchain input and must
+    # remain outside the selected closure.
+    definition.write_text(json.dumps({
+        "workspace_scope": {"kind": "workspace", "repositories": [
+            "mncs-environment", "mncs-compiler", "mncs-language", "mncs-vm",
+            "mncs-store",
+        ]},
+        "intent": {
+            "repositories": ["mncs-environment"],
+            "protected_repositories": [
+                "mncs-compiler", "mncs-language", "mncs-vm", "mncs-store",
+            ],
+        },
+    }), encoding="utf-8")
+    with pytest.raises(ControlError, match="declared protected toolchains") as raised:
         server._translate_argv(
-            ["enter", "--definition", "/workspace/mncs-environment/environment.json"],
+            ["enter", "--definition", "/workspace/mncs-environment/.mncs/environment.json"],
             project,
             grant,
         )
