@@ -211,7 +211,10 @@ def _build_argv(
             request_file = _relative_path(values.get("request_file"), "request_file")
             if not request_file.endswith(".json"):
                 raise ValueError("request_file must name a JSON build request")
-            return ["invoke", session_id, capability, "build", "--request-file", request_file], True
+            return [
+                "invoke", session_id, capability, "--",
+                "build", "--request-file", request_file,
+            ], True
         if capability == "mncs-forge:native-application-execution":
             artifact = values.get("input_artifact")
             if (not isinstance(artifact, dict)

@@ -163,7 +163,7 @@ def test_native_application_invocations_map_to_fixed_typed_contracts() -> None:
     assert selected is True
     assert build == [
         "invoke", "ses_selected", "mncs-compiler:native-application-build",
-        "build", "--request-file", "build/gatec/request.json",
+        "--", "build", "--request-file", "build/gatec/request.json",
     ]
 
     execution, selected = _build_argv(
