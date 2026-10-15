@@ -7,6 +7,7 @@ import re
 import secrets
 import socket
 import struct
+import time
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -35,6 +36,7 @@ class _ProjectContext:
     grant: str
     sandbox_cwd: str
     selected_session_id: str | None = None
+    expires_at: float | None = None
 
 
 class _OwnerRPCError(Exception):
@@ -389,6 +391,8 @@ class LocalEnvironmentMCP:
         key = (project, cwd)
         context = self._contexts.get(key)
         if context is not None:
+            if self._grant_needs_refresh(context):
+                return self._refresh_context(project, cwd, context)
             return context
         if not cwd:
             existing = [
@@ -401,11 +405,27 @@ class LocalEnvironmentMCP:
                 # Codex can omit the optional cwd field on a later call. Keep
                 # the one project context already selected in this process so
                 # that omission does not switch an isolated worktree to root.
-                return existing[0][1]
+                existing_cwd, context = existing[0]
+                if self._grant_needs_refresh(context):
+                    return self._refresh_context(project, existing_cwd, context)
+                return context
             if len(existing) > 1:
                 raise ValueError(
                     "cwd is required because this MCP process has multiple contexts for the project"
                 )
+        return self._issue_context(project, cwd)
+
+    @staticmethod
+    def _grant_needs_refresh(context: _ProjectContext) -> bool:
+        # Leave a small margin for IPC and scheduling delay around the owner's
+        # monotonic expiry. Contexts constructed by tests or older callers with
+        # no expiry observation remain usable until the owner rejects them.
+        return (context.expires_at is not None
+                and time.monotonic() >= context.expires_at - 5.0)
+
+    def _issue_context(
+        self, project: str, cwd: str, context: _ProjectContext | None = None,
+    ) -> _ProjectContext:
         request = {
             "action": "local-project-grant", "project": project,
             "cwd": cwd or None,
@@ -416,12 +436,36 @@ class LocalEnvironmentMCP:
         result = response["result"]
         token = result.get("grant")
         sandbox_cwd = result.get("sandbox_cwd")
+        expires_in_seconds = result.get("expires_in_seconds")
         if (not isinstance(token, str) or not TOKEN_RE.fullmatch(token)
-                or not isinstance(sandbox_cwd, str)):
+                or not isinstance(sandbox_cwd, str)
+                or type(expires_in_seconds) is not int
+                or expires_in_seconds < 1 or expires_in_seconds > 86400):
             raise ValueError("Control returned an invalid local Environment capability")
-        context = _ProjectContext(token, sandbox_cwd)
-        self._contexts[key] = context
+        if context is None:
+            context = _ProjectContext(token, sandbox_cwd)
+        else:
+            # Keep the already authenticated session selector in this object;
+            # it is only a selector and every subsequent operation remains
+            # authorized by the new Control-issued grant.
+            context.grant = token
+            context.sandbox_cwd = sandbox_cwd
+        context.expires_at = time.monotonic() + expires_in_seconds
+        self._contexts[(project, cwd)] = context
         return context
+
+    def _refresh_context(
+        self, project: str, cwd: str, context: _ProjectContext,
+    ) -> _ProjectContext:
+        # An omitted cwd may be reusing the sole selected worktree context.
+        # Reissue for that original scope rather than silently widening to the
+        # repository root.
+        if not cwd:
+            cached_key = next((key for key, value in self._contexts.items()
+                               if key[0] == project and value is context), None)
+            if cached_key is not None:
+                cwd = cached_key[1]
+        return self._issue_context(project, cwd, context)
 
     def _response_error(self, response: dict[str, Any]) -> Any:
         error = response.get("error")
@@ -670,6 +714,7 @@ class LocalEnvironmentMCP:
 
     def _select_session(
         self, context: _ProjectContext, project: str, values: dict[str, Any],
+        cwd: str = "",
     ) -> dict[str, Any] | None:
         campaign_id = values.get("campaign_id")
         task_identity = values.get("task_identity")
@@ -702,12 +747,24 @@ class LocalEnvironmentMCP:
                             ("task_identity", "--task-identity")):
             if field in values:
                 argv.extend([flag, _string(values[field], field, max_length=256)])
-        response = _rpc(self.socket_path, {
+        request = {
             "grant": context.grant,
             "request_id": "req_" + secrets.token_hex(16),
             "cwd": context.sandbox_cwd,
             "argv": argv,
-        })
+        }
+        response = _rpc(self.socket_path, request)
+        error = response.get("error")
+        if (response.get("ok") is not True and isinstance(error, dict)
+                and error.get("code") == "ENVIRONMENT_AUTHORITY_DENIED"):
+            # Campaign/session selection is the first RPC on a fresh context.
+            # Recover the grant here as well as after ordinary session calls,
+            # then repeat the read-only continuation with the same selector.
+            self._refresh_context(project, cwd, context)
+            request["grant"] = context.grant
+            request["request_id"] = "req_" + secrets.token_hex(16)
+            request["cwd"] = context.sandbox_cwd
+            response = _rpc(self.socket_path, request)
         if response.get("ok") is not True:
             return response
         payload = self._payload(response)
@@ -752,7 +809,7 @@ class LocalEnvironmentMCP:
                     "request_file", "input_artifact", "call",
                     *SESSION_SELECTOR_FIELDS,
                 })
-                selected_error = self._select_session(context, project, values)
+                selected_error = self._select_session(context, project, values, cwd)
                 if selected_error is not None:
                     return self._response_error(selected_error)
                 operation_values = {
@@ -786,11 +843,12 @@ class LocalEnvironmentMCP:
                     # A Control restart or grant expiry is repaired by obtaining
                     # a new owner-issued grant. Rebind the continuation before
                     # any session-scoped operation is attempted again.
-                    self._contexts.pop((project, cwd), None)
-                    context = self._context(project, cwd)
+                    self._refresh_context(project, cwd, context)
                     if uses_session:
                         context.selected_session_id = None
-                        selected_error = self._select_session(context, project, values)
+                        selected_error = self._select_session(
+                            context, project, values, cwd,
+                        )
                         if selected_error is not None:
                             return self._response_error(selected_error)
                     request["grant"] = context.grant

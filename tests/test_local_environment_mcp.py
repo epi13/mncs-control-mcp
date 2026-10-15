@@ -294,6 +294,41 @@ def test_project_context_reuses_one_selected_worktree_when_cwd_is_omitted(
     assert bridge._context("mncs-compiler", "") is selected
 
 
+def test_expired_context_refresh_preserves_omitted_worktree_scope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bridge = object.__new__(LocalEnvironmentMCP)
+    bridge.socket_path = tmp_path / "unused.sock"
+    selected = _ProjectContext(
+        "expired", "/workspace/mncs-compiler/.worktrees/selected",
+        selected_session_id="ses_selected", expires_at=0,
+    )
+    bridge._contexts = {("mncs-compiler", ".worktrees/selected"): selected}
+    requests: list[dict[str, object]] = []
+
+    def fake_rpc(_socket_path: Path, request: dict[str, object]) -> dict[str, object]:
+        requests.append(request)
+        return {"ok": True, "result": {
+            "grant": "n" * 40,
+            "sandbox_cwd": "/workspace/mncs-compiler/.worktrees/selected",
+            "expires_in_seconds": 315,
+        }}
+
+    monkeypatch.setattr(local_environment_mcp, "_rpc", fake_rpc)
+    refreshed = bridge._context("mncs-compiler", "")
+
+    assert refreshed is selected
+    assert requests == [{
+        "action": "local-project-grant",
+        "project": "mncs-compiler",
+        "cwd": ".worktrees/selected",
+    }]
+    assert refreshed.grant == "n" * 40
+    assert refreshed.sandbox_cwd == "/workspace/mncs-compiler/.worktrees/selected"
+    assert refreshed.selected_session_id == "ses_selected"
+    assert refreshed.expires_at is not None and refreshed.expires_at > 0
+
+
 def test_project_context_requires_cwd_when_multiple_contexts_exist(
     tmp_path: Path,
 ) -> None:
@@ -339,6 +374,71 @@ def test_session_operation_reselects_through_campaign_on_a_fresh_context(
     assert response["result"]["session_id"] == "ses_selected"
     assert requests[0]["argv"] == ["continuation", "--campaign-id", "cmp_current"]
     assert requests[1]["argv"] == ["context", "ses_selected"]
+
+
+def test_campaign_selection_refreshes_a_stale_local_grant(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bridge = object.__new__(LocalEnvironmentMCP)
+    bridge.socket_path = tmp_path / "unused.sock"
+    context = _ProjectContext(
+        "stale-grant", "/workspace/mncs-compiler/.worktrees/selected",
+        expires_at=10**12,
+    )
+    bridge._contexts = {("mncs-compiler", ".worktrees/selected"): context}
+    requests: list[dict[str, object]] = []
+
+    def fake_rpc(_socket_path: Path, request: dict[str, object]) -> dict[str, object]:
+        requests.append(dict(request))
+        if request.get("action") == "local-project-grant":
+            assert request == {
+                "action": "local-project-grant",
+                "project": "mncs-compiler",
+                "cwd": ".worktrees/selected",
+            }
+            return {"ok": True, "result": {
+                "grant": "f" * 40,
+                "sandbox_cwd": "/workspace/mncs-compiler/.worktrees/selected",
+                "expires_in_seconds": 315,
+            }}
+        if request.get("grant") == "stale-grant":
+            return {"ok": False, "error": {
+                "code": "ENVIRONMENT_AUTHORITY_DENIED",
+                "message": "Environment capability is expired or unknown",
+            }}
+        argv = request.get("argv")
+        if isinstance(argv, list) and argv[0] == "continuation":
+            return {"ok": True, "result": {
+                "stdout": json.dumps({"status": "ready", "selected_session_id": "ses_selected"}),
+                "stderr": "", "exit_code": 0,
+            }}
+        if isinstance(argv, list) and argv[0] == "resume":
+            return {"ok": True, "result": {
+                "stdout": json.dumps({"session_id": "ses_selected", "lifecycle": "active"}),
+                "stderr": "", "exit_code": 0,
+            }}
+        raise AssertionError(f"unexpected Environment RPC request: {request}")
+
+    monkeypatch.setattr(local_environment_mcp, "_rpc", fake_rpc)
+    response = bridge.invoke(
+        "mncs-compiler", "resume",
+        {"task_identity": "mncs_native_application_readiness_gate_c_20261014"},
+        cwd=".worktrees/selected",
+    )
+
+    assert response["ok"] is True
+    assert response["result"]["session_id"] == "ses_selected"
+    assert [request.get("action") for request in requests] == [
+        None, "local-project-grant", None, None,
+    ]
+    assert requests[0]["argv"] == [
+        "continuation", "--task-identity",
+        "mncs_native_application_readiness_gate_c_20261014",
+    ]
+    assert requests[2]["grant"] == "f" * 40
+    assert requests[2]["argv"] == requests[0]["argv"]
+    assert requests[3]["grant"] == "f" * 40
+    assert requests[3]["argv"] == ["resume", "ses_selected", "--revalidate"]
 
 
 def test_selection_error_is_bounded_and_keeps_campaign_choices() -> None:
