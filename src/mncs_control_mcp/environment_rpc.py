@@ -1716,7 +1716,8 @@ class EnvironmentRPCServer:
                 canonical_call = (
                     isinstance(call, dict)
                     and set(call) == {"arguments"}
-                    and isinstance(call.get("arguments"), dict)
+                    and isinstance(call.get("arguments"), list)
+                    and len(call["arguments"]) <= 32
                     and canonical == encoded_call
                 )
             except (TypeError, ValueError, UnicodeDecodeError, json.JSONDecodeError):

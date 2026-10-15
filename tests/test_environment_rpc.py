@@ -4166,12 +4166,24 @@ def test_environment_project_rpc_admits_typed_native_application_flow(
     assert built["ok"] is True
     assert calls[0][0][-len(build_argv):] == build_argv
 
+    typed_call = json.dumps({"arguments": [{"record": {
+        "type_identity": (
+            "mncs:0.2:record-type:tests.native_readiness::ReadinessRequest::"
+            "case_index%3Au64%3Bexpected_tests%3Au64%3Bseed%3Au64%3B"
+        ),
+        "name": "ReadinessRequest",
+        "fields": [
+            ["case_index", {"integer": {"type": {"bits": 64, "signed": False}, "value": 7}}],
+            ["expected_tests", {"integer": {"type": {"bits": 64, "signed": False}, "value": 4}}],
+            ["seed", {"integer": {"type": {"bits": 64, "signed": False}, "value": 42}}],
+        ],
+    }}]}, sort_keys=True, separators=(",", ":"))
     execution_argv = [
         "invoke", "ses_gatec", "mncs-forge:native-application-execution",
         "--input-artifact", "native-application-build",
         "mncs-compiler:native-application-build", "cap_0123456789abcdef",
         "native-application-build.json", "--", "--call-json",
-        '{"arguments":{"case_index":3,"seed":17}}',
+        typed_call,
     ]
     executed = server.dispatch({
         **base, "request_id": "req_gatec_application_execution", "argv": execution_argv,

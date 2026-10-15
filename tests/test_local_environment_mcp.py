@@ -176,7 +176,20 @@ def test_native_application_invocations_map_to_fixed_typed_contracts() -> None:
                 "binding_id": "cap_0123456789abcdef",
                 "path": "native-application-build.json",
             },
-            "call": {"arguments": {"case_index": 3, "seed": 17}},
+            "call": {"arguments": [{
+                "record": {
+                    "type_identity": (
+                        "mncs:0.2:record-type:tests.native_readiness::ReadinessRequest::"
+                        "case_index%3Au64%3Bexpected_tests%3Au64%3Bseed%3Au64%3B"
+                    ),
+                    "name": "ReadinessRequest",
+                    "fields": [
+                        ["case_index", {"integer": {"type": {"bits": 64, "signed": False}, "value": 7}}],
+                        ["expected_tests", {"integer": {"type": {"bits": 64, "signed": False}, "value": 4}}],
+                        ["seed", {"integer": {"type": {"bits": 64, "signed": False}, "value": 42}}],
+                    ],
+                },
+            }]},
         },
         context,
         "mncs-environment",
@@ -189,7 +202,20 @@ def test_native_application_invocations_map_to_fixed_typed_contracts() -> None:
         "native-application-build.json", "--",
     ]
     assert execution[9] == "--call-json"
-    assert json.loads(execution[10]) == {"arguments": {"case_index": 3, "seed": 17}}
+    assert json.loads(execution[10]) == {"arguments": [{
+        "record": {
+            "type_identity": (
+                "mncs:0.2:record-type:tests.native_readiness::ReadinessRequest::"
+                "case_index%3Au64%3Bexpected_tests%3Au64%3Bseed%3Au64%3B"
+            ),
+            "name": "ReadinessRequest",
+            "fields": [
+                ["case_index", {"integer": {"type": {"bits": 64, "signed": False}, "value": 7}}],
+                ["expected_tests", {"integer": {"type": {"bits": 64, "signed": False}, "value": 4}}],
+                ["seed", {"integer": {"type": {"bits": 64, "signed": False}, "value": 42}}],
+            ],
+        },
+    }]}
 
     for arguments in (
         {"capability": "mncs-compiler:compiler-build", "request_file": "request.json"},

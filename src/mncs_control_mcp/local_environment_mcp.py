@@ -227,8 +227,9 @@ def _build_argv(
                 raise ValueError("Forge execution requires the exact Compiler application-build Store artifact")
             call = values.get("call")
             if (not isinstance(call, dict) or set(call) != {"arguments"}
-                    or not isinstance(call.get("arguments"), dict)):
-                raise ValueError("Forge execution call must contain one typed arguments object")
+                    or not isinstance(call.get("arguments"), list)
+                    or len(call["arguments"]) > 32):
+                raise ValueError("Forge execution call must contain a bounded typed argument array")
             try:
                 encoded_call = json.dumps(
                     call, ensure_ascii=False, sort_keys=True,
