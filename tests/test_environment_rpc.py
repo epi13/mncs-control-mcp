@@ -684,6 +684,94 @@ def test_recovery_inventory_excludes_only_the_current_codex_shell_launcher(
         owner.wait(timeout=3)
 
 
+def test_claim_recovery_uses_persisted_audit_process_identity_when_cwd_is_hidden(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from mncs_control_mcp.audit import AuditLog
+    from mncs_control_mcp.processes import ProcessManager
+
+    repository = "mncs-compiler"
+    checkout = tmp_path / repository / ".worktrees" / "selected"
+    checkout.mkdir(parents=True)
+    owner = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        cwd=checkout,
+    )
+    try:
+        start_ticks = ProcessManager._process_start_ticks(owner.pid)
+        boot_id = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+        assert start_ticks is not None
+        audit_path = tmp_path / "state" / "audit.jsonl"
+        AuditLog(audit_path).record(
+            "mncs_environment",
+            success=True,
+            project=repository,
+            session_id="ses_live_owner",
+            client_pid=owner.pid,
+            client_start_ticks=start_ticks,
+            client_agent_pid=owner.pid,
+            client_agent_start_ticks=start_ticks,
+            client_host_boot_id=boot_id,
+        )
+        server = EnvironmentRPCServer(
+            ControlConfig(
+                workspace_root=tmp_path,
+                sandbox_home=tmp_path / "home",
+                environment_rpc_socket=tmp_path / "rpc" / "environment.sock",
+            ),
+            environment_service=SimpleNamespace(state_dir=tmp_path / "state"),
+            policy=object(),
+            process_manager=SimpleNamespace(),
+            audit_log=AuditLog(audit_path),
+        )
+        readlink = os.readlink
+
+        def hide_owner_cwd(path: str | os.PathLike[str], *args: object) -> str:
+            if os.fspath(path) == f"/proc/{owner.pid}/cwd":
+                raise PermissionError("fixture-hidden process working directory")
+            return readlink(path, *args)
+
+        monkeypatch.setattr(os, "readlink", hide_owner_cwd)
+        matches, audit_complete, rows_read = server._audited_session_processes(
+            owner_session_id="ses_live_owner",
+            repository=repository,
+            current_peer_identity=None,
+            host_boot_id=boot_id,
+        )
+        assert audit_complete is True
+        assert rows_read == 1
+        assert [item["pid"] for item in matches] == [owner.pid]
+        assert matches[0]["reason"] == "former-session-authenticated-client"
+
+        same_request, same_request_complete, _same_rows = (
+            server._audited_session_processes(
+                owner_session_id="ses_live_owner",
+                repository=repository,
+                current_peer_identity={
+                    "pid": owner.pid,
+                    "start_ticks": start_ticks,
+                },
+                host_boot_id=boot_id,
+            )
+        )
+        assert same_request_complete is True
+        assert same_request == []
+    finally:
+        owner.terminate()
+        owner.wait(timeout=3)
+
+    matches_after_exit, audit_complete_after_exit, _rows_after_exit = (
+        server._audited_session_processes(
+            owner_session_id="ses_live_owner",
+            repository=repository,
+            current_peer_identity=None,
+            host_boot_id=boot_id,
+        )
+    )
+    assert audit_complete_after_exit is True
+    assert matches_after_exit == []
+
+
 def test_host_process_inventory_explains_an_incomplete_request_tree(
     tmp_path: Path,
 ) -> None:

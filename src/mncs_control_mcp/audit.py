@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+from collections import deque
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -46,6 +47,40 @@ class AuditLog:
         if value is None or isinstance(value, (bool, int, float)):
             return value
         return redact_text(str(value)[:1024])
+
+    def environment_session_processes(
+        self, session_id: str, project: str, *, limit: int = 8192,
+    ) -> list[dict[str, object]]:
+        """Return recent authenticated Environment client identities for one session."""
+        if not 1 <= limit <= 32768:
+            limit = 8192
+        lines: deque[str] = deque(maxlen=limit)
+        try:
+            with self.path.open("r", encoding="utf-8") as handle:
+                lines.extend(handle)
+        except OSError:
+            return []
+        selected: list[dict[str, object]] = []
+        for line in lines:
+            try:
+                event = json.loads(line)
+            except (TypeError, ValueError):
+                continue
+            if (not isinstance(event, dict)
+                    or event.get("tool") != "mncs_environment"
+                    or event.get("session_id") != session_id
+                    or event.get("project") != project
+                    or type(event.get("client_pid")) is not int
+                    or event["client_pid"] <= 0):
+                continue
+            selected.append({
+                key: event.get(key) for key in (
+                    "timestamp", "client_pid", "client_start_ticks",
+                    "client_agent_pid", "client_agent_start_ticks",
+                    "client_host_boot_id",
+                )
+            })
+        return selected
 
     def summary(self, limit: int = 50) -> dict[str, object]:
         """Return aggregate recent metadata without exposing raw audit records."""

@@ -661,12 +661,21 @@ class EnvironmentRPCServer:
                     and isinstance(result, dict)
                     and result.get("exit_code", 0) == 0
                 )
+                client_start_ticks = self._proc_start_ticks(peer_pid)
+                client_agent = self._agent_process_identity(
+                    peer_pid,
+                    expected_peer_start_ticks=client_start_ticks,
+                )
                 self.audit_log.record(
                     "mncs_environment", success=successful,
                     error=(response.get("error") or {}).get("code")
                     if isinstance(response.get("error"), dict) else None,
                     operation=command, project=local_record.host_root.name,
                     session_id=local_record.bound_session_id, client_pid=peer_pid,
+                    client_start_ticks=client_start_ticks,
+                    client_agent_pid=(client_agent or {}).get("pid"),
+                    client_agent_start_ticks=(client_agent or {}).get("start_ticks"),
+                    client_host_boot_id=self._host_boot_id(),
                 )
             if request is not None and self._test_terminate_checkpoint_service_after_commit(
                 request, response,
@@ -2278,6 +2287,15 @@ class EnvironmentRPCServer:
             return None
 
     @staticmethod
+    def _host_boot_id() -> str | None:
+        try:
+            return Path("/proc/sys/kernel/random/boot_id").read_text(
+                encoding="ascii",
+            ).strip()
+        except OSError:
+            return None
+
+    @staticmethod
     def _looks_like_codex_process(executable: str | None, argv: list[str]) -> bool:
         names = {"codex", "codex-cli"}
         if executable and Path(executable).name.casefold() in names:
@@ -2919,6 +2937,211 @@ class EnvironmentRPCServer:
                 matches.append(unit_id[:240])
         return matches, len(units), True
 
+    def _agent_process_identity(
+        self, peer_pid: int, *, expected_peer_start_ticks: str | None = None,
+    ) -> dict[str, object] | None:
+        """Resolve the closest live Codex execution process for an authenticated client."""
+        peer_ticks = self._proc_start_ticks(peer_pid)
+        if (peer_ticks is None
+                or (expected_peer_start_ticks is not None
+                    and peer_ticks != expected_peer_start_ticks)):
+            return None
+        current_pid = peer_pid
+        seen: set[int] = set()
+        fallback: dict[str, object] | None = None
+        for _depth in range(10):
+            if current_pid <= 1 or current_pid in seen:
+                break
+            seen.add(current_pid)
+            entry = Path("/proc") / str(current_pid)
+            try:
+                status = (entry / "status").read_text(encoding="utf-8")
+                uid = int(next(
+                    line.split()[1] for line in status.splitlines()
+                    if line.startswith("Uid:")
+                ))
+                if uid != os.getuid():
+                    break
+                parent_pid = int(next(
+                    line.split()[1] for line in status.splitlines()
+                    if line.startswith("PPid:")
+                ))
+                comm = (entry / "comm").read_text(encoding="utf-8").strip()
+                start_ticks = self._proc_start_ticks(current_pid)
+                if start_ticks is None:
+                    break
+                if current_pid == peer_pid:
+                    fallback = {
+                        "pid": current_pid,
+                        "start_ticks": start_ticks,
+                        "comm": comm,
+                    }
+                executable_name = ""
+                try:
+                    executable_name = Path(os.readlink(entry / "exe")).name
+                except OSError:
+                    pass
+                if current_pid != peer_pid and (
+                    comm == "codex" or executable_name == "codex"
+                ):
+                    return {
+                        "pid": current_pid,
+                        "start_ticks": start_ticks,
+                        "comm": comm,
+                    }
+                current_pid = parent_pid
+            except (OSError, StopIteration, ValueError, IndexError):
+                break
+        return fallback
+
+    def _process_started_at(self, pid: int) -> datetime | None:
+        """Convert a live PID's kernel start ticks to host UTC for legacy audit rows."""
+        start_ticks = self._proc_start_ticks(pid)
+        if start_ticks is None:
+            return None
+        try:
+            boot_time = int(next(
+                line.split()[1] for line in Path("/proc/stat").read_text(
+                    encoding="ascii",
+                ).splitlines()
+                if line.startswith("btime ")
+            ))
+            ticks_per_second = os.sysconf("SC_CLK_TCK")
+            return datetime.fromtimestamp(
+                boot_time + int(start_ticks) / ticks_per_second,
+                tz=UTC,
+            )
+        except (OSError, StopIteration, ValueError, IndexError, OverflowError):
+            return None
+
+    def _audited_session_processes(
+        self, *, owner_session_id: str, repository: str,
+        current_peer_identity: dict[str, object] | None,
+        host_boot_id: str | None,
+    ) -> tuple[list[dict[str, object]], bool, int]:
+        """Use Control's authenticated audit PIDs when procfs hides a client's cwd."""
+        if self.audit_log is None:
+            return [], True, 0
+        reader = getattr(self.audit_log, "environment_session_processes", None)
+        if not callable(reader):
+            return [], False, 0
+        try:
+            rows = reader(owner_session_id, repository)
+        except (OSError, ValueError):
+            return [], False, 0
+        if not isinstance(rows, list) or not rows:
+            return [], False, 0
+
+        current_peer_pid = (
+            current_peer_identity.get("pid")
+            if isinstance(current_peer_identity, dict)
+            and type(current_peer_identity.get("pid")) is int
+            else None
+        )
+        current_peer_ticks = (
+            current_peer_identity.get("start_ticks")
+            if isinstance(current_peer_identity, dict)
+            and isinstance(current_peer_identity.get("start_ticks"), str)
+            else None
+        )
+        current_agent = (
+            self._agent_process_identity(
+                current_peer_pid,
+                expected_peer_start_ticks=current_peer_ticks,
+            ) if current_peer_pid is not None else None
+        )
+        current_ids = {
+            (current_peer_pid, current_peer_ticks),
+            (current_agent.get("pid"), current_agent.get("start_ticks"))
+            if current_agent else (None, None),
+        }
+        observations: dict[tuple[int, str], dict[str, object]] = {}
+
+        def observe(pid: object, start_ticks: object, role: str) -> None:
+            if (type(pid) is not int or pid <= 1
+                    or not isinstance(start_ticks, str) or not start_ticks
+                    or (pid, start_ticks) in current_ids
+                    or self._proc_start_ticks(pid) != start_ticks):
+                return
+            key = (pid, start_ticks)
+            if key in observations:
+                return
+            try:
+                status = Path(f"/proc/{pid}/status").read_text(encoding="utf-8")
+                parent_pid = int(next(
+                    line.split()[1] for line in status.splitlines()
+                    if line.startswith("PPid:")
+                ))
+                comm = Path(f"/proc/{pid}/comm").read_text(
+                    encoding="utf-8",
+                ).strip()
+            except (OSError, StopIteration, ValueError, IndexError):
+                parent_pid, comm = 1, role
+            observations[key] = {
+                "pid": pid,
+                "ppid": max(parent_pid, 1),
+                "start_ticks": start_ticks,
+                "comm": comm or role,
+                "reason": "former-session-authenticated-client",
+            }
+
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            row_boot_id = row.get("client_host_boot_id")
+            if (isinstance(row_boot_id, str) and row_boot_id
+                    and row_boot_id != host_boot_id):
+                continue
+            row_has_identity = (
+                isinstance(row.get("client_agent_start_ticks"), str)
+                and type(row.get("client_agent_pid")) is int
+            )
+            if row_has_identity:
+                observe(
+                    row.get("client_agent_pid"),
+                    row.get("client_agent_start_ticks"),
+                    "codex",
+                )
+            client_pid = row.get("client_pid")
+            client_ticks = row.get("client_start_ticks")
+            if (type(client_pid) is not int or client_pid <= 1
+                    or (isinstance(row_boot_id, str) and row_boot_id
+                        and row_boot_id != host_boot_id)):
+                continue
+            if not isinstance(client_ticks, str) or not client_ticks:
+                client_ticks = self._proc_start_ticks(client_pid)
+                timestamp = row.get("timestamp")
+                try:
+                    observed_at = datetime.fromisoformat(
+                        str(timestamp).replace("Z", "+00:00"),
+                    )
+                except (TypeError, ValueError):
+                    continue
+                process_started_at = self._process_started_at(client_pid)
+                if (client_ticks is None or process_started_at is None
+                        or process_started_at > observed_at):
+                    continue
+            observe(client_pid, client_ticks, "mncs-environment")
+            if not row_has_identity:
+                agent = self._agent_process_identity(
+                    client_pid, expected_peer_start_ticks=client_ticks,
+                )
+                if agent is not None:
+                    timestamp = row.get("timestamp")
+                    try:
+                        observed_at = datetime.fromisoformat(
+                            str(timestamp).replace("Z", "+00:00"),
+                        )
+                    except (TypeError, ValueError):
+                        continue
+                    agent_started_at = self._process_started_at(
+                        int(agent["pid"]),
+                    )
+                    if (agent_started_at is not None
+                            and agent_started_at <= observed_at):
+                        observe(agent.get("pid"), agent.get("start_ticks"), "codex")
+        return list(observations.values()), True, len(rows)
+
     def _recovery_liveness_snapshot(
         self, *, owner_session_id: str, repository: str, current_request_id: str,
         current_grant_id: str, checkout: str | None = None,
@@ -2968,6 +3191,22 @@ class EnvironmentRPCServer:
                 current_peer_identity=current_peer_identity,
             )
         )
+        (audited_processes, audit_complete, audit_row_count) = (
+            self._audited_session_processes(
+                owner_session_id=owner_session_id,
+                repository=repository,
+                current_peer_identity=current_peer_identity,
+                host_boot_id=boot_id,
+            )
+        )
+        known_process_ids = {item.get("pid") for item in processes}
+        processes.extend(
+            item for item in audited_processes
+            if item.get("pid") not in known_process_ids
+        )
+        process_complete = process_complete and audit_complete
+        process_diagnostics["owner_execution_audit_complete"] = audit_complete
+        process_diagnostics["owner_execution_audit_rows"] = audit_row_count
         services, service_count, services_complete = self._matching_user_services(
             owner_session_id=owner_session_id, repository=repository,
             checkout=checkout,
