@@ -45,9 +45,11 @@ ALLOWED_INVOKE_CAPABILITIES = frozenset({
     "mncs-environment:campaign-state-inspection",
     "mncs-compiler:compiler-producer",
     "mncs-compiler:compiler-build",
+    "mncs-compiler:native-application-build",
     "mncs-forge:canonical-vm-work",
     "mncs-forge:provider-artifact-execution",
     "mncs-forge:compiler-vm-scheduled-work",
+    "mncs-forge:native-application-execution",
     "mncs-system-monitor:system-resource-sample",
     "mncs-system-monitor:system-observability",
     "mncs-automation:automation-resource-headroom-evaluation",
@@ -840,6 +842,10 @@ class EnvironmentRPCServer:
             self._authorize_campaign_state_argv(argv, record)
         if command == "artifact-read":
             allowed_artifacts = {
+                ("mncs-compiler:native-application-build",
+                 "native-application-build.json"),
+                ("mncs-forge:native-application-execution",
+                 "native-application-execution.json"),
                 ("mncs-forge:provider-artifact-execution",
                  "forge-execution-receipt.json"),
                 ("mncs-forge:provider-artifact-execution",
@@ -928,6 +934,10 @@ class EnvironmentRPCServer:
             )
             if resource_evaluation:
                 self._authorize_resource_headroom_invocation(argv, record)
+            elif argv[2] == "mncs-compiler:native-application-build":
+                self._authorize_native_application_build_invocation(argv, record)
+            elif argv[2] == "mncs-forge:native-application-execution":
+                self._authorize_native_application_execution_invocation(argv, record)
             elif argv[2] in {
                 "mncs-forge:provider-artifact-execution",
                 "mncs-system-monitor:system-resource-sample",
@@ -1653,6 +1663,80 @@ class EnvironmentRPCServer:
                 "ENVIRONMENT_AUTHORITY_DENIED",
                 "Compiler integration invocation exceeds its typed artifact contract",
                 details={"capability": capability},
+            )
+
+    def _authorize_native_application_build_invocation(
+        self, argv: list[str], record: _GrantRecord,
+    ) -> None:
+        """Expose Compiler's bounded native-application request-file contract."""
+        environment_project = self.config.repositories.get(
+            "environment", "mncs-environment"
+        )
+        allowed = (
+            record.scope == "project"
+            and self._project_repository(record) == environment_project
+            and record.bound_session_id == argv[1]
+            and len(argv) == 6
+            and argv[:5] == [
+                "invoke", argv[1], "mncs-compiler:native-application-build",
+                "build", "--request-file",
+            ]
+            and _safe_relative_artifact_path(argv[5])
+            and argv[5].endswith(".json")
+        )
+        if not allowed:
+            raise ControlError(
+                "ENVIRONMENT_AUTHORITY_DENIED",
+                "Compiler application build requires one selected Environment session and a relative JSON request path",
+                details={"capability": "mncs-compiler:native-application-build"},
+            )
+
+    def _authorize_native_application_execution_invocation(
+        self, argv: list[str], record: _GrantRecord,
+    ) -> None:
+        """Admit the exact Store build artifact and one bounded typed VM call."""
+        environment_project = self.config.repositories.get(
+            "environment", "mncs-environment"
+        )
+        prefix = [
+            "invoke", argv[1] if len(argv) > 1 else "",
+            "mncs-forge:native-application-execution",
+            "--input-artifact", "native-application-build",
+            "mncs-compiler:native-application-build",
+        ]
+        encoded_call = argv[10] if len(argv) > 10 else ""
+        canonical_call = False
+        if len(encoded_call.encode("utf-8")) <= 32768:
+            try:
+                call = json.loads(encoded_call)
+                canonical = json.dumps(
+                    call, ensure_ascii=False, sort_keys=True,
+                    separators=(",", ":"), allow_nan=False,
+                )
+                canonical_call = (
+                    isinstance(call, dict)
+                    and set(call) == {"arguments"}
+                    and isinstance(call.get("arguments"), dict)
+                    and canonical == encoded_call
+                )
+            except (TypeError, ValueError, UnicodeDecodeError, json.JSONDecodeError):
+                canonical_call = False
+        allowed = (
+            record.scope == "project"
+            and self._project_repository(record) == environment_project
+            and record.bound_session_id == argv[1]
+            and len(argv) == 11
+            and argv[:6] == prefix
+            and re.fullmatch(r"cap_[0-9a-f]{16}", argv[6]) is not None
+            and argv[7] == "native-application-build.json"
+            and argv[8:10] == ["--", "--call-json"]
+            and canonical_call
+        )
+        if not allowed:
+            raise ControlError(
+                "ENVIRONMENT_AUTHORITY_DENIED",
+                "Forge native application execution requires the exact Compiler build artifact and bounded typed arguments",
+                details={"capability": "mncs-forge:native-application-execution"},
             )
 
     def _authorize_resource_headroom_invocation(

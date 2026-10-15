@@ -1920,7 +1920,7 @@ def test_project_campaign_entry_maps_single_checkout_inside_grant(
 def test_project_grant_returns_authenticated_campaign_capsule(tmp_path: Path) -> None:
     workspace = tmp_path / "projects"
     project = workspace / "mncs-environment"
-    project.mkdir(parents=True)
+    (project / ".worktrees" / "gatec").mkdir(parents=True)
     calls: list[tuple[str, str | None, str | None]] = []
 
     class Environment:
@@ -2234,6 +2234,34 @@ def test_artifact_read_is_bound_to_environment_selected_project_session(
         ]
         assert authorized_sessions[-1] == ("ses_selected", "principal-agent")
 
+    native_build_capability = "mncs-compiler:native-application-build"
+    native_build_binding_id = "cap_" + "f" * 16
+    native_build_read = server.dispatch({
+        **base,
+        "request_id": "req_artifact_read_native_application_build",
+        "argv": ["artifact-read", "ses_selected", native_build_capability,
+                 native_build_binding_id, "native-application-build.json"],
+    }, peer_uid=0)
+    assert native_build_read["ok"] is True
+    assert calls[7][0][-5:] == [
+        "artifact-read", "ses_selected", native_build_capability,
+        native_build_binding_id, "native-application-build.json",
+    ]
+
+    native_execution_capability = "mncs-forge:native-application-execution"
+    native_execution_binding_id = "cap_" + "1" * 16
+    native_execution_read = server.dispatch({
+        **base,
+        "request_id": "req_artifact_read_native_application_execution",
+        "argv": ["artifact-read", "ses_selected", native_execution_capability,
+                 native_execution_binding_id, "native-application-execution.json"],
+    }, peer_uid=0)
+    assert native_execution_read["ok"] is True
+    assert calls[8][0][-5:] == [
+        "artifact-read", "ses_selected", native_execution_capability,
+        native_execution_binding_id, "native-application-execution.json",
+    ]
+
     selected_session[0] = "ses_other"
     server.dispatch({
         **base,
@@ -2270,7 +2298,7 @@ def test_artifact_read_is_bound_to_environment_selected_project_session(
             "argv": argv,
         }, peer_uid=0)
         assert rejected["error"]["code"] == "ENVIRONMENT_AUTHORITY_DENIED"
-    assert len(calls) == 7
+    assert len(calls) == 9
 
 
 def test_project_grant_can_read_only_its_own_bounded_artifact_namespace(
@@ -4069,6 +4097,104 @@ def test_project_rpc_invokes_only_its_fixed_verification_capabilities(
         }, peer_uid=0)
         assert rejected["ok"] is False
     assert len(calls) == 1
+
+
+def test_environment_project_rpc_admits_typed_native_application_flow(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "projects"
+    project = workspace / "mncs-environment"
+    (project / ".worktrees" / "gatec").mkdir(parents=True)
+    token = "environment-native-application-gatec-grant"
+
+    class Store:
+        def load_snapshot(self, _session_id: str) -> dict[str, str]:
+            return {"authenticated_principal_id": "principal-agent"}
+
+        def close(self) -> None:
+            pass
+
+    class Environment:
+        state_dir = tmp_path / "state"
+        environment_path = tmp_path / "environment"
+
+        def _pkg(self) -> object:
+            return object()
+
+        def _store(self, _pkg: object) -> Store:
+            return Store()
+
+    server = EnvironmentRPCServer(
+        ControlConfig(
+            workspace_root=workspace,
+            repositories={"environment": "mncs-environment"},
+            sandbox_home=tmp_path / "home",
+            environment_rpc_socket=tmp_path / "rpc" / "environment.sock",
+        ),
+        environment_service=Environment(),
+        policy=object(),
+    )
+    server._grants[hashlib.sha256(token.encode()).hexdigest()] = _GrantRecord(
+        grant_id="environment-native-application-gatec-grant",
+        principal_id="principal-agent",
+        host_root=project,
+        sandbox_root="/workspace/mncs-environment",
+        scope="project",
+        uid=0,
+        expires_at=time.monotonic() + 60,
+        token_file=tmp_path / "grant",
+        bound_session_id="ses_gatec",
+    )
+    calls: list[tuple[list[str], dict[str, object]]] = []
+
+    def run(argv: list[str], **kwargs: object) -> SimpleNamespace:
+        calls.append((argv, kwargs))
+        return SimpleNamespace(returncode=0, stdout='{"status":"stored"}\n', stderr="")
+
+    monkeypatch.setattr("mncs_control_mcp.environment_rpc.subprocess.run", run)
+    base = {
+        "grant": token,
+        "cwd": "/workspace/mncs-environment/.worktrees/gatec",
+    }
+    build_argv = [
+        "invoke", "ses_gatec", "mncs-compiler:native-application-build",
+        "build", "--request-file", "build/gatec/request.json",
+    ]
+    built = server.dispatch({
+        **base, "request_id": "req_gatec_application_build", "argv": build_argv,
+    }, peer_uid=0)
+    assert built["ok"] is True
+    assert calls[0][0][-len(build_argv):] == build_argv
+
+    execution_argv = [
+        "invoke", "ses_gatec", "mncs-forge:native-application-execution",
+        "--input-artifact", "native-application-build",
+        "mncs-compiler:native-application-build", "cap_0123456789abcdef",
+        "native-application-build.json", "--", "--call-json",
+        '{"arguments":{"case_index":3,"seed":17}}',
+    ]
+    executed = server.dispatch({
+        **base, "request_id": "req_gatec_application_execution", "argv": execution_argv,
+    }, peer_uid=0)
+    assert executed["ok"] is True
+    assert calls[1][0][-len(execution_argv):] == execution_argv
+
+    for index, invalid_argv in enumerate((
+        [*build_argv, "--timeout-seconds", "900"],
+        [*execution_argv[:-2], "--call-json", '{"callable":"arbitrary"}'],
+        ["invoke", "ses_other", *build_argv[2:]],
+        ["invoke", "ses_gatec", "mncs-forge:native-application-execution",
+         "--input-artifact", "other", "mncs-compiler:native-application-build",
+         "cap_0123456789abcdef", "native-application-build.json", "--",
+         "--call-json", '{"arguments":{}}'],
+    )):
+        rejected = server.dispatch({
+            **base,
+            "request_id": f"req_gatec_application_rejected_{index}",
+            "argv": invalid_argv,
+        }, peer_uid=0)
+        assert rejected["ok"] is False
+    assert len(calls) == 2
 
 
 def test_project_rpc_invokes_the_declared_canonical_test_vm_capability(

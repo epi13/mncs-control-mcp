@@ -19,11 +19,11 @@ SESSION_RE = re.compile(r"ses_[A-Za-z0-9_-]{1,120}")
 TOKEN_RE = re.compile(r"[A-Za-z0-9_-]{32,128}")
 OPERATIONS = frozenset({
     "enter", "continuation", "inspect", "context", "health", "capabilities",
-    "resume", "verify", "checkpoint", "handoff", "complete", "claims",
+    "resume", "verify", "invoke", "checkpoint", "handoff", "complete", "claims",
     "campaign_state", "artifact_read", "store_generation",
 })
 SESSION_OPERATIONS = frozenset({
-    "inspect", "context", "health", "capabilities", "resume", "verify",
+    "inspect", "context", "health", "capabilities", "resume", "verify", "invoke",
     "checkpoint", "handoff", "complete", "claims", "campaign_state",
     "artifact_read", "store_generation",
 })
@@ -128,6 +128,7 @@ def _build_argv(
         "health": {"session_id", "live"}, "capabilities": {"session_id"},
         "resume": {"session_id"},
         "verify": {"session_id", "capability"},
+        "invoke": {"session_id", "capability", "request_file", "input_artifact", "call"},
         "checkpoint": {
             "session_id", "progress", "remaining", "campaign_base_checkpoint",
             "campaign_evidence", "campaign_evidence_delta", "campaign_delivery",
@@ -151,9 +152,14 @@ def _build_argv(
         raise ValueError("claims mode must be list, acquire, or release")
     if operation == "claims" and claims_mode in {"list", "acquire"}:
         repository = values.get("repository", project)
-        if repository != project:
-            raise ValueError("project-scoped claims must target the selected project")
+        if (not isinstance(repository, str)
+                or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", repository)
+                or (repository != project and project != "mncs-environment")):
+            raise ValueError(
+                "claims may target only the selected project, or a selected repository from the Environment project session"
+            )
         values = {**values, "repository": project}
+        values["repository"] = repository
     argv: list[str]
     if operation == "enter":
         argv = ["enter"]
@@ -197,6 +203,45 @@ def _build_argv(
         # this exact fixed-argument CLI form; the Environment descriptor owns
         # the provider command and the selected session owns its authority.
         return ["invoke", session_id, capability], True
+    if operation == "invoke":
+        capability = _string(values.get("capability"), "capability", max_length=256)
+        if capability == "mncs-compiler:native-application-build":
+            if set(values) - {"session_id", "capability", "request_file"}:
+                raise ValueError("Compiler application build accepts one request_file")
+            request_file = _relative_path(values.get("request_file"), "request_file")
+            if not request_file.endswith(".json"):
+                raise ValueError("request_file must name a JSON build request")
+            return ["invoke", session_id, capability, "build", "--request-file", request_file], True
+        if capability == "mncs-forge:native-application-execution":
+            artifact = values.get("input_artifact")
+            if (not isinstance(artifact, dict)
+                    or set(artifact) != {"name", "capability", "binding_id", "path"}
+                    or artifact.get("name") != "native-application-build"
+                    or artifact.get("capability") != "mncs-compiler:native-application-build"
+                    or not isinstance(artifact.get("binding_id"), str)
+                    or not re.fullmatch(r"cap_[0-9a-f]{16}", artifact["binding_id"])
+                    or artifact.get("path") != "native-application-build.json"):
+                raise ValueError("Forge execution requires the exact Compiler application-build Store artifact")
+            call = values.get("call")
+            if (not isinstance(call, dict) or set(call) != {"arguments"}
+                    or not isinstance(call.get("arguments"), dict)):
+                raise ValueError("Forge execution call must contain one typed arguments object")
+            try:
+                encoded_call = json.dumps(
+                    call, ensure_ascii=False, sort_keys=True,
+                    separators=(",", ":"), allow_nan=False,
+                )
+            except (TypeError, ValueError) as error:
+                raise ValueError("Forge execution call must be bounded JSON data") from error
+            if len(encoded_call.encode("utf-8")) > 32768:
+                raise ValueError("Forge execution call exceeds the 32 KiB input bound")
+            return [
+                "invoke", session_id, capability,
+                "--input-artifact", artifact["name"], artifact["capability"],
+                artifact["binding_id"], artifact["path"],
+                "--", "--call-json", encoded_call,
+            ], True
+        raise ValueError("invoke supports only native-application-build and native-application-execution")
     if operation == "health":
         argv = ["health", session_id]
         if values.get("live") is True:
@@ -700,6 +745,7 @@ class LocalEnvironmentMCP:
                     "mode", "repository", "claim_id", "offset", "limit", "reason", "ttl",
                     "basis", "paths", "worktree", "branch", "expected_store_generation",
                     "evidence_offset", "evidence_limit", "capability", "binding_id", "path",
+                    "request_file", "input_artifact", "call",
                     *SESSION_SELECTOR_FIELDS,
                 })
                 selected_error = self._select_session(context, project, values)
@@ -781,8 +827,10 @@ def main() -> None:
             "with its descriptor's fixed arguments and selected project authority. "
             "The project and optional project-relative cwd "
             "select one project directory. Session operations may include campaign_id "
-            "or task_identity to reselect safely after an MCP process restart. No shell "
-            "or arbitrary CLI arguments are accepted."
+            "or task_identity to reselect safely after an MCP process restart. Invoke is "
+            "limited to the typed Compiler application-build and Forge application-execution "
+            "contracts; Environment enforces the selected session's repository authority. "
+            "No shell or arbitrary CLI arguments are accepted."
         ),
     )
     def mncs_environment(

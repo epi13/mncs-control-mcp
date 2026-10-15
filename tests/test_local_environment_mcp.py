@@ -116,6 +116,104 @@ def test_claim_release_mapping_is_explicit_and_bounded() -> None:
         )
 
 
+def test_environment_claims_follow_selected_session_repository_authority() -> None:
+    context = _ProjectContext("secret", "/workspace/mncs-environment/.worktrees/gatec")
+    context.selected_session_id = "ses_selected"
+    argv, selected = _build_argv(
+        "claims",
+        {"mode": "acquire", "repository": "mncs-compiler", "reason": "Gate C",
+         "basis": "explicit-claim"},
+        context,
+        "mncs-environment",
+    )
+    assert selected is True
+    assert argv == [
+        "claims", "ses_selected", "--acquire", "mncs-compiler",
+        "--reason", "Gate C", "--basis", "explicit-claim",
+    ]
+
+    with pytest.raises(ValueError, match="selected project"):
+        _build_argv(
+            "claims",
+            {"mode": "acquire", "repository": "mncs-forge"},
+            context,
+            "mncs-compiler",
+        )
+    with pytest.raises(ValueError, match="selected repository"):
+        _build_argv(
+            "claims",
+            {"mode": "acquire", "repository": "../mncs-forge"},
+            context,
+            "mncs-environment",
+        )
+
+
+def test_native_application_invocations_map_to_fixed_typed_contracts() -> None:
+    context = _ProjectContext("secret", "/workspace/mncs-environment/.worktrees/gatec")
+    context.selected_session_id = "ses_selected"
+    build, selected = _build_argv(
+        "invoke",
+        {
+            "capability": "mncs-compiler:native-application-build",
+            "request_file": "build/gatec/request.json",
+        },
+        context,
+        "mncs-environment",
+    )
+    assert selected is True
+    assert build == [
+        "invoke", "ses_selected", "mncs-compiler:native-application-build",
+        "build", "--request-file", "build/gatec/request.json",
+    ]
+
+    execution, selected = _build_argv(
+        "invoke",
+        {
+            "capability": "mncs-forge:native-application-execution",
+            "input_artifact": {
+                "name": "native-application-build",
+                "capability": "mncs-compiler:native-application-build",
+                "binding_id": "cap_0123456789abcdef",
+                "path": "native-application-build.json",
+            },
+            "call": {"arguments": {"case_index": 3, "seed": 17}},
+        },
+        context,
+        "mncs-environment",
+    )
+    assert selected is True
+    assert execution[:9] == [
+        "invoke", "ses_selected", "mncs-forge:native-application-execution",
+        "--input-artifact", "native-application-build",
+        "mncs-compiler:native-application-build", "cap_0123456789abcdef",
+        "native-application-build.json", "--",
+    ]
+    assert execution[9] == "--call-json"
+    assert json.loads(execution[10]) == {"arguments": {"case_index": 3, "seed": 17}}
+
+    for arguments in (
+        {"capability": "mncs-compiler:compiler-build", "request_file": "request.json"},
+        {"capability": "mncs-compiler:native-application-build", "request_file": "../request.json"},
+        {
+            "capability": "mncs-forge:native-application-execution",
+            "input_artifact": {"name": "arbitrary", "capability": "x", "binding_id": "bad", "path": "x"},
+            "call": {"arguments": {}},
+        },
+        {
+            "capability": "mncs-forge:native-application-execution",
+            "input_artifact": {
+                "name": "native-application-build",
+                "capability": "mncs-compiler:native-application-build",
+                "binding_id": "cap_0123456789abcdef",
+                "path": "native-application-build.json",
+            },
+            "call": {"arguments": {}, "callable": "arbitrary"},
+        },
+    ):
+        with pytest.raises(ValueError):
+            _build_argv("invoke", arguments, context, "mncs-environment")
+
+
 def test_campaign_continuation_trusts_only_control_selected_session() -> None:
     assert LocalEnvironmentMCP._selected_session({
         "status": "ready",
