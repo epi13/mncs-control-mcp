@@ -846,6 +846,8 @@ class EnvironmentRPCServer:
                  "native-application-build.json"),
                 ("mncs-forge:native-application-execution",
                  "native-application-execution.json"),
+                ("mncs-forge:native-application-execution",
+                 "forge-execution-receipt.json"),
                 ("mncs-forge:provider-artifact-execution",
                  "forge-execution-receipt.json"),
                 ("mncs-forge:provider-artifact-execution",

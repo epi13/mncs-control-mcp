@@ -2261,6 +2261,17 @@ def test_artifact_read_is_bound_to_environment_selected_project_session(
         "artifact-read", "ses_selected", native_execution_capability,
         native_execution_binding_id, "native-application-execution.json",
     ]
+    native_execution_receipt_read = server.dispatch({
+        **base,
+        "request_id": "req_artifact_read_native_application_receipt",
+        "argv": ["artifact-read", "ses_selected", native_execution_capability,
+                 native_execution_binding_id, "forge-execution-receipt.json"],
+    }, peer_uid=0)
+    assert native_execution_receipt_read["ok"] is True
+    assert calls[9][0][-5:] == [
+        "artifact-read", "ses_selected", native_execution_capability,
+        native_execution_binding_id, "forge-execution-receipt.json",
+    ]
 
     selected_session[0] = "ses_other"
     server.dispatch({
@@ -2298,7 +2309,7 @@ def test_artifact_read_is_bound_to_environment_selected_project_session(
             "argv": argv,
         }, peer_uid=0)
         assert rejected["error"]["code"] == "ENVIRONMENT_AUTHORITY_DENIED"
-    assert len(calls) == 9
+    assert len(calls) == 10
 
 
 def test_project_grant_can_read_only_its_own_bounded_artifact_namespace(
