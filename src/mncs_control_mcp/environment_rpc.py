@@ -2698,53 +2698,66 @@ class EnvironmentRPCServer:
         if peer_entry is None:
             return None
         try:
-            peer_status = (peer_entry / "status").read_text(encoding="utf-8")
             if self._proc_start_ticks(peer_pid) != peer_identity["start_ticks"]:
                 return None
-            parent_pid = int(next(
-                line.split()[1] for line in peer_status.splitlines()
-                if line.startswith("PPid:")
-            ))
-            parent_entry = entries_by_pid.get(parent_pid)
-            if parent_entry is None:
-                return None
-            parent_status = (parent_entry / "status").read_text(encoding="utf-8")
-            parent_uid = int(next(
-                line.split()[1] for line in parent_status.splitlines()
-                if line.startswith("Uid:")
-            ))
-            if parent_uid != os.getuid():
-                return None
-            parent_comm = (parent_entry / "comm").read_text(
-                encoding="utf-8",
-            ).strip()
-            if parent_comm not in {"bash", "dash", "fish", "ksh", "sh", "zsh"}:
-                return None
-            peer_cmdline = (peer_entry / "cmdline").read_bytes()
-            parent_cmdline = (parent_entry / "cmdline").read_bytes()
-            peer_argv = [item.decode("utf-8", errors="replace")
-                         for item in peer_cmdline.split(b"\x00") if item]
-            parent_argv = [item.decode("utf-8", errors="replace")
-                           for item in parent_cmdline.split(b"\x00") if item]
-            if not peer_argv or len(parent_argv) < 3:
-                return None
-            command_index = next((
-                index + 1 for index, item in enumerate(parent_argv[1:], start=1)
-                if item.startswith("-") and "c" in item[1:]
-                and index + 1 < len(parent_argv)
-            ), None)
-            if command_index is None:
-                return None
-            command_argv = shlex.split(parent_argv[command_index])
-            if (not command_argv
-                    or Path(command_argv[0]).name != Path(peer_argv[0]).name):
-                return None
-            start_ticks = self._proc_start_ticks(parent_pid)
-            if start_ticks is None:
-                return None
-            return {"pid": parent_pid, "start_ticks": start_ticks}
+            child_entry = peer_entry
+            seen = {peer_pid}
+            for _depth in range(8):
+                child_status = (child_entry / "status").read_text(encoding="utf-8")
+                parent_pid = int(next(
+                    line.split()[1] for line in child_status.splitlines()
+                    if line.startswith("PPid:")
+                ))
+                if parent_pid <= 1 or parent_pid in seen:
+                    return None
+                seen.add(parent_pid)
+                parent_entry = entries_by_pid.get(parent_pid)
+                if parent_entry is None:
+                    return None
+                parent_status = (parent_entry / "status").read_text(
+                    encoding="utf-8",
+                )
+                parent_uid = int(next(
+                    line.split()[1] for line in parent_status.splitlines()
+                    if line.startswith("Uid:")
+                ))
+                if parent_uid != os.getuid():
+                    return None
+                parent_comm = (parent_entry / "comm").read_text(
+                    encoding="utf-8",
+                ).strip()
+                if parent_comm in {"bash", "dash", "fish", "ksh", "sh", "zsh"}:
+                    child_cmdline = (child_entry / "cmdline").read_bytes()
+                    parent_cmdline = (parent_entry / "cmdline").read_bytes()
+                    child_argv = [item.decode("utf-8", errors="replace")
+                                  for item in child_cmdline.split(b"\x00") if item]
+                    parent_argv = [item.decode("utf-8", errors="replace")
+                                   for item in parent_cmdline.split(b"\x00") if item]
+                    if child_argv and len(parent_argv) >= 3:
+                        command_index = next((
+                            index + 1 for index, item in enumerate(
+                                parent_argv[1:], start=1,
+                            )
+                            if item.startswith("-") and "c" in item[1:]
+                            and index + 1 < len(parent_argv)
+                        ), None)
+                        if command_index is not None:
+                            command_argv = shlex.split(
+                                parent_argv[command_index],
+                            )
+                            if (command_argv
+                                    and Path(command_argv[0]).name
+                                    == Path(child_argv[0]).name):
+                                start_ticks = self._proc_start_ticks(parent_pid)
+                                if start_ticks is not None:
+                                    return {
+                                        "pid": parent_pid,
+                                        "start_ticks": start_ticks,
+                                    }
+                child_entry = parent_entry
         except (OSError, StopIteration, ValueError, IndexError):
             return None
+        return None
 
     def _process_tree_exclusions(
         self,

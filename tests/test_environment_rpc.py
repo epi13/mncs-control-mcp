@@ -591,14 +591,19 @@ def test_recovery_inventory_excludes_only_the_current_codex_shell_launcher(
     )
     launcher = subprocess.Popen(
         ["bash", "-c",
-         f"python3 -c 'import time; time.sleep(30)' {checkout} & wait"],
+         "python3 -c 'import subprocess,sys,time; "
+         "subprocess.Popen([sys.executable, \"-c\", "
+         "\"import time; time.sleep(30)\"]); time.sleep(30)' "
+         f"# {checkout}\nwait"],
         cwd=tmp_path,
         start_new_session=True,
     )
+    wrapper_pid = None
     peer_pid = None
     try:
         deadline = time.monotonic() + 3
         while time.monotonic() < deadline:
+            parents = {}
             for entry in Path("/proc").iterdir():
                 if not entry.name.isdigit():
                     continue
@@ -610,12 +615,18 @@ def test_recovery_inventory_excludes_only_the_current_codex_shell_launcher(
                     ))
                 except (OSError, StopIteration, ValueError, IndexError):
                     continue
-                if parent == launcher.pid:
-                    peer_pid = int(entry.name)
-                    break
-            if peer_pid is not None:
+                parents[int(entry.name)] = parent
+            wrapper_pid = next((
+                pid for pid, parent in parents.items() if parent == launcher.pid
+            ), None)
+            if wrapper_pid is not None:
+                peer_pid = next((
+                    pid for pid, parent in parents.items() if parent == wrapper_pid
+                ), None)
+            if wrapper_pid is not None and peer_pid is not None:
                 break
             time.sleep(0.02)
+        assert wrapper_pid is not None
         assert peer_pid is not None
 
         manager = ProcessManager.__new__(ProcessManager)
