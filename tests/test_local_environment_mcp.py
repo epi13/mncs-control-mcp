@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import os
 import subprocess
@@ -278,6 +279,30 @@ def test_continuation_response_omits_large_workspace_inventory() -> None:
     assert len(encoded) < MAX_TOOL_RESULT_BYTES
     assert response["result"]["selected_session_id"] == "ses_selected"
     assert "live_repository_observation" not in response["result"]["continuations"][0]
+
+
+def test_artifact_read_result_fits_the_bounded_tool_response() -> None:
+    artifact = base64.b64encode(b"x" * 55_747).decode("ascii")
+    payload = {
+        "schema_version": "mncs.environment.artifact-read/1",
+        "session_id": "ses_selected",
+        "capability": "mncs-forge:native-application-execution",
+        "binding_id": "cap_07ea8bcfb58ff902",
+        "store_reference": "mncs-store:ses_selected:capability-invocation-artifacts:result",
+        "path": "native-application-execution.json",
+        "byte_count": 55_747,
+        "sha256": "a" * 64,
+        "content_base64": artifact,
+    }
+    response = LocalEnvironmentMCP._present("artifact_read", {
+        "ok": True,
+        "result": {"exit_code": 0, "stdout": json.dumps(payload), "stderr": ""},
+    })
+
+    assert response["ok"] is True
+    assert response["result"]["byte_count"] == 55_747
+    assert response["result"]["content_base64"] == artifact
+    assert len(json.dumps(response).encode("utf-8")) < MAX_TOOL_RESULT_BYTES
 
 
 def test_project_context_reuses_one_selected_worktree_when_cwd_is_omitted(

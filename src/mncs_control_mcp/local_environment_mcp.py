@@ -15,7 +15,9 @@ from typing import Any
 from .config import load_config
 
 MAX_FRAME = 256 * 1024
-MAX_TOOL_RESULT_BYTES = 64 * 1024
+# The largest artifact-read result is a 1 MiB file encoded as base64 plus
+# bounded provenance metadata. Keep enough response budget for that contract.
+MAX_TOOL_RESULT_BYTES = 2 * 1024 * 1024
 SESSION_RE = re.compile(r"ses_[A-Za-z0-9_-]{1,120}")
 TOKEN_RE = re.compile(r"[A-Za-z0-9_-]{32,128}")
 OPERATIONS = frozenset({
