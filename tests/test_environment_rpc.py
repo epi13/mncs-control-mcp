@@ -4158,7 +4158,7 @@ def test_environment_project_rpc_admits_typed_native_application_flow(
     }
     build_argv = [
         "invoke", "ses_gatec", "mncs-compiler:native-application-build",
-        "--", "build", "--request-file", "build/gatec/request.json",
+        "--", "--request-file", "build/gatec/request.json",
     ]
     built = server.dispatch({
         **base, "request_id": "req_gatec_application_build", "argv": build_argv,

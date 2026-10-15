@@ -213,7 +213,7 @@ def _build_argv(
                 raise ValueError("request_file must name a JSON build request")
             return [
                 "invoke", session_id, capability, "--",
-                "build", "--request-file", request_file,
+                "--request-file", request_file,
             ], True
         if capability == "mncs-forge:native-application-execution":
             artifact = values.get("input_artifact")

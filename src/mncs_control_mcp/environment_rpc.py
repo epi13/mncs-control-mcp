@@ -1676,13 +1676,13 @@ class EnvironmentRPCServer:
             record.scope == "project"
             and self._project_repository(record) == environment_project
             and record.bound_session_id == argv[1]
-            and len(argv) == 7
-            and argv[:6] == [
+            and len(argv) == 6
+            and argv[:5] == [
                 "invoke", argv[1], "mncs-compiler:native-application-build",
-                "--", "build", "--request-file",
+                "--", "--request-file",
             ]
-            and _safe_relative_artifact_path(argv[6])
-            and argv[6].endswith(".json")
+            and _safe_relative_artifact_path(argv[5])
+            and argv[5].endswith(".json")
         )
         if not allowed:
             raise ControlError(
