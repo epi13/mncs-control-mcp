@@ -862,6 +862,69 @@ def test_claim_recovery_uses_persisted_audit_process_identity_when_cwd_is_hidden
     assert matches_after_exit == []
 
 
+def test_audit_identity_from_prior_host_boot_cannot_keep_a_reused_pid_live(
+    tmp_path: Path,
+) -> None:
+    from mncs_control_mcp.audit import AuditLog
+    from mncs_control_mcp.processes import ProcessManager
+
+    repository = "mncs-compiler"
+    checkout = tmp_path / repository / ".worktrees" / "selected"
+    checkout.mkdir(parents=True)
+    owner = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        cwd=checkout,
+    )
+    try:
+        start_ticks = ProcessManager._process_start_ticks(owner.pid)
+        current_boot_id = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+        prior_boot_id = "00000000-0000-0000-0000-000000000000"
+        assert start_ticks is not None
+        assert current_boot_id != prior_boot_id
+
+        audit_path = tmp_path / "state" / "audit.jsonl"
+        audit_log = AuditLog(audit_path)
+        audit_log.record(
+            "mncs_environment",
+            success=True,
+            project=repository,
+            session_id="ses_pre_reboot_owner",
+            client_pid=owner.pid,
+            client_start_ticks=start_ticks,
+            client_agent_pid=owner.pid,
+            client_agent_start_ticks=start_ticks,
+            client_host_boot_id=prior_boot_id,
+        )
+        server = EnvironmentRPCServer(
+            ControlConfig(
+                workspace_root=tmp_path,
+                sandbox_home=tmp_path / "home",
+                environment_rpc_socket=tmp_path / "rpc" / "environment.sock",
+            ),
+            environment_service=SimpleNamespace(state_dir=tmp_path / "state"),
+            policy=object(),
+            process_manager=SimpleNamespace(),
+            audit_log=audit_log,
+        )
+
+        matches, audit_complete, rows_read, execution_contexts = (
+            server._audited_session_processes(
+                owner_session_id="ses_pre_reboot_owner",
+                repository=repository,
+                current_peer_identity=None,
+                host_boot_id=current_boot_id,
+            )
+        )
+
+        assert audit_complete is True
+        assert rows_read == 1
+        assert matches == []
+        assert execution_contexts == set()
+    finally:
+        owner.terminate()
+        owner.wait(timeout=3)
+
+
 def test_host_inventory_uses_audited_codex_launcher_when_cwd_is_hidden(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
