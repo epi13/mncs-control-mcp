@@ -2417,6 +2417,14 @@ class EnvironmentRPCServer:
             )
         )
         excluded_pids.update(tracked_excluded_pids)
+        (audited_processes, audit_complete, audit_row_count,
+         audited_execution_contexts) = self._audited_session_processes(
+            owner_session_id=owner_session_id,
+            repository=repository,
+            current_peer_identity=current_peer_identity,
+            host_boot_id=boot_id,
+            entries=entries,
+        )
         workspace_root = self.config.workspace_root.resolve(strict=False)
         sandbox_workspace_root = Path("/workspace")
 
@@ -2486,6 +2494,8 @@ class EnvironmentRPCServer:
             incomplete_counts[reason] = incomplete_counts.get(reason, 0) + 1
         if not tracked_exclusion_complete:
             mark_incomplete("tracked_job_process_tree_incomplete")
+        if not audit_complete:
+            mark_incomplete("owner_execution_audit_unavailable")
         for entry in entries:
             if not entry.name.isdigit():
                 continue
@@ -2622,9 +2632,16 @@ class EnvironmentRPCServer:
                 })
             if reason is not None and start_ticks is None:
                 mark_incomplete("matching_process_start_identity_unavailable")
-            if reason is not None and not environment_readable and not repository_server:
+            process_identity_is_audited = (
+                start_ticks is not None
+                and (pid, start_ticks) in audited_execution_contexts
+            )
+            if (reason is not None and not environment_readable
+                    and not repository_server and not process_identity_is_audited):
                 # A repository-associated process with hidden session context
-                # cannot be proved unrelated to the displaced owner.
+                # cannot be proved unrelated to the displaced owner. Exact
+                # identities in Control's authenticated session audit and the
+                # verified launch chain are already positive owner evidence.
                 mark_incomplete("matching_process_context_unreadable")
                 unreadable_match_count += 1
                 if len(unreadable_matches) < 8:
@@ -2637,6 +2654,14 @@ class EnvironmentRPCServer:
                         if executable is not None else "unavailable",
                         "reason": reason,
                     })
+        matched_identities = {
+            (item.get("pid"), item.get("start_ticks")) for item in matches
+        }
+        matches.extend(
+            item for item in audited_processes
+            if (item.get("pid"), item.get("start_ticks")) not in matched_identities
+        )
+        matches.sort(key=lambda item: int(item["pid"]))
         return (matches, resident_services, excluded_processes,
                 len([item for item in entries if item.name.isdigit()]),
                 same_uid_examined, boot_id, complete, {
@@ -2647,6 +2672,8 @@ class EnvironmentRPCServer:
                     "tracked_job_processes_excluded": tracked_excluded_processes,
                     "unreadable_match_count": unreadable_match_count,
                     "unreadable_matches": unreadable_matches,
+                    "owner_execution_audit_complete": audit_complete,
+                    "owner_execution_audit_rows": audit_row_count,
                     "incomplete_reasons": [
                         {"reason": reason, "count": count}
                         for reason, count in sorted(incomplete_counts.items())
@@ -2763,9 +2790,27 @@ class EnvironmentRPCServer:
                             command_argv = shlex.split(
                                 parent_argv[command_index],
                             )
-                            if (command_argv
-                                    and Path(command_argv[0]).name
-                                    == Path(child_argv[0]).name):
+                            command_name = (
+                                Path(command_argv[0]).name.casefold()
+                                if command_argv else ""
+                            )
+                            child_name = Path(child_argv[0]).name.casefold() if child_argv else ""
+                            child_executable = None
+                            try:
+                                child_executable = os.readlink(child_entry / "exe")
+                            except OSError:
+                                pass
+                            codex_wrapper = self._looks_like_codex_launcher_wrapper(
+                                child_executable, child_argv,
+                            )
+                            same_invocation = (
+                                bool(command_name)
+                                and command_name == child_name
+                            )
+                            if (not same_invocation and codex_wrapper
+                                    and command_name in {"codex", "codex.js"}):
+                                same_invocation = True
+                            if same_invocation:
                                 start_ticks = self._proc_start_ticks(parent_pid)
                                 if start_ticks is not None:
                                     return {
@@ -2776,6 +2821,68 @@ class EnvironmentRPCServer:
         except (OSError, StopIteration, ValueError, IndexError):
             return None
         return None
+
+    def _verified_launcher_ancestry(
+        self, peer_identity: dict[str, object], launcher: dict[str, object],
+        entries: list[Path],
+    ) -> set[tuple[int, str]]:
+        """Return exact same-user processes between a verified client and shell."""
+        if (type(peer_identity.get("pid")) is not int
+                or not isinstance(peer_identity.get("start_ticks"), str)
+                or type(launcher.get("pid")) is not int
+                or not isinstance(launcher.get("start_ticks"), str)):
+            return set()
+        entries_by_pid = {
+            int(entry.name): entry for entry in entries if entry.name.isdigit()
+        }
+        peer_pid = int(peer_identity["pid"])
+        launcher_pid = int(launcher["pid"])
+        if (self._proc_start_ticks(peer_pid) != peer_identity["start_ticks"]
+                or self._proc_start_ticks(launcher_pid) != launcher["start_ticks"]):
+            return set()
+        chain: set[tuple[int, str]] = set()
+        current_pid = peer_pid
+        seen = {peer_pid}
+        for _depth in range(8):
+            current_entry = entries_by_pid.get(current_pid)
+            if current_entry is None:
+                return set()
+            try:
+                status = (current_entry / "status").read_text(encoding="utf-8")
+                parent_pid = int(next(
+                    line.split()[1] for line in status.splitlines()
+                    if line.startswith("PPid:")
+                ))
+            except (OSError, StopIteration, ValueError, IndexError):
+                return set()
+            if parent_pid == launcher_pid:
+                return chain | {
+                    (launcher_pid, str(launcher["start_ticks"])),
+                }
+            if parent_pid <= 1 or parent_pid in seen:
+                return set()
+            seen.add(parent_pid)
+            parent_entry = entries_by_pid.get(parent_pid)
+            if parent_entry is None:
+                return set()
+            try:
+                parent_status = (parent_entry / "status").read_text(
+                    encoding="utf-8",
+                )
+                parent_uid = int(next(
+                    line.split()[1] for line in parent_status.splitlines()
+                    if line.startswith("Uid:")
+                ))
+            except (OSError, StopIteration, ValueError, IndexError):
+                return set()
+            if parent_uid != os.getuid():
+                return set()
+            parent_start = self._proc_start_ticks(parent_pid)
+            if parent_start is None:
+                return set()
+            chain.add((parent_pid, parent_start))
+            current_pid = parent_pid
+        return set()
 
     def _process_tree_exclusions(
         self,
@@ -3018,19 +3125,20 @@ class EnvironmentRPCServer:
         self, *, owner_session_id: str, repository: str,
         current_peer_identity: dict[str, object] | None,
         host_boot_id: str | None,
-    ) -> tuple[list[dict[str, object]], bool, int]:
+        entries: list[Path] | None = None,
+    ) -> tuple[list[dict[str, object]], bool, int, set[tuple[int, str]]]:
         """Use Control's authenticated audit PIDs when procfs hides a client's cwd."""
         if self.audit_log is None:
-            return [], True, 0
+            return [], True, 0, set()
         reader = getattr(self.audit_log, "environment_session_processes", None)
         if not callable(reader):
-            return [], False, 0
+            return [], False, 0, set()
         try:
             rows = reader(owner_session_id, repository)
         except (OSError, ValueError):
-            return [], False, 0
+            return [], False, 0, set()
         if not isinstance(rows, list) or not rows:
-            return [], False, 0
+            return [], True, 0, set()
 
         current_peer_pid = (
             current_peer_identity.get("pid")
@@ -3056,6 +3164,22 @@ class EnvironmentRPCServer:
             if current_agent else (None, None),
         }
         observations: dict[tuple[int, str], dict[str, object]] = {}
+        execution_contexts: set[tuple[int, str]] = set()
+
+        def recognize_agent_execution(pid: object, start_ticks: object) -> None:
+            if (type(pid) is not int or pid <= 1
+                    or not isinstance(start_ticks, str) or not start_ticks
+                    or self._proc_start_ticks(pid) != start_ticks):
+                return
+            identity = {"pid": pid, "start_ticks": start_ticks}
+            execution_contexts.add((pid, start_ticks))
+            if entries is None:
+                return
+            launcher = self._current_request_shell_launcher(identity, entries)
+            if launcher is not None:
+                execution_contexts.update(
+                    self._verified_launcher_ancestry(identity, launcher, entries)
+                )
 
         def observe(pid: object, start_ticks: object, role: str) -> None:
             if (type(pid) is not int or pid <= 1
@@ -3097,6 +3221,10 @@ class EnvironmentRPCServer:
                 and type(row.get("client_agent_pid")) is int
             )
             if row_has_identity:
+                recognize_agent_execution(
+                    row.get("client_agent_pid"),
+                    row.get("client_agent_start_ticks"),
+                )
                 observe(
                     row.get("client_agent_pid"),
                     row.get("client_agent_start_ticks"),
@@ -3139,8 +3267,11 @@ class EnvironmentRPCServer:
                     )
                     if (agent_started_at is not None
                             and agent_started_at <= observed_at):
+                        recognize_agent_execution(
+                            agent.get("pid"), agent.get("start_ticks"),
+                        )
                         observe(agent.get("pid"), agent.get("start_ticks"), "codex")
-        return list(observations.values()), True, len(rows)
+        return list(observations.values()), True, len(rows), execution_contexts
 
     def _recovery_liveness_snapshot(
         self, *, owner_session_id: str, repository: str, current_request_id: str,
@@ -3191,22 +3322,6 @@ class EnvironmentRPCServer:
                 current_peer_identity=current_peer_identity,
             )
         )
-        (audited_processes, audit_complete, audit_row_count) = (
-            self._audited_session_processes(
-                owner_session_id=owner_session_id,
-                repository=repository,
-                current_peer_identity=current_peer_identity,
-                host_boot_id=boot_id,
-            )
-        )
-        known_process_ids = {item.get("pid") for item in processes}
-        processes.extend(
-            item for item in audited_processes
-            if item.get("pid") not in known_process_ids
-        )
-        process_complete = process_complete and audit_complete
-        process_diagnostics["owner_execution_audit_complete"] = audit_complete
-        process_diagnostics["owner_execution_audit_rows"] = audit_row_count
         services, service_count, services_complete = self._matching_user_services(
             owner_session_id=owner_session_id, repository=repository,
             checkout=checkout,

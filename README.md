@@ -123,6 +123,13 @@ Any session-scoped operation may include `campaign_id` or `task_identity` to
 reselect through Control after a fresh MCP process starts; the caller does not
 need to reuse an in-memory session ID or depend on a prior connector process.
 
+Claim recovery uses the persisted, project-scoped Environment audit trail as
+host liveness evidence. It binds a live process to its recorded PID start time
+and boot ID, and recognizes only the same-user launcher ancestry that can be
+verified from the current `/proc` tree. A hidden working directory is not
+treated as proof that an owner is gone; an uncorrelated unreadable process
+still makes recovery incomplete and fails closed.
+
 ## Workspace and scope model
 
 The sandbox also aliases the host workspace path to `/workspace`. Project

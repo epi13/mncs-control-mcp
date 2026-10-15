@@ -553,6 +553,8 @@ def test_recovery_process_inventory_excludes_only_its_current_terminal_tree(
             }],
             "unreadable_match_count": 0,
             "unreadable_matches": [],
+            "owner_execution_audit_complete": True,
+            "owner_execution_audit_rows": 0,
             "incomplete_reasons": [],
         }
         assert current.pid in excluded_ids
@@ -684,6 +686,91 @@ def test_recovery_inventory_excludes_only_the_current_codex_shell_launcher(
         owner.wait(timeout=3)
 
 
+def test_recovery_inventory_matches_codex_node_shim_to_launcher_command(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from mncs_control_mcp.processes import ProcessManager
+
+    launcher = subprocess.Popen(
+        ["bash", "-c", "python3 -c 'import time; time.sleep(30)' & wait"],
+        start_new_session=True,
+    )
+    try:
+        deadline = time.monotonic() + 3
+        peer_pid = None
+        while time.monotonic() < deadline:
+            try:
+                children = [
+                    int(entry.name) for entry in Path("/proc").iterdir()
+                    if entry.name.isdigit()
+                    and int(next(
+                        line.split()[1] for line in
+                        (entry / "status").read_text(encoding="utf-8").splitlines()
+                        if line.startswith("PPid:")
+                    )) == launcher.pid
+                ]
+            except (OSError, StopIteration, ValueError, IndexError):
+                children = []
+            if children:
+                peer_pid = children[0]
+                break
+            time.sleep(0.02)
+        assert peer_pid is not None
+
+        manager = ProcessManager.__new__(ProcessManager)
+        manager._lock = threading.RLock()
+        manager._request_processes = {}
+        server = EnvironmentRPCServer(
+            ControlConfig(
+                workspace_root=tmp_path,
+                sandbox_home=tmp_path / "home",
+                environment_rpc_socket=tmp_path / "rpc" / "environment.sock",
+            ),
+            environment_service=SimpleNamespace(state_dir=tmp_path / "state"),
+            policy=object(),
+            process_manager=manager,
+        )
+        read_bytes = Path.read_bytes
+
+        def codex_cli_cmdlines(path: Path) -> bytes:
+            if path == Path(f"/proc/{peer_pid}/cmdline"):
+                return b"node\x00/opt/codex/codex.js\x00--yolo\x00"
+            if path == Path(f"/proc/{launcher.pid}/cmdline"):
+                return b"bash\x00-c\x00codex --yolo exec\x00"
+            return read_bytes(path)
+
+        readlink = os.readlink
+
+        def node_cli_executable(path: str | os.PathLike[str]) -> str:
+            if Path(path) == Path(f"/proc/{peer_pid}/exe"):
+                return "/usr/bin/node"
+            return readlink(path)
+
+        monkeypatch.setattr(Path, "read_bytes", codex_cli_cmdlines)
+        monkeypatch.setattr(environment_rpc_module.os, "readlink", node_cli_executable)
+        launcher_identity = server._current_request_shell_launcher(
+            {
+                "pid": peer_pid,
+                "start_ticks": server._proc_start_ticks(peer_pid),
+            },
+            [Path(f"/proc/{launcher.pid}"), Path(f"/proc/{peer_pid}")],
+        )
+        assert launcher_identity == {
+            "pid": launcher.pid,
+            "start_ticks": server._proc_start_ticks(launcher.pid),
+        }
+    finally:
+        try:
+            os.killpg(launcher.pid, 15)
+        except ProcessLookupError:
+            pass
+        try:
+            launcher.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            launcher.kill()
+            launcher.wait(timeout=3)
+
+
 def test_claim_recovery_uses_persisted_audit_process_identity_when_cwd_is_hidden(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -732,18 +819,21 @@ def test_claim_recovery_uses_persisted_audit_process_identity_when_cwd_is_hidden
             return readlink(path, *args)
 
         monkeypatch.setattr(os, "readlink", hide_owner_cwd)
-        matches, audit_complete, rows_read = server._audited_session_processes(
-            owner_session_id="ses_live_owner",
-            repository=repository,
-            current_peer_identity=None,
-            host_boot_id=boot_id,
+        matches, audit_complete, rows_read, execution_contexts = (
+            server._audited_session_processes(
+                owner_session_id="ses_live_owner",
+                repository=repository,
+                current_peer_identity=None,
+                host_boot_id=boot_id,
+            )
         )
         assert audit_complete is True
         assert rows_read == 1
         assert [item["pid"] for item in matches] == [owner.pid]
         assert matches[0]["reason"] == "former-session-authenticated-client"
+        assert execution_contexts == {(owner.pid, start_ticks)}
 
-        same_request, same_request_complete, _same_rows = (
+        same_request, same_request_complete, _same_rows, _same_contexts = (
             server._audited_session_processes(
                 owner_session_id="ses_live_owner",
                 repository=repository,
@@ -760,7 +850,7 @@ def test_claim_recovery_uses_persisted_audit_process_identity_when_cwd_is_hidden
         owner.terminate()
         owner.wait(timeout=3)
 
-    matches_after_exit, audit_complete_after_exit, _rows_after_exit = (
+    matches_after_exit, audit_complete_after_exit, _rows_after_exit, _contexts_after_exit = (
         server._audited_session_processes(
             owner_session_id="ses_live_owner",
             repository=repository,
@@ -770,6 +860,125 @@ def test_claim_recovery_uses_persisted_audit_process_identity_when_cwd_is_hidden
     )
     assert audit_complete_after_exit is True
     assert matches_after_exit == []
+
+
+def test_host_inventory_uses_audited_codex_launcher_when_cwd_is_hidden(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from mncs_control_mcp.audit import AuditLog
+    from mncs_control_mcp.processes import ProcessManager
+
+    repository = "mncs-compiler"
+    checkout = tmp_path / repository / ".worktrees" / "selected"
+    checkout.mkdir(parents=True)
+    launcher = subprocess.Popen(
+        ["bash", "-c", "python3 -c 'import time; time.sleep(30)' & wait"],
+        cwd=tmp_path,
+        start_new_session=True,
+    )
+    try:
+        deadline = time.monotonic() + 3
+        owner_pid = None
+        while time.monotonic() < deadline:
+            try:
+                owner_pid = next(
+                    int(entry.name) for entry in Path("/proc").iterdir()
+                    if entry.name.isdigit()
+                    and int(next(
+                        line.split()[1] for line in
+                        (entry / "status").read_text(encoding="utf-8").splitlines()
+                        if line.startswith("PPid:")
+                    )) == launcher.pid
+                )
+                break
+            except (OSError, StopIteration, ValueError, IndexError):
+                time.sleep(0.02)
+        assert owner_pid is not None
+
+        owner_ticks = ProcessManager._process_start_ticks(owner_pid)
+        boot_id = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+        assert owner_ticks is not None
+        audit_path = tmp_path / "state" / "audit.jsonl"
+        audit_log = AuditLog(audit_path)
+        audit_log.record(
+            "mncs_environment",
+            success=True,
+            project=repository,
+            session_id="ses_live_codex_launcher",
+            client_pid=owner_pid,
+            client_start_ticks=owner_ticks,
+            client_agent_pid=owner_pid,
+            client_agent_start_ticks=owner_ticks,
+            client_host_boot_id=boot_id,
+        )
+        server = EnvironmentRPCServer(
+            ControlConfig(
+                workspace_root=tmp_path,
+                sandbox_home=tmp_path / "home",
+                environment_rpc_socket=tmp_path / "rpc" / "environment.sock",
+            ),
+            environment_service=SimpleNamespace(state_dir=tmp_path / "state"),
+            policy=object(),
+            process_manager=SimpleNamespace(
+                claim_recovery_request_roots=lambda _grant: [],
+                claim_recovery_job_candidates=lambda *_args, **_kwargs: [],
+            ),
+            audit_log=audit_log,
+        )
+        read_bytes = Path.read_bytes
+        readlink = os.readlink
+
+        def codex_process_context(path: Path) -> bytes:
+            if path == Path(f"/proc/{owner_pid}/cmdline"):
+                return b"node\x00/opt/codex/codex.js\x00--yolo\x00"
+            if path == Path(f"/proc/{launcher.pid}/cmdline"):
+                return (
+                    b"bash\x00-c\x00codex --yolo exec "
+                    + str(checkout).encode()
+                    + b"\x00"
+                )
+            if path in {
+                Path(f"/proc/{owner_pid}/environ"),
+                Path(f"/proc/{launcher.pid}/environ"),
+            }:
+                raise PermissionError("fixture-hidden owner process environment")
+            return read_bytes(path)
+
+        def hidden_owner_context(path: str | os.PathLike[str], *args: object) -> str:
+            if os.fspath(path) in {
+                f"/proc/{owner_pid}/cwd", f"/proc/{launcher.pid}/cwd",
+            }:
+                raise PermissionError("fixture-hidden owner process working directory")
+            if os.fspath(path) == f"/proc/{owner_pid}/exe":
+                return "/usr/bin/node"
+            return readlink(path, *args)
+
+        monkeypatch.setattr(Path, "read_bytes", codex_process_context)
+        monkeypatch.setattr(environment_rpc_module.os, "readlink", hidden_owner_context)
+        inventory = server._host_process_inventory(
+            owner_session_id="ses_live_codex_launcher",
+            repository=repository,
+            checkout=str(checkout),
+            current_grant_id="grant-current",
+        )
+        matches, _services, _excluded, _count, _same_uid, _boot, complete, diagnostics = inventory
+        assert complete is True, diagnostics
+        assert diagnostics["owner_execution_audit_complete"] is True
+        assert diagnostics["owner_execution_audit_rows"] == 1
+        assert diagnostics["unreadable_match_count"] == 0
+        assert diagnostics["incomplete_reasons"] == []
+        assert owner_pid in {item["pid"] for item in matches}
+        assert launcher.pid in {item["pid"] for item in matches}
+    finally:
+        try:
+            os.killpg(launcher.pid, 15)
+        except ProcessLookupError:
+            pass
+        try:
+            launcher.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            launcher.kill()
+            launcher.wait(timeout=3)
 
 
 def test_host_process_inventory_explains_an_incomplete_request_tree(
@@ -812,6 +1021,8 @@ def test_host_process_inventory_explains_an_incomplete_request_tree(
         "tracked_job_processes_excluded": [],
         "unreadable_match_count": 0,
         "unreadable_matches": [],
+        "owner_execution_audit_complete": True,
+        "owner_execution_audit_rows": 0,
         "incomplete_reasons": [
             {"reason": "current_request_process_tree_incomplete", "count": 1},
             {"reason": "request_process_root_unreadable", "count": 1},
