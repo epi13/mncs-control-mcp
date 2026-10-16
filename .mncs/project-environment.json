@@ -1,0 +1,14 @@
+{
+  "name": "mncs-control-checkout-continuation",
+  "working_checkout": "current",
+  "intent": {
+    "goal": "repair authenticated Environment continuation selection for registered worktrees",
+    "repositories": ["mncs-control-mcp"],
+    "forbidden_actions": ["delete"]
+  },
+  "workspace_scope": {"repositories": ["mncs-control-mcp"]},
+  "verification": {"enabled": false},
+  "actions": {"enabled": false},
+  "diagnostics": {"enabled": false},
+  "family": {"enabled": false}
+}
