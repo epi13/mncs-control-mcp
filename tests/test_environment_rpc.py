@@ -5816,6 +5816,107 @@ def test_task_selector_selects_saved_project_context_over_current_default(
     assert record.bound_session_id == "ses_saved_context"
 
 
+def test_registered_checkout_continuation_binds_mutations_in_same_execution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "projects"
+    repository_root = workspace / "mncs-compiler"
+    repository_root.mkdir(parents=True)
+    checkout = {
+        "repository": "mncs-compiler",
+        "path": str(repository_root),
+        "workspace_root": str(workspace),
+        "repository_root": str(repository_root),
+        "git_common_directory": str(repository_root / ".git"),
+        "checkout_identity": "checkout-compiler",
+        "git_common_directory_identity": "git-common-compiler",
+        "branch": "campaign/compiler",
+        "head": "a" * 40,
+    }
+    server = EnvironmentRPCServer(
+        ControlConfig(
+            workspace_root=workspace,
+            sandbox_home=tmp_path / "home",
+            environment_rpc_socket=tmp_path / "rpc" / "environment.sock",
+        ),
+        environment_service=SimpleNamespace(state_dir=tmp_path / "state"),
+        policy=object(),
+    )
+    record = _GrantRecord(
+        grant_id="registered-checkout-continuation-grant",
+        principal_id="principal-test",
+        host_root=repository_root,
+        sandbox_root="/workspace/mncs-compiler",
+        scope="project",
+        uid=0,
+        expires_at=time.monotonic() + 60,
+        token_file=tmp_path / "grant",
+    )
+    monkeypatch.setattr(
+        server, "_project_repository", lambda *_args, **_kwargs: "mncs-compiler",
+    )
+    monkeypatch.setattr(
+        server, "_registered_project_checkout", lambda *_args, **_kwargs: checkout,
+    )
+    monkeypatch.setattr(
+        server, "_project_environment_identity", lambda *_args, **_kwargs: None,
+    )
+
+    class Environment:
+        authenticated_principal_id = "principal-test"
+
+        @staticmethod
+        def _pkg():
+            return SimpleNamespace(
+                entry=SimpleNamespace(
+                    _working_checkout_matches_snapshot=lambda snapshot, requested: (
+                        snapshot.get("selected_checkouts", {})
+                        .get("mncs-compiler", {})
+                        .get("checkout_identity") == requested.get("checkout_identity")
+                    ),
+                ),
+                claims=SimpleNamespace(scopes_conflict=lambda *_args: None),
+            )
+
+        @staticmethod
+        def campaign_continuation(repository, campaign_id=None, **_kwargs):
+            assert repository == "mncs-compiler"
+            assert campaign_id == "cmp_registered_checkout"
+            return {
+                "campaign_id": campaign_id,
+                "repository": repository,
+                "status": "ready",
+                "continuations_count": 1,
+                "continuations_truncated": False,
+                "continuations": [{
+                    "session_id": "ses_registered_checkout",
+                    "definition_id": "env_legacy_campaign",
+                    "workspace_root": str(workspace),
+                    "selected_checkout": checkout,
+                    "lifecycle": "active",
+                    "project_reference": {"status": "linked", "basis": ["repository_refs"]},
+                    "claim_ids": [],
+                    "claims": [],
+                    "claims_truncated": False,
+                }],
+            }
+
+    server.environment_service = Environment()
+    response = server._campaign_continuation(
+        record,
+        ["continuation", "--campaign-id", "cmp_registered_checkout"],
+        "req_registered_checkout_continuation",
+        cwd=repository_root,
+    )
+
+    assert response["ok"] is True
+    projected = json.loads(response["result"]["stdout"])
+    assert projected["status"] == "ready"
+    assert projected["selection_basis"] == "authenticated-registered-checkout"
+    assert projected["selected_session_id"] == "ses_registered_checkout"
+    assert record.bound_session_id == "ses_registered_checkout"
+
+
 @pytest.mark.parametrize(
     "capability",
     [

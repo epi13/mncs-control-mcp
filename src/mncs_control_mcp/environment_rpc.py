@@ -5404,8 +5404,10 @@ class EnvironmentRPCServer:
         if (capsule.get("status") == "ready"
                 and capsule.get("selection_basis") in {
                     "authenticated-project-environment-definition",
+                    "authenticated-project-environment-and-checkout",
                     "authenticated-task-selector",
                     "authenticated-explicit-linked-campaign",
+                    "authenticated-registered-checkout",
                 }
                 and isinstance(selected_session, str)
                 and re.fullmatch(r"ses_[A-Za-z0-9_-]{1,120}", selected_session)):
