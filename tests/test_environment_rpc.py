@@ -6063,15 +6063,33 @@ def test_registered_checkout_selects_one_campaign_and_scoped_claims(
 
         @staticmethod
         def _pkg():
+            def matches_checkout(snapshot, requested):
+                selected = snapshot.get("selected_checkouts")
+                if isinstance(selected, dict):
+                    observed = selected.get("mncs-environment")
+                    return (
+                        isinstance(observed, dict)
+                        and observed.get("checkout_identity") == requested.get("checkout_identity")
+                        and observed.get("git_common_directory_identity")
+                        == requested.get("git_common_directory_identity")
+                    )
+                campaign = snapshot.get("campaign")
+                workspace_facts = snapshot.get("workspace")
+                references = campaign.get("repository_refs") if isinstance(campaign, dict) else None
+                matches = [item for item in references or []
+                           if isinstance(item, dict)
+                           and item.get("repository") == "mncs-environment"]
+                return (
+                    len(matches) == 1
+                    and isinstance(workspace_facts, dict)
+                    and workspace_facts.get("root") == requested.get("workspace_root")
+                    and matches[0].get("branch") == requested.get("branch")
+                    and matches[0].get("head") == requested.get("head")
+                )
+
             return SimpleNamespace(
                 entry=SimpleNamespace(
-                    _working_checkout_matches_snapshot=lambda snapshot, requested: (
-                        isinstance(snapshot.get("selected_checkouts"), dict)
-                        and snapshot["selected_checkouts"].get("mncs-environment", {}).get("checkout_identity")
-                        == requested.get("checkout_identity")
-                        and snapshot["selected_checkouts"].get("mncs-environment", {}).get("git_common_directory_identity")
-                        == requested.get("git_common_directory_identity")
-                    ),
+                    _working_checkout_matches_snapshot=matches_checkout,
                 ),
                 claims=SimpleNamespace(scopes_conflict=scopes_conflict),
             )
@@ -6146,6 +6164,43 @@ def test_registered_checkout_selects_one_campaign_and_scoped_claims(
     assert result["status"] == "ready"
     assert result["selected_session_id"] == "ses_one"
     assert result["selected_checkout"]["checkout_identity"] == "checkout-one"
+
+    # Older sessions have only a campaign repository reference. The matcher
+    # receives that canonical record and the authenticated workspace, then
+    # requires an exact branch and HEAD match with the registered checkout.
+    legacy_checkout = {**selected_checkout, "workspace_root": str(workspace)}
+    legacy_row = row("ses_legacy", {})
+    legacy_row["selected_checkout"] = None
+    legacy_row["repositories"] = [{
+        "repository": "mncs-environment",
+        "branch": legacy_checkout["branch"],
+        "head": legacy_checkout["head"],
+    }]
+    legacy_capsule = {
+        "campaign_id": "cmp_legacy",
+        "repository": "mncs-environment",
+        "status": "ready",
+        "continuations_count": 1,
+        "continuations_truncated": False,
+        "continuations": [legacy_row],
+    }
+    resumed_legacy = server._select_project_campaign_context(
+        legacy_capsule, record, "mncs-environment",
+        project_checkout=legacy_checkout,
+    )
+    assert resumed_legacy["status"] == "ready"
+    assert resumed_legacy["selected_session_id"] == "ses_legacy"
+
+    stale_legacy = json.loads(json.dumps(legacy_capsule))
+    stale_legacy["continuations"][0]["repositories"][0]["head"] = "stale"
+    refused_legacy = server._select_project_campaign_context(
+        stale_legacy, record, "mncs-environment",
+        project_checkout=legacy_checkout,
+    )
+    assert "selected_session_id" not in refused_legacy
+    assert refused_legacy["project_selection"]["reason"] == (
+        "no-session-matches-registered-checkout"
+    )
 
     campaigns = {
         "status": "ambiguous-campaigns",

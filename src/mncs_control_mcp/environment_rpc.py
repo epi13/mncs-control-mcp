@@ -4882,16 +4882,30 @@ class EnvironmentRPCServer:
                     capsule["context_conflict_status"] = "ready"
                     capsule["status"] = "unknown"
                 return capsule
-            exact_context_rows = [
-                row for row in exact_context_rows
-                if isinstance(row.get("selected_checkout"), dict)
-                and matcher(
-                    {"selected_checkouts": {
-                        repository: row["selected_checkout"],
-                    }},
-                    project_checkout,
-                )
-            ]
+            def row_matches_checkout(row: dict[str, Any]) -> bool:
+                selected = row.get("selected_checkout")
+                if isinstance(selected, dict):
+                    reference_snapshot = {"selected_checkouts": {
+                        repository: selected,
+                    }}
+                else:
+                    # Pre-checkout-identity sessions have no selected_checkout
+                    # projection. Their Environment-owned matcher can still
+                    # verify one exact legacy repository reference against the
+                    # authenticated workspace and the current registered Git
+                    # checkout. The matcher rejects missing, duplicate, or
+                    # stale branch/HEAD references.
+                    references = row.get("repositories")
+                    if not isinstance(references, list):
+                        return False
+                    reference_snapshot = {
+                        "campaign": {"repository_refs": references},
+                        "workspace": {"root": row.get("workspace_root")},
+                    }
+                return matcher(reference_snapshot, project_checkout)
+
+            exact_context_rows = [row for row in exact_context_rows
+                                  if row_matches_checkout(row)]
         if task_selector_session_id is not None:
             exact_context_rows = [
                 row for row in exact_context_rows
