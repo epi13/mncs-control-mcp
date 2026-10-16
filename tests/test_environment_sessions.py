@@ -19,7 +19,11 @@ from types import SimpleNamespace
 import pytest
 
 from mncs_control_mcp.config import ControlConfig
-from mncs_control_mcp.environment_sessions import EnvironmentService
+from mncs_control_mcp.environment_sessions import (
+    _PACKAGE_SOURCE_IDENTITIES,
+    EnvironmentService,
+    _load_flat_package,
+)
 from mncs_control_mcp.errors import ControlError
 
 PROJECTS = Path(__file__).parents[2]
@@ -47,6 +51,29 @@ def _config(tmp_path: Path, **overrides) -> ControlConfig:
         environment_state_dir=tmp_path / "env-state",
         **overrides,
     )
+
+
+def test_environment_package_loader_reloads_changed_sibling_sources(tmp_path: Path) -> None:
+    package_name = "mncs_reload_fixture"
+    package_root = tmp_path / package_name
+    package_root.mkdir()
+    (package_root / "__init__.py").write_text("from . import revision\n", encoding="utf-8")
+    revision_path = package_root / "revision.py"
+    revision_path.write_text("VALUE = 'first'\n", encoding="utf-8")
+    try:
+        first = _load_flat_package(package_name, tmp_path, ("revision",))
+        assert first.revision.VALUE == "first"
+        assert _load_flat_package(package_name, tmp_path, ("revision",)) is first
+
+        revision_path.write_text("VALUE = 'second'\n", encoding="utf-8")
+        second = _load_flat_package(package_name, tmp_path, ("revision",))
+        assert second is not first
+        assert second.revision.VALUE == "second"
+    finally:
+        for name in tuple(sys.modules):
+            if name == package_name or name.startswith(f"{package_name}."):
+                sys.modules.pop(name, None)
+        _PACKAGE_SOURCE_IDENTITIES.pop(package_name, None)
 
 
 def _campaign_charter_result(

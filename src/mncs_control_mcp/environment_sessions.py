@@ -21,6 +21,7 @@ import os
 import re
 import subprocess
 import sys
+import threading
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -42,6 +43,39 @@ _CONTINUABLE_LIFECYCLES = frozenset({
     "active", "blocked", "waiting", "checkpointed", "abandoned",
 })
 _TERMINAL_LIFECYCLES = frozenset({"completed", "failed"})
+_PACKAGE_LOAD_LOCK = threading.RLock()
+_PACKAGE_SOURCE_IDENTITIES: dict[str, tuple[str, str]] = {}
+
+
+def _package_source_identity(package_root: Path) -> str:
+    """Fingerprint Python sources so long-lived Control can see sibling updates."""
+    digest = hashlib.sha256()
+    try:
+        sources = sorted(package_root.rglob("*.py"))
+        for path in sources:
+            if path.is_symlink():
+                raise ControlError(
+                    ENVIRONMENT_UNAVAILABLE,
+                    "mncs_env source tree cannot contain symbolic links",
+                    details={"path": str(path)},
+                )
+            if not path.is_file():
+                continue
+            relative = path.relative_to(package_root).as_posix().encode("utf-8")
+            source = path.read_bytes()
+            digest.update(len(relative).to_bytes(4, "big"))
+            digest.update(relative)
+            digest.update(len(source).to_bytes(8, "big"))
+            digest.update(source)
+    except ControlError:
+        raise
+    except OSError as exc:
+        raise ControlError(
+            ENVIRONMENT_UNAVAILABLE,
+            f"mncs_env source tree could not be inspected: {exc}",
+            details={"path": str(package_root)},
+        ) from exc
+    return digest.hexdigest()
 
 
 def _load_flat_package(package: str, root: Path, submodules: tuple[str, ...] = ()) -> Any:
@@ -52,16 +86,43 @@ def _load_flat_package(package: str, root: Path, submodules: tuple[str, ...] = (
     Submodules are imported while the checkout is on ``sys.path`` so
     attribute access (``pkg.sessions``) works afterwards.
     """
-    for candidate in (root / "src", root):
-        if (candidate / package).is_dir():
+    candidate = next(
+        (path for path in (root / "src", root) if (path / package).is_dir()),
+        None,
+    )
+    if candidate is not None:
+        package_root = candidate / package
+        source_identity = _package_source_identity(package_root)
+        source_key = (str(package_root.resolve()), source_identity)
+        with _PACKAGE_LOAD_LOCK:
+            if _PACKAGE_SOURCE_IDENTITIES.get(package) != source_key:
+                for module_name in tuple(sys.modules):
+                    if module_name == package or module_name.startswith(f"{package}."):
+                        sys.modules.pop(module_name, None)
+                _PACKAGE_SOURCE_IDENTITIES.pop(package, None)
+
             sys.path.insert(0, str(candidate))
             try:
+                importlib.invalidate_caches()
                 module = importlib.import_module(package)
                 for submodule in submodules:
                     submodule_module = importlib.import_module(f"{package}.{submodule}")
                     setattr(module, submodule, submodule_module)
+                if _package_source_identity(package_root) != source_identity:
+                    for module_name in tuple(sys.modules):
+                        if module_name == package or module_name.startswith(f"{package}."):
+                            sys.modules.pop(module_name, None)
+                    raise ControlError(
+                        ENVIRONMENT_UNAVAILABLE,
+                        "mncs_env source changed while loading; retry the operation",
+                        details={"path": str(package_root)},
+                    )
+                _PACKAGE_SOURCE_IDENTITIES[package] = source_key
                 return module
             except ImportError as exc:
+                for module_name in tuple(sys.modules):
+                    if module_name == package or module_name.startswith(f"{package}."):
+                        sys.modules.pop(module_name, None)
                 raise ControlError(
                     ENVIRONMENT_UNAVAILABLE,
                     f"mncs_env failed to load from {root}: {exc}",
