@@ -1022,8 +1022,17 @@ class EnvironmentRPCServer:
                 # definition. Keep that choice owner-controlled and explicit
                 # when invoking Environment, so its default discovery cannot
                 # fall through to the broader workspace definition.
+                repository = record.host_root.name
+                selected_checkout = self._registered_project_checkout(
+                    record, repository, cwd,
+                )
+                definition_root = (
+                    Path(selected_checkout["path"])
+                    if isinstance(selected_checkout, dict)
+                    else record.host_root
+                )
                 project_definition = (
-                    record.host_root / ".mncs" / "project-environment.json"
+                    definition_root / ".mncs" / "project-environment.json"
                 )
                 if project_definition.exists() or project_definition.is_symlink():
                     if project_definition.is_symlink() or not project_definition.is_file():
@@ -4210,9 +4219,11 @@ class EnvironmentRPCServer:
                 or not isinstance(payload.get("session_id"), str)):
             return stdout
         project: str | None = None
+        project_checkout: dict[str, str] | None = None
         project_error: ControlError | None = None
         try:
             project = self._project_repository(record, cwd=cwd)
+            project_checkout = self._registered_project_checkout(record, project, cwd)
         except ControlError as error:
             project_error = error
         continuation = payload.get("continuation")
@@ -4279,16 +4290,34 @@ class EnvironmentRPCServer:
             }
         else:
             try:
-                capsule = self.environment_service.campaign_continuation(
-                    project, campaign_id,
-                )
+                if project_checkout is None:
+                    capsule = self.environment_service.campaign_continuation(
+                        project, campaign_id,
+                    )
+                else:
+                    capsule = self.environment_service.campaign_continuation(
+                        project, campaign_id, working_checkout=project_checkout,
+                    )
                 if not isinstance(capsule, dict):
                     raise TypeError("Environment returned a non-object continuation capsule")
-                capsule = self._select_project_campaign_context(
-                    capsule, record, project,
-                    project_context=project_context,
-                    derive_project_context=False,
-                )
+                if project_checkout is None:
+                    if project_context is None:
+                        capsule = self._select_project_campaign_context(
+                            capsule, record, project,
+                        )
+                    else:
+                        capsule = self._select_project_campaign_context(
+                            capsule, record, project,
+                            project_context=project_context,
+                            derive_project_context=False,
+                        )
+                else:
+                    capsule = self._select_project_campaign_context(
+                        capsule, record, project,
+                        project_context=project_context,
+                        derive_project_context=False,
+                        project_checkout=project_checkout,
+                    )
                 payload["control_project_continuation"] = capsule
                 if (
                     record.scope in {"project", "workspace"}
@@ -4296,6 +4325,8 @@ class EnvironmentRPCServer:
                     and capsule.get("selection_basis") in {
                         "authenticated-project-environment-definition",
                         "authenticated-task-selector",
+                        "authenticated-project-environment-and-checkout",
+                        "authenticated-registered-checkout",
                     }
                     and capsule.get("selected_session_id") == payload.get("session_id")
                 ):
@@ -4496,8 +4527,100 @@ class EnvironmentRPCServer:
                 result[key] = capsule[key]
         return result
 
+    def _registered_project_checkout(
+        self, record: _GrantRecord, repository: str, cwd: Path,
+    ) -> dict[str, str] | None:
+        """Resolve the cwd to its exact registered checkout through Environment."""
+        if record.scope not in {"project", "workspace"}:
+            return None
+        try:
+            workspace_root = Path(self.config.workspace_root).expanduser().resolve(strict=True)
+            grant_root = record.host_root.expanduser().resolve(strict=True)
+            project_root = (
+                grant_root if record.scope == "project"
+                else workspace_root / repository
+            )
+            if (project_root.parent != workspace_root
+                    or project_root.name != repository):
+                if record.scope == "project":
+                    return None
+                raise ControlError(
+                    "ENVIRONMENT_WORKSPACE_ESCAPE",
+                    "project checkout is outside its configured immediate workspace",
+                )
+            raw_cwd = Path(os.path.abspath(cwd))
+            resolved_cwd = raw_cwd.resolve(strict=True)
+            if raw_cwd != resolved_cwd:
+                raise ControlError(
+                    "ENVIRONMENT_WORKSPACE_ESCAPE",
+                    "selected project cwd traverses a symbolic link",
+                )
+            if resolved_cwd != project_root and project_root not in resolved_cwd.parents:
+                raise ControlError(
+                    "ENVIRONMENT_WORKSPACE_ESCAPE",
+                    "selected project cwd exceeds its granted repository",
+                )
+        except ControlError:
+            raise
+        except OSError as error:
+            raise ControlError(
+                "ENVIRONMENT_WORKSPACE_MISSING",
+                "selected project checkout is unavailable",
+            ) from error
+
+        checkout = None
+        current = resolved_cwd
+        while current == project_root or project_root in current.parents:
+            marker = current / ".git"
+            if marker.is_symlink():
+                raise ControlError(
+                    "ENVIRONMENT_WORKSPACE_ESCAPE",
+                    "selected project checkout has a symbolic-link Git marker",
+                )
+            if marker.exists():
+                checkout = current
+                break
+            if current == project_root:
+                break
+            current = current.parent
+        if checkout is None:
+            return None
+
+        package_loader = getattr(self.environment_service, "_pkg", None)
+        if not callable(package_loader):
+            if checkout != project_root:
+                raise ControlError(
+                    "ENVIRONMENT_WORKSPACE_UNKNOWN",
+                    "nested project checkout requires Environment's registered-worktree verifier",
+                    details={"repository": repository, "path": str(checkout)},
+                )
+            return None
+        package = package_loader()
+        workspace_module = getattr(package, "workspace", None)
+        verify = getattr(workspace_module, "verify_registered_checkout", None)
+        if not callable(verify):
+            if checkout != project_root:
+                raise ControlError(
+                    "ENVIRONMENT_WORKSPACE_UNKNOWN",
+                    "nested project checkout requires Environment's registered-worktree verifier",
+                    details={"repository": repository, "path": str(checkout)},
+                )
+            return None
+        try:
+            return verify(
+                checkout, repository=repository, workspace_root=workspace_root,
+                expected_repository_root=project_root,
+            )
+        except Exception as error:
+            raise ControlError(
+                "ENVIRONMENT_WORKSPACE_UNKNOWN",
+                "selected project checkout is not a verified registered MNCS worktree",
+                details={"repository": repository, "path": str(checkout)},
+            ) from error
+
     def _project_environment_identity(
         self, record: _GrantRecord, repository: str,
+        *, working_checkout: dict[str, str] | None = None,
     ) -> tuple[str, str] | None:
         """Resolve one repository's owner-controlled Environment definition.
 
@@ -4517,19 +4640,30 @@ class EnvironmentRPCServer:
                 "Environment workspace context is unavailable",
             ) from error
         if record.scope == "project":
-            project_root = grant_root
+            repository_root = grant_root
         else:
             if grant_root != workspace_root:
                 raise ControlError(
                     "ENVIRONMENT_AUTHORITY_DENIED",
                     "workspace continuation must use the configured workspace root",
                 )
-            project_root = workspace_root / repository
-        if (project_root.parent != workspace_root
-                or project_root.name != repository):
+            repository_root = workspace_root / repository
+        if (repository_root.parent != workspace_root
+                or repository_root.name != repository):
             raise ControlError(
                 "ENVIRONMENT_WORKSPACE_ESCAPE",
                 "project continuation is outside its configured immediate workspace",
+            )
+        project_root = (
+            Path(working_checkout["path"]).resolve(strict=True)
+            if isinstance(working_checkout, dict)
+            and isinstance(working_checkout.get("path"), str)
+            else repository_root
+        )
+        if project_root != repository_root and repository_root not in project_root.parents:
+            raise ControlError(
+                "ENVIRONMENT_WORKSPACE_ESCAPE",
+                "selected Environment definition is outside its registered repository",
             )
 
         definition_path = project_root / ".mncs" / "project-environment.json"
@@ -4600,16 +4734,76 @@ class EnvironmentRPCServer:
         self, capsule: dict[str, Any], record: _GrantRecord, repository: str,
         *, project_context: tuple[str, str] | None = None,
         derive_project_context: bool = True,
+        project_checkout: dict[str, str] | None = None,
     ) -> dict[str, Any]:
-        """Select one exact project context while preserving other capsules.
+        """Select one authenticated project session using its canonical checkout.
 
-        Selection is possible only when the authenticated project's canonical
-        definition and mapped workspace identify exactly one linked session,
-        the bounded result is complete, and no other same-campaign session has
-        a claim on this repository. All original continuations remain visible.
+        A definition/workspace pair narrows the candidates when available. A
+        verified registered checkout is the strongest selector and permits
+        independent worktrees to coexist under one campaign. Claims are then
+        checked by their actual scope so only overlapping writers block.
         """
         if record.scope not in {"project", "workspace"}:
             return capsule
+
+        prior_selection_status = capsule.pop("context_conflict_status", None)
+        if prior_selection_status in {"ready", "ambiguous", "context-conflict"}:
+            capsule["status"] = prior_selection_status
+        capsule.pop("selected_session_id", None)
+        capsule.pop("selected_context", None)
+        capsule.pop("selected_checkout", None)
+        capsule.pop("selection_basis", None)
+        capsule.pop("project_selection", None)
+
+        if capsule.get("status") == "ambiguous-campaigns":
+            campaigns = capsule.get("campaigns")
+            count = capsule.get("campaigns_count", len(campaigns) if isinstance(campaigns, list) else None)
+            if (not isinstance(campaigns, list)
+                    or not all(isinstance(item, dict) for item in campaigns)
+                    or capsule.get("campaigns_truncated") is True
+                    or type(count) is not int or count != len(campaigns)):
+                capsule["project_selection"] = {
+                    "status": "unknown",
+                    "reason": "campaign-inventory-truncated-or-invalid",
+                }
+                return capsule
+            selected_campaigns = [
+                self._select_project_campaign_context(
+                    dict(item), record, repository,
+                    project_context=project_context,
+                    derive_project_context=derive_project_context,
+                    project_checkout=project_checkout,
+                )
+                for item in campaigns
+            ]
+            ready = [
+                item for item in selected_campaigns
+                if item.get("status") == "ready"
+                and isinstance(item.get("selected_session_id"), str)
+            ]
+            if len(ready) == 1:
+                result = ready[0]
+                result["campaign_inventory"] = selected_campaigns
+                result["campaign_inventory_count"] = len(selected_campaigns)
+                result["campaign_inventory_truncated"] = False
+                return result
+            capsule["campaigns"] = selected_campaigns
+            capsule["project_selection"] = {
+                "status": "ambiguous" if len(ready) > 1 else "unresolved",
+                "reason": (
+                    "multiple-campaigns-match-registered-checkout"
+                    if len(ready) > 1
+                    else "no-unique-continuation-matches-registered-checkout"
+                ),
+                "candidate_campaigns": [
+                    {"campaign_id": item.get("campaign_id"),
+                     "status": item.get("status"),
+                     "project_selection": item.get("project_selection")}
+                    for item in selected_campaigns
+                ],
+            }
+            return capsule
+
         selector = project_context
         task_selector = capsule.get("task_selector")
         task_selector_session_id = None
@@ -4631,13 +4825,22 @@ class EnvironmentRPCServer:
                 task_selector_session_id = candidate_session_id
                 selection_basis = "authenticated-task-selector"
         if selector is None and derive_project_context:
-            selector = self._project_environment_identity(record, repository)
-        if selector is None:
+            if project_checkout is None:
+                selector = self._project_environment_identity(record, repository)
+            else:
+                selector = self._project_environment_identity(
+                    record, repository, working_checkout=project_checkout,
+                )
+        if selector is None and project_checkout is None:
             return capsule
-        definition_id, workspace_root = selector
+        if project_checkout is not None and selector is None:
+            selection_basis = "authenticated-registered-checkout"
+        elif project_checkout is not None:
+            selection_basis = "authenticated-project-environment-and-checkout"
+
         if capsule.get("repository") not in (None, repository):
             return capsule
-        if capsule.get("status") not in {"ready", "context-conflict"}:
+        if capsule.get("status") not in {"ready", "ambiguous", "context-conflict"}:
             return capsule
         rows = capsule.get("continuations")
         if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
@@ -4650,36 +4853,73 @@ class EnvironmentRPCServer:
             capsule["project_selection"] = {
                 "status": "unknown",
                 "reason": "continuation-inventory-truncated",
-                "definition_id": definition_id,
-                "workspace_root": workspace_root,
+                **({"definition_id": selector[0], "workspace_root": selector[1]}
+                   if selector is not None else {}),
             }
             return capsule
 
-        exact_context_rows = [
-            row for row in rows
-            if row.get("definition_id") == definition_id
-            and row.get("workspace_root") == workspace_root
-        ]
+        exact_context_rows = list(rows)
+        if selector is not None:
+            exact_context_rows = [
+                row for row in exact_context_rows
+                if row.get("definition_id") == selector[0]
+                and row.get("workspace_root") == selector[1]
+            ]
+        if project_checkout is not None:
+            package_loader = getattr(self.environment_service, "_pkg", None)
+            package = package_loader() if callable(package_loader) else None
+            matcher = getattr(
+                getattr(package, "entry", None),
+                "_working_checkout_matches_snapshot", None,
+            )
+            if not callable(matcher):
+                capsule["project_selection"] = {
+                    "status": "unknown",
+                    "reason": "registered-checkout-matcher-unavailable",
+                    "selected_checkout": project_checkout,
+                }
+                if capsule.get("status") == "ready":
+                    capsule["context_conflict_status"] = "ready"
+                    capsule["status"] = "unknown"
+                return capsule
+            exact_context_rows = [
+                row for row in exact_context_rows
+                if isinstance(row.get("selected_checkout"), dict)
+                and matcher(
+                    {"selected_checkouts": {
+                        repository: row["selected_checkout"],
+                    }},
+                    project_checkout,
+                )
+            ]
         if task_selector_session_id is not None:
             exact_context_rows = [
                 row for row in exact_context_rows
                 if row.get("session_id") == task_selector_session_id
             ]
         if not exact_context_rows:
+            reason = (
+                "no-session-matches-registered-checkout"
+                if project_checkout is not None
+                else "no-session-matches-project-definition-and-workspace"
+            )
             capsule["project_selection"] = {
                 "status": "unmatched",
-                "reason": "no-session-matches-project-definition-and-workspace",
-                "definition_id": definition_id,
-                "workspace_root": workspace_root,
+                "reason": reason,
+                **({"definition_id": selector[0], "workspace_root": selector[1]}
+                   if selector is not None else {}),
+                **({"selected_checkout": project_checkout}
+                   if project_checkout is not None else {}),
             }
             if capsule.get("status") == "ready":
                 capsule["context_conflict_status"] = "ready"
                 capsule["status"] = "context-mismatch"
             capsule["next"] = (
-                "no same-campaign session matches this project's Environment definition; "
-                "review the visible capsules and continue only through an exact context or owner-issued handoff"
+                "no session matches the authenticated project checkout; "
+                "inspect the visible capsules and continue through an exact context or owner-issued handoff"
             )
             return capsule
+
         selected_rows = [
             row for row in exact_context_rows
             if (row.get("project_reference") or {}).get("status") == "linked"
@@ -4689,11 +4929,16 @@ class EnvironmentRPCServer:
             }
         ]
         if len(exact_context_rows) != 1:
+            if capsule.get("status") == "ready":
+                capsule["context_conflict_status"] = "ready"
+                capsule["status"] = "ambiguous"
             capsule["project_selection"] = {
                 "status": "ambiguous",
-                "reason": "multiple-sessions-match-project-definition-and-workspace",
-                "definition_id": definition_id,
-                "workspace_root": workspace_root,
+                "reason": "multiple-sessions-match-authenticated-project-checkout",
+                **({"definition_id": selector[0], "workspace_root": selector[1]}
+                   if selector is not None else {}),
+                **({"selected_checkout": project_checkout}
+                   if project_checkout is not None else {}),
                 "candidate_sessions": sorted(
                     row.get("session_id") for row in exact_context_rows
                     if isinstance(row.get("session_id"), str)
@@ -4710,8 +4955,8 @@ class EnvironmentRPCServer:
                     "project-context-not-linked" if not linked
                     else "project-session-lifecycle-requires-reconciliation"
                 ),
-                "definition_id": definition_id,
-                "workspace_root": workspace_root,
+                **({"definition_id": selector[0], "workspace_root": selector[1]}
+                   if selector is not None else {}),
                 "session_id": exact.get("session_id"),
                 "lifecycle": lifecycle,
             }
@@ -4726,52 +4971,106 @@ class EnvironmentRPCServer:
         selected = selected_rows[0]
         selected_session = selected["session_id"]
 
+        claims_package = None
+        claims_checker = None
+        selected_scope = None
+        if project_checkout is not None:
+            package_loader = getattr(self.environment_service, "_pkg", None)
+            claims_package = package_loader() if callable(package_loader) else None
+            claims_checker = getattr(
+                getattr(claims_package, "claims", None), "scopes_conflict", None,
+            )
+            checkout_path = project_checkout.get("path")
+            if not callable(claims_checker) or not isinstance(checkout_path, str):
+                capsule["project_selection"] = {
+                    "status": "unknown",
+                    "reason": "registered-checkout-claim-scope-checker-unavailable",
+                }
+                if capsule.get("status") == "ready":
+                    capsule["context_conflict_status"] = "ready"
+                    capsule["status"] = "unknown"
+                return capsule
+            selected_scope = {
+                "kind": "worktree",
+                "repository": repository,
+                "checkout": checkout_path,
+                "branch": project_checkout.get("branch"),
+                "paths": None,
+                "exclusive": False,
+            }
+
         other_rows = [row for row in rows if row.get("session_id") != selected_session]
-        competing_claim_sessions = []
-        unknown_claim_sessions = []
+        competing_claim_sessions: list[str] = []
+        unknown_claim_sessions: list[str] = []
         for row in other_rows:
             claims = row.get("claims")
             claim_ids = row.get("claim_ids")
-            if not isinstance(claim_ids, list):
-                session_id = row.get("session_id")
-                if isinstance(session_id, str):
-                    unknown_claim_sessions.append(session_id)
-                else:
-                    unknown_claim_sessions.append("unknown-session")
+            session_id = row.get("session_id")
+            blocker_id = session_id if isinstance(session_id, str) else "unknown-session"
+            if not isinstance(claim_ids, list) or not isinstance(claims, list):
+                unknown_claim_sessions.append(blocker_id)
                 continue
-            has_repository_claim = bool(claim_ids)
-            if isinstance(claims, list):
-                has_repository_claim = has_repository_claim or any(
-                    isinstance(claim, dict)
-                    and claim.get("repository") == repository
-                    and claim.get("status") == "held"
-                    for claim in claims
-                )
-            if has_repository_claim:
-                session_id = row.get("session_id")
-                if isinstance(session_id, str):
-                    competing_claim_sessions.append(session_id)
-                else:
-                    unknown_claim_sessions.append("unknown-session")
+            projected_claim_ids = [
+                str(claim.get("claim_id")) for claim in claims
+                if isinstance(claim, dict) and isinstance(claim.get("claim_id"), str)
+            ]
+            if (row.get("claims_truncated") is True
+                    or not all(isinstance(claim_id, str) for claim_id in claim_ids)
+                    or len(projected_claim_ids) != len(claims)
+                    or sorted(projected_claim_ids) != sorted(claim_ids)):
+                unknown_claim_sessions.append(blocker_id)
+                continue
+            if not claim_ids and not claims:
+                continue
+            if project_checkout is None:
+                competing_claim_sessions.append(blocker_id)
+                continue
+            if len(claim_ids) > len(claims):
+                unknown_claim_sessions.append(blocker_id)
+                continue
+            overlap = False
+            unknown = False
+            for claim in claims:
+                if not isinstance(claim, dict):
+                    unknown = True
+                    continue
+                if claim.get("repository") != repository or claim.get("status") != "held":
+                    continue
+                scope = claim.get("scope")
+                if not isinstance(scope, dict):
+                    unknown = True
+                    continue
+                try:
+                    if claims_checker(scope, selected_scope) is not None:
+                        overlap = True
+                except (TypeError, ValueError):
+                    unknown = True
+            if overlap:
+                competing_claim_sessions.append(blocker_id)
+            elif unknown:
+                unknown_claim_sessions.append(blocker_id)
+
         if competing_claim_sessions or unknown_claim_sessions:
             capsule["project_selection"] = {
                 "status": "blocked" if competing_claim_sessions else "unknown",
                 "reason": (
-                    "another-same-campaign-session-holds-a-project-claim"
+                    "another-session-holds-an-overlapping-project-claim"
                     if competing_claim_sessions
-                    else "same-campaign-session-claim-projection-is-incomplete"
+                    else "session-claim-projection-is-incomplete"
                 ),
-                "definition_id": definition_id,
-                "workspace_root": workspace_root,
-                "competing_claim_sessions": sorted(competing_claim_sessions),
+                **({"definition_id": selector[0], "workspace_root": selector[1]}
+                   if selector is not None else {}),
+                "competing_claim_sessions": sorted(set(competing_claim_sessions)),
                 "unknown_claim_sessions": sorted(set(unknown_claim_sessions)),
             }
             capsule["next"] = (
-                "inspect the listed project claims and use the owning session's handoff "
-                "or release protocol; Control did not transfer ownership"
+                "inspect the listed overlapping project claims and use the owning session's handoff or release protocol; Control did not transfer ownership"
                 if competing_claim_sessions else
                 "refresh the complete claim projection before selecting a project session"
             )
+            if capsule.get("status") == "ready":
+                capsule["context_conflict_status"] = "ready"
+                capsule["status"] = "blocked" if competing_claim_sessions else "unknown"
             return capsule
 
         unselected_contexts: dict[tuple[str, str], list[str]] = {}
@@ -4783,15 +5082,18 @@ class EnvironmentRPCServer:
             session_id = row.get("session_id")
             if isinstance(session_id, str):
                 unselected_contexts.setdefault(context, []).append(session_id)
-        if capsule.get("status") == "context-conflict":
-            capsule["context_conflict_status"] = "context-conflict"
+        if capsule.get("status") in {"context-conflict", "ambiguous"}:
+            capsule["context_conflict_status"] = capsule.get("status")
         capsule["status"] = "ready"
         capsule["selected_session_id"] = selected_session
-        capsule["selected_context"] = {
-            "definition_id": definition_id,
-            "workspace_root": workspace_root,
+        selected_context = {
+            "definition_id": selected.get("definition_id"),
+            "workspace_root": selected.get("workspace_root"),
         }
+        capsule["selected_context"] = selected_context
         capsule["selection_basis"] = selection_basis
+        if project_checkout is not None:
+            capsule["selected_checkout"] = project_checkout
         capsule["unselected_contexts"] = [
             {
                 "definition_id": context[0] or None,
@@ -4903,6 +5205,12 @@ class EnvironmentRPCServer:
         """
         record.bound_session_id = None
         project = self._project_repository(record, cwd=cwd)
+        project_checkout = self._registered_project_checkout(record, project, cwd)
+        project_context = None
+        if isinstance(project_checkout, dict):
+            project_context = self._project_environment_identity(
+                record, project, working_checkout=project_checkout,
+            )
         campaign_id: str | None = None
         task_identity: str | None = None
         index = 1
@@ -4979,15 +5287,40 @@ class EnvironmentRPCServer:
                 "ENVIRONMENT_AUTHORITY_DENIED",
                 "campaign continuation is not bound to the Control-authenticated principal",
             )
-        if task_identity is None:
-            capsule = self.environment_service.campaign_continuation(project, campaign_id)
+        if project_checkout is None:
+            if task_identity is None:
+                capsule = self.environment_service.campaign_continuation(project, campaign_id)
+            else:
+                capsule = self.environment_service.campaign_continuation(
+                    project, campaign_id, task_identity,
+                )
+        elif task_identity is None:
+            capsule = self.environment_service.campaign_continuation(
+                project, campaign_id, working_checkout=project_checkout,
+            )
         else:
             capsule = self.environment_service.campaign_continuation(
                 project, campaign_id, task_identity,
+                working_checkout=project_checkout,
             )
         if not isinstance(capsule, dict):
             raise TypeError("Environment returned a non-object continuation capsule")
-        capsule = self._select_project_campaign_context(capsule, record, project)
+        if project_checkout is None:
+            if project_context is None:
+                capsule = self._select_project_campaign_context(
+                    capsule, record, project,
+                )
+            else:
+                capsule = self._select_project_campaign_context(
+                    capsule, record, project, project_context=project_context,
+                    derive_project_context=False,
+                )
+        else:
+            capsule = self._select_project_campaign_context(
+                capsule, record, project, project_context=project_context,
+                derive_project_context=False,
+                project_checkout=project_checkout,
+            )
         selected_session = capsule.get("selected_session_id")
         if (selected_session is None and campaign_id is not None
                 and capsule.get("status") == "ready"

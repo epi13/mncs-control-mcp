@@ -5901,3 +5901,293 @@ def test_project_rpc_exposes_recovered_compiler_and_forge_capabilities(
     assert unsupported["ok"] is False
     assert unsupported["error"]["code"] == "ENVIRONMENT_OPERATION_UNAVAILABLE"
     assert len(calls) == 1
+
+
+def test_registered_nested_worktree_drives_project_profile_selection(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "projects"
+    project = workspace / "mncs-environment"
+    project.mkdir(parents=True)
+    (project / ".mncs").mkdir()
+    (project / ".mncs" / "project-environment.json").write_text(
+        json.dumps({"name": "root", "workspace_scope": {"repositories": ["mncs-environment"]}}),
+        encoding="utf-8",
+    )
+    (project / "README.md").write_text("fixture\n", encoding="utf-8")
+    subprocess.run(["git", "init", "--quiet", str(project)], check=True)
+    subprocess.run(["git", "-C", str(project), "add", "."], check=True)
+    subprocess.run(
+        ["git", "-C", str(project), "-c", "user.name=MNCS Test",
+         "-c", "user.email=mncs-test@example.invalid", "commit", "--quiet", "-m", "fixture"],
+        check=True,
+    )
+    nested = project / ".worktrees" / "campaign" / "mncs-environment"
+    nested.parent.mkdir(parents=True)
+    subprocess.run(
+        ["git", "-C", str(project), "worktree", "add", "--quiet", "--detach", str(nested), "HEAD"],
+        check=True,
+    )
+    (nested / "src").mkdir()
+    (nested / ".mncs" / "project-environment.json").write_text(
+        json.dumps({"name": "nested", "workspace_scope": {"repositories": ["mncs-environment"]}}),
+        encoding="utf-8",
+    )
+
+    def verify_registered_checkout(
+        checkout: Path, *, repository: str, workspace_root: Path,
+        expected_repository_root: Path,
+    ) -> dict[str, str]:
+        assert repository == "mncs-environment"
+        assert workspace_root == workspace
+        assert expected_repository_root == project
+        assert checkout.resolve() == nested.resolve()
+        top = subprocess.run(
+            ["git", "-C", str(checkout), "rev-parse", "--show-toplevel"],
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+        common = subprocess.run(
+            ["git", "-C", str(checkout), "rev-parse", "--git-common-dir"],
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+        common_path = (Path(top) / common).resolve()
+        assert Path(top).resolve() == nested.resolve()
+        assert common_path == (project / ".git").resolve()
+        listing = subprocess.run(
+            ["git", "-C", str(project), "worktree", "list", "--porcelain"],
+            check=True, capture_output=True, text=True,
+        ).stdout
+        assert f"worktree {nested.resolve()}" in listing
+        return {
+            "repository": repository,
+            "path": str(nested.resolve()),
+            "checkout_identity": str(nested.resolve()),
+            "git_common_directory_identity": str(common_path),
+            "branch": "campaign/nested",
+            "head": "fixture-head",
+        }
+
+    class Environment:
+        state_dir = tmp_path / "state"
+        environment_path = tmp_path / "environment"
+
+        @staticmethod
+        def _pkg():
+            return SimpleNamespace(
+                workspace=SimpleNamespace(verify_registered_checkout=verify_registered_checkout),
+                identity=SimpleNamespace(
+                    environment_id=lambda definition: f"env_{definition['name']}",
+                ),
+            )
+
+    server = EnvironmentRPCServer(
+        ControlConfig(
+            workspace_root=workspace,
+            sandbox_home=tmp_path / "home",
+            environment_rpc_socket=tmp_path / "rpc" / "environment.sock",
+        ),
+        environment_service=Environment(),
+        policy=object(),
+    )
+    record = _GrantRecord(
+        grant_id="nested-project-profile-grant",
+        principal_id="principal-test",
+        host_root=project,
+        sandbox_root="/workspace/mncs-environment",
+        scope="project",
+        uid=0,
+        expires_at=time.monotonic() + 60,
+        token_file=tmp_path / "grant",
+    )
+
+    checkout = server._registered_project_checkout(record, "mncs-environment", nested / "src")
+    assert checkout is not None
+    assert checkout["path"] == str(nested.resolve())
+    unavailable = EnvironmentRPCServer(
+        ControlConfig(
+            workspace_root=workspace,
+            sandbox_home=tmp_path / "other-home",
+            environment_rpc_socket=tmp_path / "other-rpc" / "environment.sock",
+        ),
+        environment_service=SimpleNamespace(state_dir=tmp_path / "other-state"),
+        policy=object(),
+    )
+    with pytest.raises(ControlError) as missing_verifier:
+        unavailable._registered_project_checkout(
+            record, "mncs-environment", nested / "src",
+        )
+    assert missing_verifier.value.code == "ENVIRONMENT_WORKSPACE_UNKNOWN"
+    assert server._project_environment_identity(
+        record, "mncs-environment", working_checkout=checkout,
+    ) == ("env_nested", str(workspace.resolve()))
+
+    unrelated = project / "lookalike" / "mncs-environment"
+    unrelated.mkdir(parents=True)
+    subprocess.run(["git", "init", "--quiet", str(unrelated)], check=True)
+    with pytest.raises(ControlError) as rejected:
+        server._registered_project_checkout(
+            record, "mncs-environment", unrelated,
+        )
+    assert rejected.value.code == "ENVIRONMENT_WORKSPACE_UNKNOWN"
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (project / "escape").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(ControlError) as escaped:
+        server._registered_project_checkout(
+            record, "mncs-environment", project / "escape",
+        )
+    assert escaped.value.code == "ENVIRONMENT_WORKSPACE_ESCAPE"
+
+
+def test_registered_checkout_selects_one_campaign_and_scoped_claims(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "projects"
+    project = workspace / "mncs-environment"
+    project.mkdir(parents=True)
+
+    def scopes_conflict(left: dict[str, object], right: dict[str, object]):
+        if left.get("repository") != right.get("repository"):
+            return None
+        if left.get("kind") == "repository":
+            return {"reason": "repository-wide claim"}
+        if left.get("kind") != "worktree":
+            raise ValueError("unknown claim scope")
+        return {"reason": "same worktree"} if left.get("checkout") == right.get("checkout") else None
+
+    class Environment:
+        state_dir = tmp_path / "state"
+        environment_path = tmp_path / "environment"
+        authenticated_principal_id = "principal-test"
+
+        @staticmethod
+        def _pkg():
+            return SimpleNamespace(
+                entry=SimpleNamespace(
+                    _working_checkout_matches_snapshot=lambda snapshot, requested: (
+                        isinstance(snapshot.get("selected_checkouts"), dict)
+                        and snapshot["selected_checkouts"].get("mncs-environment", {}).get("checkout_identity")
+                        == requested.get("checkout_identity")
+                        and snapshot["selected_checkouts"].get("mncs-environment", {}).get("git_common_directory_identity")
+                        == requested.get("git_common_directory_identity")
+                    ),
+                ),
+                claims=SimpleNamespace(scopes_conflict=scopes_conflict),
+            )
+
+    server = EnvironmentRPCServer(
+        ControlConfig(
+            workspace_root=workspace,
+            sandbox_home=tmp_path / "home",
+            environment_rpc_socket=tmp_path / "rpc" / "environment.sock",
+        ),
+        environment_service=Environment(),
+        policy=object(),
+    )
+    record = _GrantRecord(
+        grant_id="checkout-selection-grant",
+        principal_id="principal-test",
+        host_root=project,
+        sandbox_root="/workspace/mncs-environment",
+        scope="project",
+        uid=0,
+        expires_at=time.monotonic() + 60,
+        token_file=tmp_path / "grant",
+    )
+    common = str(project / ".git")
+    selected_path = project / ".worktrees" / "one"
+    other_path = project / ".worktrees" / "two"
+    selected_path.mkdir(parents=True)
+    other_path.mkdir(parents=True)
+    selected_checkout = {
+        "repository": "mncs-environment", "path": str(selected_path),
+        "checkout_identity": "checkout-one", "git_common_directory_identity": common,
+        "branch": "campaign/one", "head": "one",
+    }
+    other_checkout = {
+        "repository": "mncs-environment", "path": str(other_path),
+        "checkout_identity": "checkout-two", "git_common_directory_identity": common,
+        "branch": "campaign/two", "head": "two",
+    }
+
+    def row(session_id: str, checkout: dict[str, str], claim: dict[str, object] | None = None):
+        claims = [] if claim is None else [claim]
+        return {
+            "session_id": session_id,
+            "definition_id": "env_same",
+            "workspace_root": str(workspace),
+            "selected_checkout": checkout,
+            "lifecycle": "active",
+            "project_reference": {"status": "linked"},
+            "claim_ids": [] if claim is None else [str(claim["claim_id"])],
+            "claims": claims,
+            "claims_truncated": False,
+        }
+
+    capsule = {
+        "campaign_id": "cmp_shared_campaign",
+        "repository": "mncs-environment",
+        "status": "ambiguous",
+        "continuations_count": 2,
+        "continuations_truncated": False,
+        "continuations": [
+            row("ses_one", selected_checkout),
+            row("ses_two", other_checkout, {
+                "claim_id": "claim-two", "repository": "mncs-environment", "status": "held",
+                "scope": {"kind": "worktree", "repository": "mncs-environment",
+                          "checkout": other_checkout["path"]},
+            }),
+        ],
+    }
+    result = server._select_project_campaign_context(
+        capsule, record, "mncs-environment", project_checkout=selected_checkout,
+    )
+    assert result["status"] == "ready"
+    assert result["selected_session_id"] == "ses_one"
+    assert result["selected_checkout"]["checkout_identity"] == "checkout-one"
+
+    campaigns = {
+        "status": "ambiguous-campaigns",
+        "repository": "mncs-environment",
+        "campaigns_count": 2,
+        "campaigns_truncated": False,
+        "campaigns": [
+            {"campaign_id": "cmp_one", "repository": "mncs-environment", "status": "ready",
+             "continuations_count": 1, "continuations_truncated": False,
+             "continuations": [row("ses_one", selected_checkout)]},
+            {"campaign_id": "cmp_two", "repository": "mncs-environment", "status": "ready",
+             "continuations_count": 1, "continuations_truncated": False,
+             "continuations": [row("ses_two", other_checkout)]},
+        ],
+    }
+    selected_campaign = server._select_project_campaign_context(
+        campaigns, record, "mncs-environment", project_checkout=selected_checkout,
+    )
+    assert selected_campaign["status"] == "ready"
+    assert selected_campaign["campaign_id"] == "cmp_one"
+    assert selected_campaign["selected_session_id"] == "ses_one"
+
+    duplicate = dict(capsule)
+    duplicate["continuations"] = [row("ses_one", selected_checkout), row("ses_duplicate", selected_checkout)]
+    duplicate["continuations_count"] = 2
+    unresolved = server._select_project_campaign_context(
+        duplicate, record, "mncs-environment", project_checkout=selected_checkout,
+    )
+    assert unresolved["status"] == "ambiguous"
+    assert unresolved["project_selection"]["candidate_sessions"] == ["ses_duplicate", "ses_one"]
+
+    conflicting = dict(capsule)
+    conflicting["continuations"] = [
+        row("ses_one", selected_checkout),
+        row("ses_two", other_checkout, {
+            "claim_id": "claim-global", "repository": "mncs-environment", "status": "held",
+            "scope": {"kind": "repository", "repository": "mncs-environment"},
+        }),
+    ]
+    blocked = server._select_project_campaign_context(
+        conflicting, record, "mncs-environment", project_checkout=selected_checkout,
+    )
+    assert blocked["status"] == "ambiguous"
+    assert blocked["project_selection"]["status"] == "blocked"
+    assert blocked["project_selection"]["competing_claim_sessions"] == ["ses_two"]
