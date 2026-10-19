@@ -4959,6 +4959,7 @@ class EnvironmentRPCServer:
                 checkout_verifier = getattr(
                     workspace_module, "verify_registered_checkout", None,
                 )
+                registered_worktrees = getattr(workspace_module, "_worktrees", None)
                 if not callable(checkout_verifier):
                     capsule["project_selection"] = {
                         "status": "unknown",
@@ -4973,21 +4974,71 @@ class EnvironmentRPCServer:
                 verified_candidates: list[dict[str, Any]] = []
                 for row in context_rows:
                     selected = row.get("selected_checkout")
-                    if not isinstance(selected, dict):
-                        continue
-                    candidate_path = selected.get("path")
-                    if (
-                        selected.get("repository") != repository
-                        or selected.get("workspace_root") != workspace_root
-                        or selected.get("repository_root") != repository_root
-                        or selected.get("git_common_directory") != common_directory
-                        or selected.get("git_common_directory_identity") != common_identity
-                        or not isinstance(selected.get("checkout_identity"), str)
-                        or not isinstance(selected.get("branch"), str)
-                        or not isinstance(selected.get("head"), str)
-                        or not isinstance(candidate_path, str)
-                        or candidate_path == root_path
-                    ):
+                    selected_identity = isinstance(selected, dict)
+                    if selected_identity:
+                        if (
+                            selected.get("repository") != repository
+                            or selected.get("workspace_root") != workspace_root
+                            or selected.get("repository_root") != repository_root
+                            or selected.get("git_common_directory") != common_directory
+                            or selected.get("git_common_directory_identity") != common_identity
+                            or not isinstance(selected.get("checkout_identity"), str)
+                            or not isinstance(selected.get("branch"), str)
+                            or not isinstance(selected.get("head"), str)
+                        ):
+                            continue
+                        candidate_path = selected.get("path")
+                        expected_branch = selected["branch"]
+                        expected_head = selected["head"]
+                    else:
+                        # Older continuation capsules retain only the exact
+                        # repository branch and HEAD. Resolve that pair through
+                        # Environment's Git worktree registry, then run the
+                        # same canonical checkout verifier as newer sessions.
+                        references = row.get("repositories")
+                        if not isinstance(references, list):
+                            continue
+                        repository_references = [
+                            reference for reference in references
+                            if isinstance(reference, dict)
+                            and reference.get("repository") == repository
+                        ]
+                        if (
+                            len(repository_references) != 1
+                            or not callable(registered_worktrees)
+                        ):
+                            continue
+                        reference = repository_references[0]
+                        expected_branch = reference.get("branch")
+                        expected_head = reference.get("head")
+                        if not isinstance(expected_branch, str) or not isinstance(
+                            expected_head, str
+                        ):
+                            continue
+                        registry_rows = registered_worktrees(repository_root)
+                        matching_worktrees = []
+                        for worktree in registry_rows:
+                            if not isinstance(worktree, dict):
+                                continue
+                            registered_branch = worktree.get("branch", "")
+                            if isinstance(registered_branch, str) and registered_branch.startswith(
+                                "refs/heads/"
+                            ):
+                                registered_branch = registered_branch.removeprefix(
+                                    "refs/heads/"
+                                )
+                            if (
+                                registered_branch == expected_branch
+                                and worktree.get("head") == expected_head
+                                and "prunable" not in worktree
+                                and isinstance(worktree.get("path"), str)
+                            ):
+                                matching_worktrees.append(worktree)
+                        if len(matching_worktrees) != 1:
+                            continue
+                        candidate_path = matching_worktrees[0]["path"]
+
+                    if not isinstance(candidate_path, str) or candidate_path == root_path:
                         continue
                     try:
                         verified = checkout_verifier(
@@ -4995,21 +5046,23 @@ class EnvironmentRPCServer:
                             repository=repository,
                             workspace_root=workspace_root,
                             expected_repository_root=repository_root,
-                            expected_branch=selected["branch"],
-                            expected_head=selected["head"],
+                            expected_branch=expected_branch,
+                            expected_head=expected_head,
                         )
                     except Exception:
                         # A stale or unregistered candidate cannot establish
                         # continuation identity. Keep it out of the match set.
                         continue
-                    if not isinstance(verified, dict) or any(
-                        selected.get(key) != verified.get(key)
-                        for key in (
-                            "repository", "path", "workspace_root",
-                            "repository_root", "git_common_directory",
-                            "git_common_directory_identity", "checkout_identity",
-                            "branch", "head",
-                        )
+                    if not isinstance(verified, dict):
+                        continue
+                    if selected_identity and any(
+                            selected.get(key) != verified.get(key)
+                            for key in (
+                                "repository", "path", "workspace_root",
+                                "repository_root", "git_common_directory",
+                                "git_common_directory_identity", "checkout_identity",
+                                "branch", "head",
+                            )
                     ):
                         continue
                     session_id = row.get("session_id")

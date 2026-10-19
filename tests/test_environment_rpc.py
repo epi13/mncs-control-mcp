@@ -6391,6 +6391,17 @@ def test_project_root_resolves_unique_verified_nested_continuation(
             raise ValueError("checkout is not a current registered worktree")
         return observed
 
+    def list_registered_worktrees(repository_root: str) -> list[dict[str, str]]:
+        assert repository_root == str(project)
+        return [
+            {
+                "path": item["path"],
+                "branch": f"refs/heads/{item['branch']}",
+                "head": item["head"],
+            }
+            for item in registered.values()
+        ]
+
     def scopes_conflict(left: dict[str, object], right: dict[str, object]):
         if left.get("repository") != right.get("repository"):
             return None
@@ -6424,6 +6435,7 @@ def test_project_root_resolves_unique_verified_nested_continuation(
                 ),
                 workspace=SimpleNamespace(
                     verify_registered_checkout=verify_registered_checkout,
+                    _worktrees=list_registered_worktrees,
                 ),
                 claims=SimpleNamespace(scopes_conflict=scopes_conflict),
             )
@@ -6449,7 +6461,7 @@ def test_project_root_resolves_unique_verified_nested_continuation(
     )
 
     def row(
-        session_id: str, selected: dict[str, str], *,
+        session_id: str, selected: dict[str, str] | None, *,
         definition: str = "env_compiler", claim: dict[str, object] | None = None,
         lifecycle: str = "active",
     ) -> dict[str, object]:
@@ -6483,6 +6495,17 @@ def test_project_root_resolves_unique_verified_nested_continuation(
             derive_project_context=False,
             project_checkout=root_checkout,
         )
+
+    legacy = row("ses_nested_legacy", None)
+    legacy["repositories"] = [{
+        "repository": "mncs-compiler",
+        "branch": first_checkout["branch"],
+        "head": first_checkout["head"],
+    }]
+    selected_legacy = select([legacy])
+    assert selected_legacy["status"] == "ready"
+    assert selected_legacy["selected_session_id"] == "ses_nested_legacy"
+    assert selected_legacy["selected_checkout"] == first_checkout
 
     independent = select([
         row("ses_nested_one", first_checkout),
