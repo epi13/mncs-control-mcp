@@ -6347,3 +6347,209 @@ def test_registered_checkout_selects_one_campaign_and_scoped_claims(
     assert blocked["status"] == "ambiguous"
     assert blocked["project_selection"]["status"] == "blocked"
     assert blocked["project_selection"]["competing_claim_sessions"] == ["ses_two"]
+
+
+def test_project_root_resolves_unique_verified_nested_continuation(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "projects"
+    project = workspace / "mncs-compiler"
+    nested_one = project / ".worktrees" / "one" / "mncs-compiler"
+    nested_two = project / ".worktrees" / "two" / "mncs-compiler"
+    common = project / ".git"
+    for path in (workspace, project, nested_one, nested_two):
+        path.mkdir(parents=True, exist_ok=True)
+
+    def checkout(path: Path, identity: str, branch: str, head: str) -> dict[str, str]:
+        return {
+            "repository": "mncs-compiler",
+            "path": str(path),
+            "workspace_root": str(workspace),
+            "repository_root": str(project),
+            "git_common_directory": str(common),
+            "git_common_directory_identity": str(common),
+            "checkout_identity": identity,
+            "branch": branch,
+            "head": head,
+        }
+
+    root_checkout = checkout(project, "checkout-root", "main", "root-head")
+    first_checkout = checkout(nested_one, "checkout-one", "campaign/one", "head-one")
+    second_checkout = checkout(nested_two, "checkout-two", "campaign/two", "head-two")
+    registered = {str(nested_one): first_checkout, str(nested_two): second_checkout}
+
+    def verify_registered_checkout(
+        path: str, *, repository: str, workspace_root: str,
+        expected_repository_root: str, expected_branch: str, expected_head: str,
+    ) -> dict[str, str]:
+        assert repository == "mncs-compiler"
+        assert workspace_root == str(workspace)
+        assert expected_repository_root == str(project)
+        observed = registered.get(path)
+        if (observed is None or observed["branch"] != expected_branch
+                or observed["head"] != expected_head):
+            raise ValueError("checkout is not a current registered worktree")
+        return observed
+
+    def scopes_conflict(left: dict[str, object], right: dict[str, object]):
+        if left.get("repository") != right.get("repository"):
+            return None
+        if left.get("kind") == "repository" or right.get("kind") == "repository":
+            return {"reason": "repository-wide claim"}
+        if left.get("kind") != "worktree" or right.get("kind") != "worktree":
+            raise ValueError("unknown claim scope")
+        return {"reason": "same worktree"} if left.get("checkout") == right.get("checkout") else None
+
+    class Environment:
+        state_dir = tmp_path / "state"
+        environment_path = tmp_path / "environment"
+
+        @staticmethod
+        def _pkg():
+            def matches_checkout(snapshot, requested):
+                selected = snapshot.get("selected_checkouts")
+                if not isinstance(selected, dict):
+                    return False
+                observed = selected.get("mncs-compiler")
+                return (
+                    isinstance(observed, dict)
+                    and observed.get("checkout_identity") == requested.get("checkout_identity")
+                    and observed.get("git_common_directory_identity")
+                    == requested.get("git_common_directory_identity")
+                )
+
+            return SimpleNamespace(
+                entry=SimpleNamespace(
+                    _working_checkout_matches_snapshot=matches_checkout,
+                ),
+                workspace=SimpleNamespace(
+                    verify_registered_checkout=verify_registered_checkout,
+                ),
+                claims=SimpleNamespace(scopes_conflict=scopes_conflict),
+            )
+
+    server = EnvironmentRPCServer(
+        ControlConfig(
+            workspace_root=workspace,
+            sandbox_home=tmp_path / "home",
+            environment_rpc_socket=tmp_path / "rpc" / "environment.sock",
+        ),
+        environment_service=Environment(),
+        policy=object(),
+    )
+    record = _GrantRecord(
+        grant_id="bare-root-continuation-grant",
+        principal_id="principal-test",
+        host_root=project,
+        sandbox_root="/workspace/mncs-compiler",
+        scope="project",
+        uid=0,
+        expires_at=time.monotonic() + 60,
+        token_file=tmp_path / "grant",
+    )
+
+    def row(
+        session_id: str, selected: dict[str, str], *,
+        definition: str = "env_compiler", claim: dict[str, object] | None = None,
+        lifecycle: str = "active",
+    ) -> dict[str, object]:
+        claims = [] if claim is None else [claim]
+        return {
+            "session_id": session_id,
+            "definition_id": definition,
+            "workspace_root": str(workspace),
+            "selected_checkout": selected,
+            "lifecycle": lifecycle,
+            "project_reference": {"status": "linked"},
+            "claim_ids": [] if claim is None else [str(claim["claim_id"])],
+            "claims": claims,
+            "claims_truncated": False,
+        }
+
+    def capsule(rows: list[dict[str, object]]) -> dict[str, object]:
+        return {
+            "campaign_id": "cmp_compiler",
+            "repository": "mncs-compiler",
+            "status": "ready",
+            "continuations_count": len(rows),
+            "continuations_truncated": False,
+            "continuations": rows,
+        }
+
+    def select(rows: list[dict[str, object]]) -> dict[str, object]:
+        return server._select_project_campaign_context(
+            capsule(rows), record, "mncs-compiler",
+            project_context=("env_compiler", str(workspace)),
+            derive_project_context=False,
+            project_checkout=root_checkout,
+        )
+
+    independent = select([
+        row("ses_nested_one", first_checkout),
+        row("ses_completed_old", first_checkout, lifecycle="completed"),
+        row("ses_nested_two", second_checkout, definition="env_other", claim={
+            "claim_id": "claim-other-worktree",
+            "repository": "mncs-compiler",
+            "status": "held",
+            "scope": {
+                "kind": "worktree",
+                "repository": "mncs-compiler",
+                "checkout": second_checkout["path"],
+            },
+        }),
+    ])
+    assert independent["status"] == "ready"
+    assert independent["selected_session_id"] == "ses_nested_one"
+    assert independent["selection_basis"] == (
+        "authenticated-project-root-registered-worktree"
+    )
+    assert independent["selected_checkout"] == first_checkout
+
+    overlapping = select([
+        row("ses_nested_one", first_checkout),
+        row("ses_other_context", second_checkout, definition="env_other", claim={
+            "claim_id": "claim-overlap",
+            "repository": "mncs-compiler",
+            "status": "held",
+            "scope": {
+                "kind": "worktree",
+                "repository": "mncs-compiler",
+                "checkout": first_checkout["path"],
+            },
+        }),
+    ])
+    assert overlapping["status"] == "blocked"
+    assert overlapping["project_selection"]["competing_claim_sessions"] == [
+        "ses_other_context"
+    ]
+
+    ambiguous = select([
+        row("ses_nested_one", first_checkout),
+        row("ses_nested_two", second_checkout),
+    ])
+    assert ambiguous["status"] == "ambiguous"
+    assert ambiguous["project_selection"]["reason"] == (
+        "multiple-sessions-match-bare-project-root-registered-worktrees"
+    )
+    assert ambiguous["project_selection"]["candidate_sessions"] == [
+        "ses_nested_one", "ses_nested_two"
+    ]
+    assert [item["checkout_identity"] for item in ambiguous["project_selection"][
+        "candidate_checkouts"
+    ]] == ["checkout-one", "checkout-two"]
+
+    stale = dict(first_checkout, head="stale-head")
+    rejected = select([row("ses_stale", stale)])
+    assert rejected["status"] == "context-mismatch"
+    assert rejected["project_selection"]["reason"] == (
+        "no-session-matches-registered-checkout"
+    )
+
+    inactive_only = select([
+        row("ses_completed_one", first_checkout, lifecycle="completed"),
+        row("ses_completed_two", second_checkout, lifecycle="completed"),
+    ])
+    assert inactive_only["status"] == "context-mismatch"
+    assert inactive_only["project_selection"]["reason"] == (
+        "no-session-matches-registered-checkout"
+    )
