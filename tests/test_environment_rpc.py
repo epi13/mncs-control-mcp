@@ -907,6 +907,101 @@ def test_claim_recovery_uses_persisted_audit_process_identity_when_cwd_is_hidden
     assert matches_after_exit == []
 
 
+def test_idle_environment_bridge_is_not_treated_as_an_active_writer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from mncs_control_mcp.audit import AuditLog
+    from mncs_control_mcp.processes import ProcessManager
+
+    module_root = tmp_path / "adapter-source"
+    module = module_root / "mncs_control_mcp" / "local_environment_mcp.py"
+    module.parent.mkdir(parents=True)
+    module.write_text("import time\ntime.sleep(30)\n", encoding="utf-8")
+    adapter = subprocess.Popen(
+        [sys.executable, "-B", "-m", "mncs_control_mcp.local_environment_mcp"],
+        cwd=tmp_path,
+        env={**os.environ, "PYTHONPATH": str(module_root)},
+    )
+    writer = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        cwd=tmp_path,
+    )
+    try:
+        adapter_ticks = ProcessManager._process_start_ticks(adapter.pid)
+        writer_ticks = ProcessManager._process_start_ticks(writer.pid)
+        boot_id = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+        assert adapter_ticks is not None
+        assert writer_ticks is not None
+        audit = AuditLog(tmp_path / "state" / "audit.jsonl")
+        audit.record(
+            "mncs_environment",
+            success=True,
+            project="mncs-compiler",
+            session_id="ses_idle_bridge_owner",
+            client_pid=adapter.pid,
+            client_start_ticks=adapter_ticks,
+            client_host_boot_id=boot_id,
+        )
+        server = EnvironmentRPCServer(
+            ControlConfig(
+                workspace_root=tmp_path,
+                sandbox_home=tmp_path / "home",
+                environment_rpc_socket=tmp_path / "rpc" / "environment.sock",
+            ),
+            environment_service=SimpleNamespace(state_dir=tmp_path / "state"),
+            policy=object(),
+            process_manager=SimpleNamespace(),
+            audit_log=audit,
+        )
+        monkeypatch.setattr(server, "_agent_process_identity", lambda *_args, **_kwargs: None)
+
+        idle_matches, complete, rows, contexts = server._audited_session_processes(
+            owner_session_id="ses_idle_bridge_owner",
+            repository="mncs-compiler",
+            current_peer_identity=None,
+            host_boot_id=boot_id,
+        )
+        assert complete is True
+        assert rows == 1
+        assert idle_matches == []
+        assert contexts == set()
+
+        audit.record(
+            "mncs_environment",
+            success=True,
+            project="mncs-compiler",
+            session_id="ses_idle_bridge_owner",
+            client_pid=adapter.pid,
+            client_start_ticks=adapter_ticks,
+            client_agent_pid=writer.pid,
+            client_agent_start_ticks=writer_ticks,
+            client_host_boot_id=boot_id,
+        )
+        writer_matches, writer_complete, _writer_rows, writer_contexts = (
+            server._audited_session_processes(
+                owner_session_id="ses_idle_bridge_owner",
+                repository="mncs-compiler",
+                current_peer_identity=None,
+                host_boot_id=boot_id,
+            )
+        )
+        assert writer_complete is True
+        assert [item["pid"] for item in writer_matches] == [writer.pid]
+        assert writer_contexts == {(writer.pid, writer_ticks)}
+    finally:
+        for process in (writer, adapter):
+            try:
+                process.terminate()
+            except ProcessLookupError:
+                pass
+        for process in (writer, adapter):
+            try:
+                process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=3)
+
+
 def test_audit_identity_from_prior_host_boot_cannot_keep_a_reused_pid_live(
     tmp_path: Path,
 ) -> None:

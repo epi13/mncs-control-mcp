@@ -2404,6 +2404,30 @@ class EnvironmentRPCServer:
             return True
         return any(Path(argument).name.casefold() in names for argument in argv[:4])
 
+    def _is_persistent_environment_bridge_process(
+        self, pid: int, expected_start_ticks: str,
+    ) -> bool:
+        """Recognize the long-lived local Environment MCP adapter process.
+
+        The adapter remains alive across agent conversations. Its idle process
+        is not an executing writer: active Environment requests and spawned
+        jobs are checked separately, and recovery revokes its old session
+        grants before fencing the claim owner.
+        """
+        if self._proc_start_ticks(pid) != expected_start_ticks:
+            return False
+        try:
+            raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+        except OSError:
+            return False
+        argv = [part.decode("utf-8", errors="replace")
+                for part in raw.split(b"\x00") if part]
+        return any(
+            argv[index] == "-m"
+            and argv[index + 1] == "mncs_control_mcp.local_environment_mcp"
+            for index in range(len(argv) - 1)
+        )
+
     @staticmethod
     def _looks_like_codex_launcher_wrapper(
         executable: str | None, argv: list[str],
@@ -3351,7 +3375,10 @@ class EnvironmentRPCServer:
                 if (client_ticks is None or process_started_at is None
                         or process_started_at > observed_at):
                     continue
-            observe(client_pid, client_ticks, "mncs-environment")
+            if not self._is_persistent_environment_bridge_process(
+                client_pid, client_ticks,
+            ):
+                observe(client_pid, client_ticks, "mncs-environment")
             if not row_has_identity:
                 agent = self._agent_process_identity(
                     client_pid, expected_peer_start_ticks=client_ticks,
