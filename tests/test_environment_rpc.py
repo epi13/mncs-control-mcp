@@ -1430,6 +1430,8 @@ def test_ordinary_claim_acquisition_builds_same_operator_worktree_recovery(
     project = tmp_path / "mncs-compiler"
     checkout = project / ".worktrees" / "fresh-campaign"
     checkout.mkdir(parents=True)
+    explicit_checkout = project / "nested" / "requested-worktree"
+    explicit_checkout.mkdir(parents=True)
     repository = "mncs-compiler"
     owner_scope = {
         "kind": "repository", "repository": repository, "checkout": None,
@@ -1481,8 +1483,12 @@ def test_ordinary_claim_acquisition_builds_same_operator_worktree_recovery(
             else "same checkout" if left.get("checkout") == right.get("checkout") else None
         ),
     )
+    verify_checkout = mock.Mock(return_value={
+        "path": str(explicit_checkout), "branch": "campaign/explicit-target",
+    })
     package = SimpleNamespace(
         claims=claims_api,
+        workspace=SimpleNamespace(verify_registered_checkout=verify_checkout),
         sessions=SimpleNamespace(Session=lambda _store, _session: SimpleNamespace(
             effective_authority=lambda: {
                 "writable": [repository], "protected_repositories": [],
@@ -1538,13 +1544,32 @@ def test_ordinary_claim_acquisition_builds_same_operator_worktree_recovery(
         "checkout": str(checkout), "branch": "campaign/fresh",
         "paths": None, "exclusive": False,
     }
+    explicit_result = server._auto_recover_same_operator_claim(
+        ["claims", "ses_requester", "--acquire", repository,
+         "--worktree", str(explicit_checkout), "--branch", "campaign/explicit-target"],
+        record=record,
+        request_id="req_explicit_worktree_claim",
+    )
+    assert explicit_result["status"] == "recovered"
+    explicit_request = server._perform_claim_recovery.call_args.args[0]
+    verify_checkout.assert_called_once_with(
+        explicit_checkout,
+        repository=repository,
+        workspace_root=tmp_path,
+        expected_repository_root=project,
+    )
+    assert explicit_request["target_scope"] == {
+        "kind": "worktree", "repository": repository,
+        "checkout": str(explicit_checkout), "branch": "campaign/explicit-target",
+        "paths": None, "exclusive": False,
+    }
     owner_snapshot["authenticated_principal_id"] = "another-operator"
     assert server._auto_recover_same_operator_claim(
         ["claims", "ses_requester", "--acquire", repository],
         record=record,
         request_id="req_foreign_owner_claim",
     ) is None
-    server._perform_claim_recovery.assert_called_once()
+    assert server._perform_claim_recovery.call_count == 2
 
 
 def test_same_operator_recovery_uses_host_liveness_and_narrows_scope(

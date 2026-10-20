@@ -3794,20 +3794,72 @@ class EnvironmentRPCServer:
             if (repository in authority.get("protected_repositories", [])
                     or repository not in authority.get("writable", [])):
                 return
-            selected = requester_snapshot.get("selected_checkouts", {}).get(repository)
-            if isinstance(selected, dict) and isinstance(selected.get("path"), str):
-                checkout = Path(selected["path"])
+            worktree_values: list[str] = []
+            branch_values: list[str] = []
+            for index, item in enumerate(argv):
+                if item == "--worktree" and index + 1 < len(argv):
+                    worktree_values.append(argv[index + 1])
+                elif item.startswith("--worktree="):
+                    worktree_values.append(item.partition("=")[2])
+                elif item == "--branch" and index + 1 < len(argv):
+                    branch_values.append(argv[index + 1])
+                elif item.startswith("--branch="):
+                    branch_values.append(item.partition("=")[2])
+            if len(worktree_values) > 1 or len(branch_values) > 1:
+                return
+
+            if worktree_values:
+                # An explicit claim target is authoritative for overlap
+                # detection only after Environment's Git verifier confirms
+                # its repository, registered worktree, and workspace
+                # identity. This keeps recovery scoped to the requested
+                # checkout when the selected session also knows other
+                # independent worktrees of the same repository.
+                checkout = Path(worktree_values[0])
                 if not checkout.is_absolute():
-                    root = Path(str(requester_snapshot.get("workspace", {}).get("root", "")))
-                    checkout = root / checkout
+                    return
+                verify_checkout = getattr(
+                    getattr(pkg, "workspace", None),
+                    "verify_registered_checkout", None,
+                )
+                if not callable(verify_checkout):
+                    return
+                try:
+                    facts = verify_checkout(
+                        checkout,
+                        repository=repository,
+                        workspace_root=self.config.workspace_root,
+                        expected_repository_root=record.host_root,
+                    )
+                except Exception:
+                    return
+                verified_path = facts.get("path") if isinstance(facts, dict) else None
+                verified_branch = facts.get("branch") if isinstance(facts, dict) else None
+                if not isinstance(verified_path, str):
+                    return
+                if branch_values and branch_values[0] != verified_branch:
+                    return
                 target_scope = pkg.claims.normalize_scope({
                     "kind": "worktree",
-                    "checkout": str(checkout.resolve(strict=True)),
-                    "branch": selected.get("branch"),
+                    "checkout": verified_path,
+                    "branch": verified_branch,
                     "exclusive": False,
                 }, repository)
             else:
-                target_scope = pkg.claims.normalize_scope(None, repository)
+                selected = requester_snapshot.get("selected_checkouts", {}).get(repository)
+                if isinstance(selected, dict) and isinstance(selected.get("path"), str):
+                    checkout = Path(selected["path"])
+                    if not checkout.is_absolute():
+                        root = Path(str(requester_snapshot.get("workspace", {}).get("root", "")))
+                        checkout = root / checkout
+                    target_scope = pkg.claims.normalize_scope({
+                        "kind": "worktree",
+                        "checkout": str(checkout.resolve(strict=True)),
+                        "branch": selected.get("branch"),
+                        "exclusive": False,
+                    }, repository)
+                else:
+                    target_scope = pkg.claims.normalize_scope(None, repository)
 
             active = pkg.claims.active_claims(store.read_claims())
             conflicts = [
