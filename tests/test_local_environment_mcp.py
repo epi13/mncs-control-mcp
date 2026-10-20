@@ -102,17 +102,48 @@ def test_claim_release_mapping_is_explicit_and_bounded() -> None:
     context = _ProjectContext("secret", "/workspace/mncs-compiler")
     context.selected_session_id = "ses_selected"
     argv, selected = _build_argv(
-        "claims", {"mode": "release", "claim_id": "claim_123"}, context,
+        "claims",
+        {"mode": "release", "claim_id": "claim:mncs-language:worktree:123"}, context,
         "mncs-compiler",
     )
     assert selected is True
-    assert argv == ["claims", "ses_selected", "--release", "claim_123",
-                    "--claim-id", "claim_123"]
+    assert argv == [
+        "claims", "ses_selected", "--release", "mncs-language",
+        "--claim-id", "claim:mncs-language:worktree:123",
+    ]
+
+    # Older noncanonical claim IDs use the selected project as their target;
+    # an explicit repository can identify them when the caller has one.
+    legacy, _ = _build_argv(
+        "claims", {"mode": "release", "claim_id": "claim_123"}, context,
+        "mncs-compiler",
+    )
+    assert legacy == [
+        "claims", "ses_selected", "--release", "mncs-compiler",
+        "--claim-id", "claim_123",
+    ]
+    explicit, _ = _build_argv(
+        "claims",
+        {"mode": "release", "claim_id": "claim_123", "repository": "mncs-language"},
+        context,
+        "mncs-compiler",
+    )
+    assert explicit == [
+        "claims", "ses_selected", "--release", "mncs-language",
+        "--claim-id", "claim_123",
+    ]
 
     with pytest.raises(ValueError, match="unsupported arguments"):
         _build_argv(
             "claims",
             {"mode": "acquire", "repository": "mncs-compiler", "argv": ["raw"]},
+            context, "mncs-compiler",
+        )
+
+    with pytest.raises(ValueError, match="valid repository identifier"):
+        _build_argv(
+            "claims",
+            {"mode": "release", "claim_id": "claim_123", "repository": "../mncs-language"},
             context, "mncs-compiler",
         )
 
