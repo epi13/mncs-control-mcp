@@ -117,7 +117,7 @@ def test_claim_release_mapping_is_explicit_and_bounded() -> None:
         )
 
 
-def test_environment_claims_follow_selected_session_repository_authority() -> None:
+def test_claim_targets_forward_to_authenticated_selected_session() -> None:
     context = _ProjectContext("secret", "/workspace/mncs-environment/.worktrees/gatec")
     context.selected_session_id = "ses_selected"
     argv, selected = _build_argv(
@@ -133,20 +133,89 @@ def test_environment_claims_follow_selected_session_repository_authority() -> No
         "--reason", "Gate C", "--basis", "explicit-claim",
     ]
 
-    with pytest.raises(ValueError, match="selected project"):
-        _build_argv(
-            "claims",
-            {"mode": "acquire", "repository": "mncs-forge"},
-            context,
-            "mncs-compiler",
-        )
-    with pytest.raises(ValueError, match="selected repository"):
+    compiler_argv, compiler_selected = _build_argv(
+        "claims",
+        {"mode": "acquire", "repository": "mncs-language", "reason": "Language fact implementation",
+         "basis": "intent-scope"},
+        context,
+        "mncs-compiler",
+    )
+    assert compiler_selected is True
+    assert compiler_argv == [
+        "claims", "ses_selected", "--acquire", "mncs-language",
+        "--reason", "Language fact implementation", "--basis", "intent-scope",
+    ]
+
+    with pytest.raises(ValueError, match="valid repository identifier"):
         _build_argv(
             "claims",
             {"mode": "acquire", "repository": "../mncs-forge"},
             context,
             "mncs-environment",
         )
+
+
+def test_claim_target_accepts_canonical_absolute_checkout_inside_workspace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "Projects"
+    checkout = workspace / "mncs-compiler" / ".worktrees" / "main"
+    checkout.mkdir(parents=True)
+    monkeypatch.setattr(
+        local_environment_mcp,
+        "load_config",
+        lambda: SimpleNamespace(workspace_root=workspace),
+    )
+    context = _ProjectContext("secret", "/workspace/mncs-compiler/.worktrees/campaign")
+    context.selected_session_id = "ses_selected"
+
+    argv, selected = _build_argv(
+        "claims",
+        {
+            "mode": "acquire",
+            "repository": "mncs-compiler",
+            "worktree": str(checkout),
+            "branch": "main",
+        },
+        context,
+        "mncs-compiler",
+    )
+
+    assert selected is True
+    assert argv[-4:] == [
+        "--worktree", str(checkout.resolve()), "--branch", "main",
+    ]
+
+
+def test_claim_target_rejects_absolute_escape_and_symlinked_checkout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "Projects"
+    workspace.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    link = workspace / "escape"
+    link.symlink_to(outside, target_is_directory=True)
+    monkeypatch.setattr(
+        local_environment_mcp,
+        "load_config",
+        lambda: SimpleNamespace(workspace_root=workspace),
+    )
+    context = _ProjectContext("secret", "/workspace/mncs-compiler")
+    context.selected_session_id = "ses_selected"
+
+    for target, message in (
+        (outside, "inside the configured workspace"),
+        (link, "symbolic link"),
+    ):
+        with pytest.raises(ValueError, match=message):
+            _build_argv(
+                "claims",
+                {"mode": "acquire", "repository": "mncs-compiler",
+                 "worktree": str(target), "branch": "main"},
+                context,
+                "mncs-compiler",
+            )
 
 
 def test_native_application_invocations_map_to_fixed_typed_contracts() -> None:

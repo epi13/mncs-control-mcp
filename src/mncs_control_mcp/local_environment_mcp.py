@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import secrets
 import socket
@@ -90,6 +91,39 @@ def _relative_path(value: Any, name: str) -> str:
     return text
 
 
+def _worktree_path(value: Any, name: str) -> str:
+    """Map a claim target inside the configured workspace to its canonical path.
+
+    Relative targets retain the project-scoped grammar. An absolute target is
+    useful when a campaign workspace contains one linked checkout while the
+    repository's main checkout lives elsewhere in the same authorized
+    workspace. Environment still verifies repository identity, Git
+    registration, common-directory provenance, and the selected checkout
+    anchor before publishing the claim.
+    """
+    text = _string(value, name, max_length=4096)
+    requested = Path(text).expanduser()
+    if not requested.is_absolute():
+        return _relative_path(text, name)
+    if ".." in requested.parts:
+        raise ValueError(f"{name} must not contain parent traversal")
+    try:
+        workspace_root = Path(load_config().workspace_root).expanduser().resolve(strict=True)
+        absolute = Path(os.path.abspath(requested))
+        resolved = absolute.resolve(strict=True)
+    except OSError as error:
+        raise ValueError(f"{name} must name an existing checkout inside the configured workspace") from error
+    if absolute != resolved:
+        raise ValueError(f"{name} must not traverse a symbolic link")
+    try:
+        resolved.relative_to(workspace_root)
+    except ValueError:
+        raise ValueError(f"{name} must stay inside the configured workspace") from None
+    if not resolved.is_dir():
+        raise ValueError(f"{name} must name a checkout directory")
+    return str(resolved)
+
+
 def _string_list(value: Any, name: str, *, maximum: int = 64) -> list[str]:
     if not isinstance(value, list) or len(value) > maximum:
         raise ValueError(f"{name} must be a list of at most {maximum} strings")
@@ -157,13 +191,8 @@ def _build_argv(
     if operation == "claims" and claims_mode in {"list", "acquire"}:
         repository = values.get("repository", project)
         if (not isinstance(repository, str)
-                or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", repository)
-                or (repository != project and project != "mncs-environment")):
-            raise ValueError(
-                "claims may target only the selected project, or a selected repository from the Environment project session"
-            )
-        values = {**values, "repository": project}
-        values["repository"] = repository
+                or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", repository)):
+            raise ValueError("repository must be a valid repository identifier")
     argv: list[str]
     if operation == "enter":
         argv = ["enter"]
@@ -341,7 +370,7 @@ def _build_argv(
             if "paths" in values:
                 argv.extend(["--paths", *_string_list(values["paths"], "paths")])
             if "worktree" in values:
-                argv.extend(["--worktree", _relative_path(values["worktree"], "worktree")])
+                argv.extend(["--worktree", _worktree_path(values["worktree"], "worktree")])
             if "branch" in values:
                 argv.extend(["--branch", _string(values["branch"], "branch", max_length=256)])
             if "expected_store_generation" in values:
