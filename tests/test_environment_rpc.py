@@ -130,16 +130,21 @@ def test_scope_grant_rpc_requires_exact_campaign_approval_and_environment_projec
     workspace = tmp_path / "projects"
     environment = workspace / "mncs-environment"
     target = workspace / "mncs-control-mcp"
-    for checkout in (environment, target):
+    language = workspace / "mncs-language"
+    for checkout in (environment, target, language):
         (checkout / ".git").mkdir(parents=True)
     approval = "user-approval:campaign-scope-test"
+    language_approval = "user-approval:language-scope-test"
     server = EnvironmentRPCServer(
         ControlConfig(
             workspace_root=workspace,
             sandbox_home=tmp_path / "home",
             environment_rpc_socket=tmp_path / "rpc" / "environment.sock",
             environment_scope_grants={
-                "cmp_scope_test": {"mncs-control-mcp": approval},
+                "cmp_scope_test": {
+                    "mncs-control-mcp": approval,
+                    "mncs-language": language_approval,
+                },
             },
         ),
         environment_service=SimpleNamespace(
@@ -170,7 +175,7 @@ def test_scope_grant_rpc_requires_exact_campaign_approval_and_environment_projec
     for changed in (
         args[:-1] + ["user-approval:other"],
         args[:3] + ["cmp_other"] + args[4:],
-        args[:5] + ["mncs-language"] + args[6:],
+        args[:5] + ["mncs-unapproved"] + args[6:],
     ):
         with pytest.raises(ControlError) as raised:
             server._translate_argv(changed, environment, grant)
@@ -198,6 +203,25 @@ def test_scope_grant_rpc_requires_exact_campaign_approval_and_environment_projec
     )
     assert response["ok"] is True
     assert authorized_sessions == ["ses_scope_test"]
+
+    language_grant = _GrantRecord(
+        **{
+            **grant.__dict__,
+            "host_root": language,
+            "sandbox_root": "/workspace/mncs-language",
+        },
+    )
+    language_args = [
+        "scope-grant", "ses_scope_test",
+        "--campaign-id", "cmp_scope_test",
+        "--repository", "mncs-language",
+        "--expected-authority-revision", "b" * 64,
+        "--approval-reference", language_approval,
+    ]
+    assert server._translate_argv(language_args, language, language_grant) == language_args
+    with pytest.raises(ControlError) as raised:
+        server._translate_argv(args, language, language_grant)
+    assert raised.value.code == "ENVIRONMENT_AUTHORITY_DENIED"
 
     workspace_grant = _GrantRecord(
         **{**grant.__dict__, "scope": "workspace", "host_root": workspace},

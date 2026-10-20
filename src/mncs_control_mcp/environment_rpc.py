@@ -2260,10 +2260,11 @@ class EnvironmentRPCServer:
         """Gate one Environment session's repository-scope admission.
 
         The Control-owned approval file grants exactly a campaign/repository
-        pair. The operation is callable only from the Environment project
-        sandbox and can name only one immediate configured workspace checkout.
-        Environment performs the independent session, rights, Git, claim, and
-        Store-CAS checks before recording the immutable grant.
+        pair. Admission can be requested from Environment, or from the target
+        repository's own project grant. A repository project grant cannot
+        grant a sibling repository. Environment performs the independent
+        session, rights, Git, claim, and Store-CAS checks before recording the
+        immutable grant.
         """
         required = {
             "--campaign-id", "--repository", "--expected-authority-revision",
@@ -2301,25 +2302,44 @@ class EnvironmentRPCServer:
                 "scope admission requires campaign, repository, authority revision, and approval reference",
             )
 
-        environment_name = self.config.repositories.get(
-            "environment", "mncs-environment"
-        )
         workspace_root = Path(self.config.workspace_root).expanduser().resolve(strict=True)
-        environment_root = workspace_root / environment_name
         project_root = record.host_root.resolve(strict=True)
         working_directory = cwd.resolve(strict=True)
-        if (record.scope != "project" or project_root != environment_root
-                or (working_directory != project_root
-                    and project_root not in working_directory.parents)):
+        if record.scope != "project":
             raise ControlError(
                 "ENVIRONMENT_AUTHORITY_DENIED",
-                "repository scope admission is available only from the Environment project grant",
+                "repository scope admission requires a project grant",
+            )
+        caller_repository = self._project_repository(record, cwd=working_directory)
+        if project_root != workspace_root / caller_repository:
+            raise ControlError(
+                "ENVIRONMENT_WORKSPACE_ESCAPE",
+                "repository scope admission project identity does not match its configured checkout",
+            )
+        if (working_directory != project_root
+                and project_root not in working_directory.parents):
+            raise ControlError(
+                "ENVIRONMENT_WORKSPACE_ESCAPE",
+                "repository scope admission working directory exceeds its project grant",
             )
 
         campaign_id = values["--campaign-id"]
         repository_name = values["--repository"]
         authority_revision = values["--expected-authority-revision"]
         approval_reference = values["--approval-reference"]
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,119}", repository_name):
+            raise ControlError(
+                "ENVIRONMENT_RPC_INVALID_REQUEST", "scope admission repository identity is invalid"
+            )
+        environment_name = self.config.repositories.get(
+            "environment", "mncs-environment"
+        )
+        if caller_repository not in {environment_name, repository_name}:
+            raise ControlError(
+                "ENVIRONMENT_AUTHORITY_DENIED",
+                "repository scope admission is available only from Environment or the matching repository project grant",
+                details={"project": caller_repository, "repository": repository_name},
+            )
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,159}", campaign_id):
             raise ControlError(
                 "ENVIRONMENT_RPC_INVALID_REQUEST", "scope admission campaign identity is invalid"
@@ -2334,10 +2354,6 @@ class EnvironmentRPCServer:
                 "ENVIRONMENT_AUTHORITY_DENIED",
                 "Control has no exact owner-approved campaign/repository scope grant",
                 details={"campaign_id": campaign_id, "repository": repository_name},
-            )
-        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,119}", repository_name):
-            raise ControlError(
-                "ENVIRONMENT_RPC_INVALID_REQUEST", "scope admission repository identity is invalid"
             )
         target = workspace_root / repository_name
         if target.is_symlink():
