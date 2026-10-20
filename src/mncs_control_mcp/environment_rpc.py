@@ -2260,11 +2260,10 @@ class EnvironmentRPCServer:
         """Gate one Environment session's repository-scope admission.
 
         The Control-owned approval file grants exactly a campaign/repository
-        pair. Admission can be requested from Environment, or from the target
-        repository's own project grant. A repository project grant cannot
-        grant a sibling repository. Environment performs the independent
-        session, rights, Git, claim, and Store-CAS checks before recording the
-        immutable grant.
+        pair. Admission can be requested from an authenticated project grant;
+        the Control-owned approval file bounds the exact campaign/repository
+        pair. Environment performs the independent session, rights, Git,
+        claim, and Store-CAS checks before recording the immutable grant.
         """
         required = {
             "--campaign-id", "--repository", "--expected-authority-revision",
@@ -2330,15 +2329,6 @@ class EnvironmentRPCServer:
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,119}", repository_name):
             raise ControlError(
                 "ENVIRONMENT_RPC_INVALID_REQUEST", "scope admission repository identity is invalid"
-            )
-        environment_name = self.config.repositories.get(
-            "environment", "mncs-environment"
-        )
-        if caller_repository not in {environment_name, repository_name}:
-            raise ControlError(
-                "ENVIRONMENT_AUTHORITY_DENIED",
-                "repository scope admission is available only from Environment or the matching repository project grant",
-                details={"project": caller_repository, "repository": repository_name},
             )
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,159}", campaign_id):
             raise ControlError(

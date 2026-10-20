@@ -124,14 +124,15 @@ def test_path_options_are_mapped_in_split_and_equals_forms(tmp_path: Path) -> No
     assert equals == ["enter", "--workspace=" + str(host_root / "nested")]
 
 
-def test_scope_grant_rpc_requires_exact_campaign_approval_and_environment_project(
+def test_scope_grant_rpc_requires_exact_campaign_approval_and_selected_project_grant(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     workspace = tmp_path / "projects"
     environment = workspace / "mncs-environment"
     target = workspace / "mncs-control-mcp"
     language = workspace / "mncs-language"
-    for checkout in (environment, target, language):
+    compiler = workspace / "mncs-compiler"
+    for checkout in (environment, target, language, compiler):
         (checkout / ".git").mkdir(parents=True)
     approval = "user-approval:campaign-scope-test"
     language_approval = "user-approval:language-scope-test"
@@ -204,6 +205,21 @@ def test_scope_grant_rpc_requires_exact_campaign_approval_and_environment_projec
     assert response["ok"] is True
     assert authorized_sessions == ["ses_scope_test"]
 
+    unselected_grant = _GrantRecord(
+        **{**grant.__dict__, "bound_session_id": "ses_other"},
+    )
+    monkeypatch.setattr(server, "_grant", lambda _request, _peer: unselected_grant)
+    with pytest.raises(ControlError) as raised:
+        server._dispatch_once(
+            {
+                "cwd": "/workspace/mncs-environment",
+                "argv": args,
+                "request_id": "req_scope_grant_unselected_session_test",
+            },
+            peer_uid=grant.uid,
+        )
+    assert raised.value.code == "ENVIRONMENT_AUTHORITY_DENIED"
+
     language_grant = _GrantRecord(
         **{
             **grant.__dict__,
@@ -219,9 +235,14 @@ def test_scope_grant_rpc_requires_exact_campaign_approval_and_environment_projec
         "--approval-reference", language_approval,
     ]
     assert server._translate_argv(language_args, language, language_grant) == language_args
-    with pytest.raises(ControlError) as raised:
-        server._translate_argv(args, language, language_grant)
-    assert raised.value.code == "ENVIRONMENT_AUTHORITY_DENIED"
+    compiler_grant = _GrantRecord(
+        **{
+            **grant.__dict__,
+            "host_root": compiler,
+            "sandbox_root": "/workspace/mncs-compiler",
+        },
+    )
+    assert server._translate_argv(language_args, compiler, compiler_grant) == language_args
 
     workspace_grant = _GrantRecord(
         **{**grant.__dict__, "scope": "workspace", "host_root": workspace},
