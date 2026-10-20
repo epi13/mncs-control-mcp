@@ -183,7 +183,7 @@ def test_claim_target_accepts_canonical_absolute_checkout_inside_workspace(
 
     assert selected is True
     assert argv[-4:] == [
-        "--worktree", str(checkout.resolve()), "--branch", "main",
+        "--worktree", "/workspace/mncs-compiler/.worktrees/main", "--branch", "main",
     ]
 
 
@@ -192,8 +192,11 @@ def test_claim_target_rejects_absolute_escape_and_symlinked_checkout(
 ) -> None:
     workspace = tmp_path / "Projects"
     workspace.mkdir()
-    outside = tmp_path / "outside"
-    outside.mkdir()
+    (workspace / "mncs-compiler").mkdir()
+    outside_workspace = workspace / "mncs-language"
+    outside_workspace.mkdir(parents=True)
+    outside = outside_workspace / ".worktrees" / "feature"
+    outside.mkdir(parents=True)
     link = workspace / "escape"
     link.symlink_to(outside, target_is_directory=True)
     monkeypatch.setattr(
@@ -205,7 +208,7 @@ def test_claim_target_rejects_absolute_escape_and_symlinked_checkout(
     context.selected_session_id = "ses_selected"
 
     for target, message in (
-        (outside, "inside the configured workspace"),
+        (outside, "selected project sandbox"),
         (link, "symbolic link"),
     ):
         with pytest.raises(ValueError, match=message):
