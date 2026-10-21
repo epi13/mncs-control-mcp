@@ -4763,7 +4763,44 @@ class EnvironmentRPCServer:
                 "selected Environment definition is outside its registered repository",
             )
 
-        definition_path = project_root / ".mncs" / "project-environment.json"
+        definition_directory = project_root / ".mncs"
+        try:
+            directory_metadata = definition_directory.lstat()
+        except FileNotFoundError:
+            return None
+        except OSError as error:
+            raise ControlError(
+                "ENVIRONMENT_WORKSPACE_MISSING",
+                "project Environment metadata could not be inspected",
+            ) from error
+        if not stat.S_ISDIR(directory_metadata.st_mode):
+            raise ControlError(
+                "ENVIRONMENT_WORKSPACE_ESCAPE",
+                "project Environment metadata directory must be a regular directory",
+            )
+
+        # Match Environment entry's definition precedence. A project-owned
+        # override wins when present; otherwise the ordinary project-local
+        # .mncs/environment.json is the definition selected by default.
+        project_definition = definition_directory / "project-environment.json"
+        environment_definition = definition_directory / "environment.json"
+        try:
+            project_metadata = project_definition.lstat()
+        except FileNotFoundError:
+            definition_path = environment_definition
+        except OSError as error:
+            raise ControlError(
+                "ENVIRONMENT_WORKSPACE_MISSING",
+                "project Environment definition could not be inspected",
+            ) from error
+        else:
+            if not stat.S_ISREG(project_metadata.st_mode):
+                raise ControlError(
+                    "ENVIRONMENT_WORKSPACE_ESCAPE",
+                    "project Environment definition must be a regular file",
+                )
+            definition_path = project_definition
+
         try:
             observed = definition_path.lstat()
         except FileNotFoundError:
@@ -4780,11 +4817,11 @@ class EnvironmentRPCServer:
             )
         try:
             resolved_definition = definition_path.resolve(strict=True)
-            if (resolved_definition != project_root
-                    and project_root not in resolved_definition.parents):
+            resolved_directory = definition_directory.resolve(strict=True)
+            if resolved_definition.parent != resolved_directory:
                 raise ControlError(
                     "ENVIRONMENT_WORKSPACE_ESCAPE",
-                    "project Environment definition exceeds its project grant",
+                    "project Environment definition must stay beside its metadata directory",
                 )
             definition = json.loads(resolved_definition.read_text(encoding="utf-8"))
         except ControlError:

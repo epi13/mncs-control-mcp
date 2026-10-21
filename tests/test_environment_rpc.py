@@ -6001,6 +6001,14 @@ def test_registered_checkout_continuation_binds_mutations_in_same_execution(
     workspace = tmp_path / "projects"
     repository_root = workspace / "mncs-compiler"
     repository_root.mkdir(parents=True)
+    (repository_root / ".mncs").mkdir()
+    (repository_root / ".mncs" / "environment.json").write_text(
+        json.dumps({
+            "name": "legacy_campaign",
+            "workspace_scope": {"repositories": ["mncs-compiler"]},
+        }),
+        encoding="utf-8",
+    )
     checkout = {
         "repository": "mncs-compiler",
         "path": str(repository_root),
@@ -6037,11 +6045,6 @@ def test_registered_checkout_continuation_binds_mutations_in_same_execution(
     monkeypatch.setattr(
         server, "_registered_project_checkout", lambda *_args, **_kwargs: checkout,
     )
-    monkeypatch.setattr(
-        server,
-        "_project_environment_identity",
-        lambda *_args, **_kwargs: ("env_legacy_campaign", str(workspace)),
-    )
     continuation_context: dict[str, object] = {}
 
     class Environment:
@@ -6058,6 +6061,9 @@ def test_registered_checkout_continuation_binds_mutations_in_same_execution(
                     ),
                 ),
                 claims=SimpleNamespace(scopes_conflict=lambda *_args: None),
+                identity=SimpleNamespace(
+                    environment_id=lambda definition: f"env_{definition['name']}",
+                ),
             )
 
         @staticmethod
@@ -6201,7 +6207,7 @@ def test_registered_nested_worktree_drives_project_profile_selection(
     project = workspace / "mncs-environment"
     project.mkdir(parents=True)
     (project / ".mncs").mkdir()
-    (project / ".mncs" / "project-environment.json").write_text(
+    (project / ".mncs" / "environment.json").write_text(
         json.dumps({"name": "root", "workspace_scope": {"repositories": ["mncs-environment"]}}),
         encoding="utf-8",
     )
@@ -6311,6 +6317,15 @@ def test_registered_nested_worktree_drives_project_profile_selection(
     assert server._project_environment_identity(
         record, "mncs-environment", working_checkout=checkout,
     ) == ("env_nested", str(workspace.resolve()))
+    root_checkout = {
+        "repository": "mncs-environment",
+        "path": str(project.resolve()),
+        "workspace_root": str(workspace.resolve()),
+        "repository_root": str(project.resolve()),
+    }
+    assert server._project_environment_identity(
+        record, "mncs-environment", working_checkout=root_checkout,
+    ) == ("env_root", str(workspace.resolve()))
 
     unrelated = project / "lookalike" / "mncs-environment"
     unrelated.mkdir(parents=True)
