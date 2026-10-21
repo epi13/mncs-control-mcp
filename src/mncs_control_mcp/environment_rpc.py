@@ -1604,9 +1604,14 @@ class EnvironmentRPCServer:
                     details={"next": "run project continuation and use its selected session"},
                 )
             return True
-        prefix = f"{repository}:verification-executor/"
         capability = argv[2]
-        if not capability.startswith(prefix):
+        prefixes = (
+            f"{repository}:verification-executor/",
+            f"{repository}:test/",
+        )
+        prefix = next((candidate for candidate in prefixes
+                       if capability.startswith(candidate)), None)
+        if prefix is None:
             return False
         name = capability[len(prefix):]
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,159}", name):

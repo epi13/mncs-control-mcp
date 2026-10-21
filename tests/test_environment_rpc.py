@@ -4259,11 +4259,25 @@ def test_project_rpc_invokes_only_its_fixed_verification_capabilities(
     assert calls[0][0][-3:] == request["argv"]
     assert calls[0][1]["env"]["MNCS_ENV_AUTH_PRINCIPAL_ID"] == "principal-agent"
 
+    test_capability = "mncs-compiler:test/compiler-incremental"
+    test_invocation = {
+        **request,
+        "request_id": "req_compiler_project_test",
+        "argv": ["invoke", "ses_compiler", test_capability],
+    }
+    test_result = server.dispatch(test_invocation, peer_uid=0)
+    assert test_result["ok"] is True
+    assert calls[1][0][-3:] == test_invocation["argv"]
+    assert calls[1][1]["env"]["MNCS_ENV_AUTH_PRINCIPAL_ID"] == "principal-agent"
+
     rejected_argv = [
         ["invoke", "ses_compiler", "mncs-test:verification-executor/native-test-provider"],
         ["invoke", "ses_compiler", request["argv"][2], "--unbounded-argument"],
         ["invoke", "ses_other", request["argv"][2]],
         ["invoke", "ses_compiler", "mncs-language:compile"],
+        ["invoke", "ses_compiler", "mncs-test:test/native-test"],
+        ["invoke", "ses_compiler", test_capability, "--unbounded-argument"],
+        ["invoke", "ses_other", test_capability],
     ]
     for index, argv in enumerate(rejected_argv):
         rejected = server.dispatch({
@@ -4272,7 +4286,7 @@ def test_project_rpc_invokes_only_its_fixed_verification_capabilities(
             "argv": argv,
         }, peer_uid=0)
         assert rejected["ok"] is False
-    assert len(calls) == 1
+    assert len(calls) == 2
 
 
 def test_environment_project_rpc_admits_typed_native_application_flow(
