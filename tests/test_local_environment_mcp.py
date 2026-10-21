@@ -79,6 +79,20 @@ def test_verify_maps_a_project_capability_to_its_fixed_invocation() -> None:
     assert selected is True
     assert argv == ["invoke", "ses_selected", capability]
 
+    language_context = _ProjectContext(
+        "secret", "/workspace/mncs-compiler/.worktrees/run/mncs-language",
+    )
+    language_context.selected_session_id = "ses_selected"
+    language_test = "mncs-language:test/language-tests-mncs-model"
+    argv, selected = _build_argv(
+        "verify",
+        {"session_id": "ses_selected", "capability": language_test},
+        language_context,
+        "mncs-language",
+    )
+    assert selected is True
+    assert argv == ["invoke", "ses_selected", language_test]
+
 
 def test_verify_rejects_other_projects_and_caller_supplied_arguments() -> None:
     context = _ProjectContext("secret", "/workspace/mncs-compiler")
@@ -86,6 +100,13 @@ def test_verify_rejects_other_projects_and_caller_supplied_arguments() -> None:
     with pytest.raises(ValueError, match="selected project"):
         _build_argv(
             "verify", {"session_id": "ses_selected", "capability": "../../shell"},
+            context, "mncs-compiler",
+        )
+    with pytest.raises(ValueError, match="selected project"):
+        _build_argv(
+            "verify",
+            {"session_id": "ses_selected",
+             "capability": "mncs-language:test/language-tests-mncs-model"},
             context, "mncs-compiler",
         )
     with pytest.raises(ValueError, match="unsupported arguments"):

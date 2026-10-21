@@ -233,11 +233,15 @@ def _build_argv(
         return ["resume", session_id, "--revalidate"], True
     if operation == "verify":
         capability = _string(values.get("capability"), "capability", max_length=256)
-        prefix = f"{project}:verification-executor/"
-        name = capability.removeprefix(prefix) if capability.startswith(prefix) else ""
+        prefixes = (
+            f"{project}:verification-executor/",
+            f"{project}:test/",
+        )
+        name = next((capability[len(prefix):] for prefix in prefixes
+                     if capability.startswith(prefix)), "")
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,159}", name):
             raise ValueError(
-                "verify accepts only a declared verification capability for the selected project"
+                "verify accepts only a declared verification or test capability for the selected project"
             )
         # Control intentionally authorizes project verification only through
         # this exact fixed-argument CLI form; the Environment descriptor owns
