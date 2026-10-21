@@ -30,13 +30,18 @@
     "message": "Compiler application build requires one selected Environment session and a relative JSON request path",
     "provider_started": false
   },
+  "follow_up_observation": {
+    "request_path": ".build/native-app-readiness/rights-handoff-request.json",
+    "error_code": "ENVIRONMENT_AUTHORITY_DENIED",
+    "cause": "The original shared artifact-path validator rejected dot-prefixed path segments, including the project's ignored .build directory."
+  },
   "repair": {
     "files": [
       "src/mncs_control_mcp/environment_rpc.py",
       "tests/test_environment_rpc.py",
       "docs/SECURITY.md"
     ],
-    "policy": "The existing bounded native-application build contract may use either the selected Environment project grant or the selected Compiler project grant.",
+    "policy": "The existing bounded native-application build contract may use either the selected Environment project grant or the selected Compiler project grant. Its request path accepts safe dot-prefixed segments such as .build while rejecting dot, dot-dot, empty, absolute, and parent-traversal segments.",
     "retained_checks": [
       "project-scoped grant only",
       "grant-bound session identity equals requested Environment session",

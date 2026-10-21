@@ -4477,7 +4477,7 @@ def test_compiler_project_rpc_admits_only_its_typed_native_application_build(
     monkeypatch.setattr("mncs_control_mcp.environment_rpc.subprocess.run", run)
     build_argv = [
         "invoke", "ses_compiler", "mncs-compiler:native-application-build",
-        "--", "--request-file", "build/rights-handoff/request.json",
+        "--", "--request-file", ".build/rights-handoff/request.json",
     ]
     request = {
         "grant": token,
@@ -4495,6 +4495,7 @@ def test_compiler_project_rpc_admits_only_its_typed_native_application_build(
     rejected_argv = (
         (["invoke", "ses_other", *build_argv[2:]], "ENVIRONMENT_AUTHORITY_DENIED"),
         ([*build_argv[:-1], "../outside.json"], "ENVIRONMENT_AUTHORITY_DENIED"),
+        ([*build_argv[:-1], ".build/../outside.json"], "ENVIRONMENT_AUTHORITY_DENIED"),
         ([*build_argv[:-1], "/tmp/request.json"], "ENVIRONMENT_AUTHORITY_DENIED"),
         ([*build_argv, "--timeout-seconds", "900"], "ENVIRONMENT_AUTHORITY_DENIED"),
         (["invoke", "ses_compiler", "mncs-forge:native-application-execution"],

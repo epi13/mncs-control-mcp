@@ -109,6 +109,18 @@ def _safe_relative_artifact_path(value: Any) -> bool:
     )
 
 
+def _safe_relative_request_file_path(value: Any) -> bool:
+    """Accept a bounded request path, including safe dot-prefixed build dirs."""
+    if (not isinstance(value, str) or not value or len(value) > 1024
+            or "\\" in value or "\x00" in value):
+        return False
+    return all(
+        segment not in {".", ".."}
+        and re.fullmatch(r"(?:[A-Za-z0-9]|\.[A-Za-z0-9])[A-Za-z0-9._-]{0,127}", segment)
+        for segment in value.split("/")
+    )
+
+
 @dataclass(frozen=True)
 class EnvironmentRPCGrant:
     token_digest: str
@@ -1717,7 +1729,7 @@ class EnvironmentRPCServer:
                 "invoke", argv[1], "mncs-compiler:native-application-build",
                 "--", "--request-file",
             ]
-            and _safe_relative_artifact_path(argv[5])
+            and _safe_relative_request_file_path(argv[5])
             and argv[5].endswith(".json")
         )
         if not allowed:
