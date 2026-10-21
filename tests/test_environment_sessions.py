@@ -541,6 +541,215 @@ def test_campaign_continuation_returns_project_scoped_duplicate_capsules(tmp_pat
     assert discovered["campaign_id"] == "campaign-1"
 
 
+def test_campaign_continuation_recovers_one_authenticated_nested_checkout(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    workspace = config.workspace_root.resolve()
+    repository_root = workspace / "mncs-compiler"
+    repository_root.mkdir()
+    nested_path = repository_root / ".worktrees" / "campaign" / "mncs-compiler"
+    definition_id = "env_nested_compiler"
+    checkout_root = {
+        "repository": "mncs-compiler",
+        "path": str(repository_root),
+        "workspace_root": str(workspace),
+        "repository_root": str(repository_root),
+        "branch": "main",
+        "head": "a" * 40,
+        "checkout_identity": "checkout-repository-root",
+        "git_common_directory_identity": "common-mncs-compiler",
+    }
+    recovered_checkout = {
+        **checkout_root,
+        "path": str(nested_path),
+        "branch": "campaign/native-application-readiness-20261013",
+        "head": "b" * 40,
+        "checkout_identity": "checkout-native-application-readiness",
+        "observed_path": "mncs-compiler/.worktrees/campaign/mncs-compiler",
+    }
+    snapshots = {
+        session_id: {
+            "session_id": session_id,
+            "lifecycle": "active",
+            "authenticated_principal_id": "principal-test",
+            "provenance": {"definition_id": definition_id},
+            "workspace": {"root": str(workspace)},
+            "campaign": {
+                "identity": "cmp_native_application",
+                "work_intent": {
+                    "repositories": ["mncs-compiler"],
+                    "goal": "continue the compiler campaign",
+                },
+            },
+            "selected_checkouts": {
+                "mncs-compiler": {
+                    key: recovered_checkout[key]
+                    for key in (
+                        "repository", "path", "workspace_root", "repository_root",
+                        "branch", "head", "checkout_identity",
+                        "git_common_directory_identity", "observed_path",
+                    )
+                }
+            },
+        }
+        for session_id in ("ses_uncheckpointed", "ses_checkpoint_owner")
+    }
+
+    class Store:
+        closed = False
+
+        def list_sessions(self):
+            return sorted(snapshots)
+
+        def load_snapshot(self, session_id: str):
+            return snapshots.get(session_id)
+
+        def read_claims(self):
+            return []
+
+        def close(self):
+            self.closed = True
+
+    recovery_calls: list[dict[str, object]] = []
+
+    def recover_checkout(store, **kwargs):
+        assert store is store_instance
+        recovery_calls.append(kwargs)
+        return recovered_checkout
+
+    def matches(snapshot, requested):
+        selected = snapshot.get("selected_checkouts", {}).get("mncs-compiler", {})
+        return (
+            selected.get("checkout_identity") == requested.get("checkout_identity")
+            and selected.get("path") == requested.get("path")
+            and selected.get("branch") == requested.get("branch")
+        )
+
+    def select_duplicate(_store, session_ids, requested):
+        assert set(session_ids) == set(snapshots)
+        assert requested == recovered_checkout
+        return "ses_checkpoint_owner", {
+            "basis": "unique_session_checkpoint",
+            "checkpoint_session": "ses_checkpoint_owner",
+        }
+
+    package = SimpleNamespace(
+        entry=SimpleNamespace(
+            _campaign_checkout_from_store=recover_checkout,
+            _working_checkout_matches_snapshot=matches,
+            _authoritative_duplicate_session=select_duplicate,
+        ),
+        claims=SimpleNamespace(
+            active_claims=lambda _claims: {},
+            scopes_conflict=lambda *_args: None,
+        ),
+        sessions=SimpleNamespace(),
+    )
+    service = EnvironmentService(config)
+    service.authenticated_principal_id = "principal-test"
+    store_instance = Store()
+    service._pkg = lambda: package
+    service._store = lambda _pkg: store_instance
+    service._observe_project_checkout = lambda repository: {
+        "status": "unknown", "repository": repository,
+    }
+    def continuation_capsule(
+        _pkg, _store, session_id, snapshot, repository, _claims, _live,
+    ):
+        return {
+            "session_id": session_id,
+            "definition_id": snapshot["provenance"]["definition_id"],
+            "workspace_root": snapshot["workspace"]["root"],
+            "lifecycle": snapshot["lifecycle"],
+            "project_reference": {"status": "linked", "basis": ["work_intent"]},
+            "selected_checkout": snapshot["selected_checkouts"][repository],
+            "claim_ids": [],
+            "claims": [],
+        }
+
+    service._continuation_capsule = continuation_capsule
+
+    result = service.campaign_continuation(
+        "mncs-compiler",
+        "cmp_native_application",
+        working_checkout=checkout_root,
+        definition_id=definition_id,
+        workspace_root=str(workspace),
+    )
+
+    assert len(recovery_calls) == 1
+    assert recovery_calls[0] == {
+        "campaign_id": "cmp_native_application",
+        "authenticated_principal_id": "principal-test",
+        "definition_id": definition_id,
+        "workspace_root": workspace,
+        "working_checkout": checkout_root,
+    }
+    assert result["status"] == "ready"
+    assert result["selected_session_id"] == "ses_checkpoint_owner"
+    assert result["selection_basis"] == (
+        "authenticated-project-checkout-unique-checkpoint"
+    )
+    assert [item["session_id"] for item in result["continuations"]] == [
+        "ses_checkpoint_owner",
+    ]
+    assert store_instance.closed is True
+
+
+def test_campaign_continuation_preserves_distinct_worktree_conflict(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    workspace = config.workspace_root.resolve()
+    repository_root = workspace / "mncs-compiler"
+    repository_root.mkdir()
+    checkout_root = {
+        "repository": "mncs-compiler",
+        "path": str(repository_root),
+        "workspace_root": str(workspace),
+        "repository_root": str(repository_root),
+    }
+
+    class CheckoutAmbiguous(Exception):
+        diagnostics = {
+            "code": "campaign-checkout-ambiguous",
+            "conflicting_contexts": [
+                {"path": "/projects/mncs-compiler/.worktrees/a", "sessions": ["ses_a"]},
+                {"path": "/projects/mncs-compiler/.worktrees/b", "sessions": ["ses_b"]},
+            ],
+            "next": "enter from the intended registered worktree",
+        }
+
+    package = SimpleNamespace(
+        entry=SimpleNamespace(
+            _campaign_checkout_from_store=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                CheckoutAmbiguous("multiple registered worktrees")
+            ),
+        ),
+    )
+    store = SimpleNamespace(close=lambda: None)
+    service = EnvironmentService(config)
+    service.authenticated_principal_id = "principal-test"
+    service._pkg = lambda: package
+    service._store = lambda _pkg: store
+
+    with pytest.raises(ControlError) as excinfo:
+        service.campaign_continuation(
+            "mncs-compiler",
+            "cmp_native_application",
+            working_checkout=checkout_root,
+            definition_id="env_nested_compiler",
+            workspace_root=str(workspace),
+        )
+
+    assert excinfo.value.code == "ENVIRONMENT_SESSION_SELECTION_REQUIRED"
+    assert excinfo.value.details["conflicting_contexts"] == [
+        {"path": "/projects/mncs-compiler/.worktrees/a", "sessions": ["ses_a"]},
+        {"path": "/projects/mncs-compiler/.worktrees/b", "sessions": ["ses_b"]},
+    ]
+
+
 def test_campaign_continuation_projects_exact_git_verified_charter(tmp_path: Path) -> None:
     result = _campaign_charter_result(tmp_path)
 

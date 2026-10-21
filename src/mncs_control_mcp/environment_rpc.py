@@ -4386,7 +4386,13 @@ class EnvironmentRPCServer:
                     )
                 else:
                     capsule = self.environment_service.campaign_continuation(
-                        project, campaign_id, working_checkout=project_checkout,
+                        project,
+                        campaign_id,
+                        working_checkout=project_checkout,
+                        definition_id=(project_context[0]
+                                       if project_context is not None else None),
+                        workspace_root=(project_context[1]
+                                        if project_context is not None else None),
                     )
                 if not isinstance(capsule, dict):
                     raise TypeError("Environment returned a non-object continuation capsule")
@@ -5808,12 +5814,22 @@ class EnvironmentRPCServer:
                 )
         elif task_identity is None:
             capsule = self.environment_service.campaign_continuation(
-                project, campaign_id, working_checkout=project_checkout,
+                project,
+                campaign_id,
+                working_checkout=project_checkout,
+                definition_id=(project_context[0]
+                               if project_context is not None else None),
+                workspace_root=(project_context[1]
+                                if project_context is not None else None),
             )
         else:
             capsule = self.environment_service.campaign_continuation(
                 project, campaign_id, task_identity,
                 working_checkout=project_checkout,
+                definition_id=(project_context[0]
+                               if project_context is not None else None),
+                workspace_root=(project_context[1]
+                                if project_context is not None else None),
             )
         if not isinstance(capsule, dict):
             raise TypeError("Environment returned a non-object continuation capsule")

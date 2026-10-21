@@ -432,6 +432,8 @@ class EnvironmentService:
         self, repository: str, campaign_id: str | None = None,
         task_identity: str | None = None,
         *, working_checkout: dict[str, str] | None = None,
+        definition_id: str | None = None,
+        workspace_root: str | None = None,
     ) -> dict[str, Any]:
         """Return an authenticated, repository-scoped continuation capsule.
 
@@ -499,6 +501,70 @@ class EnvironmentService:
 
         store = self._store(pkg)
         try:
+            # A fresh project entry may begin at the repository root even
+            # though its authenticated campaign selected a registered nested
+            # worktree. Recover that checkout only from the exact campaign,
+            # principal, Environment definition, and workspace already bound
+            # to this request. Environment verifies the recorded Git
+            # registration and manifest before the checkout is used below.
+            checkout_resolver = getattr(
+                getattr(pkg, "entry", None), "_campaign_checkout_from_store", None,
+            )
+            if (
+                campaign_id is not None
+                and callable(checkout_resolver)
+                and isinstance(definition_id, str)
+                and definition_id
+                and isinstance(workspace_root, str)
+                and workspace_root
+                and isinstance(working_checkout, dict)
+                and working_checkout.get("repository") == repository
+            ):
+                try:
+                    configured_root = self._config.workspace_root.resolve(strict=True)
+                    requested_root = Path(workspace_root).resolve(strict=True)
+                    current_path = Path(str(working_checkout.get("path", ""))).resolve(
+                        strict=True
+                    )
+                    repository_root = Path(
+                        str(working_checkout.get("repository_root", ""))
+                    ).resolve(strict=True)
+                except (OSError, RuntimeError):
+                    configured_root = requested_root = current_path = repository_root = None
+                if (
+                    configured_root is not None
+                    and requested_root == configured_root
+                    and working_checkout.get("workspace_root") == str(configured_root)
+                    and current_path == repository_root
+                ):
+                    try:
+                        recovered_checkout = checkout_resolver(
+                            store,
+                            campaign_id=campaign_id,
+                            authenticated_principal_id=self.authenticated_principal_id,
+                            definition_id=definition_id,
+                            workspace_root=configured_root,
+                            working_checkout=working_checkout,
+                        )
+                    except Exception as error:
+                        diagnostics = getattr(error, "diagnostics", None)
+                        diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
+                        if diagnostics.get("code") == "campaign-checkout-ambiguous":
+                            raise ControlError(
+                                "ENVIRONMENT_SESSION_SELECTION_REQUIRED",
+                                str(error),
+                                details=diagnostics,
+                            ) from error
+                        if diagnostics.get("code") == "campaign-checkout-invalid":
+                            raise ControlError(
+                                "ENVIRONMENT_WORKSPACE_UNKNOWN",
+                                str(error),
+                                details=diagnostics,
+                            ) from error
+                        raise
+                    if isinstance(recovered_checkout, dict):
+                        working_checkout = recovered_checkout
+
             session_ids = store.list_sessions()
             if len(session_ids) > 10000:
                 raise ControlError(
@@ -840,9 +906,14 @@ class EnvironmentService:
                 ]
                 if not project_sessions:
                     continue
+                # The project link proves this campaign belongs in the
+                # repository capsule. Keep its same-principal duplicates in
+                # the selected checkout/context so claim and checkpoint
+                # provenance can resolve them, even when one projection did
+                # not persist the project reference itself.
                 authoritative_session = None
                 authoritative_selection_basis = None
-                if len(project_sessions) > 1 and working_checkout is not None:
+                if len(matching) > 1 and working_checkout is not None:
                     package_entry = getattr(pkg, "entry", None)
                     duplicate_selector = getattr(
                         package_entry, "_authoritative_duplicate_session", None,
@@ -850,13 +921,13 @@ class EnvironmentService:
                     if callable(duplicate_selector):
                         authoritative_session, selection_evidence = duplicate_selector(
                             store,
-                            [session_id for session_id, _snapshot in project_sessions],
+                            [session_id for session_id, _snapshot in matching],
                             working_checkout,
                         )
                         if authoritative_session is not None:
-                            project_sessions = [
+                            matching = [
                                 (session_id, snapshot)
-                                for session_id, snapshot in project_sessions
+                                for session_id, snapshot in matching
                                 if session_id == authoritative_session
                             ]
                             evidence_basis = selection_evidence.get("basis")
@@ -868,7 +939,6 @@ class EnvironmentService:
                                 "unique_registered_checkout":
                                     "authenticated-registered-checkout",
                             }.get(evidence_basis, "authenticated-project-checkout")
-                matching = project_sessions
                 contexts = {
                     (str((snapshot.get("provenance") or {}).get("definition_id", "")),
                      str((snapshot.get("workspace") or {}).get("root", "")))

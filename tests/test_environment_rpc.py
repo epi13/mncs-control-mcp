@@ -6038,8 +6038,11 @@ def test_registered_checkout_continuation_binds_mutations_in_same_execution(
         server, "_registered_project_checkout", lambda *_args, **_kwargs: checkout,
     )
     monkeypatch.setattr(
-        server, "_project_environment_identity", lambda *_args, **_kwargs: None,
+        server,
+        "_project_environment_identity",
+        lambda *_args, **_kwargs: ("env_legacy_campaign", str(workspace)),
     )
+    continuation_context: dict[str, object] = {}
 
     class Environment:
         authenticated_principal_id = "principal-test"
@@ -6061,6 +6064,7 @@ def test_registered_checkout_continuation_binds_mutations_in_same_execution(
         def campaign_continuation(repository, campaign_id=None, **_kwargs):
             assert repository == "mncs-compiler"
             assert campaign_id == "cmp_registered_checkout"
+            continuation_context.update(_kwargs)
             return {
                 "campaign_id": campaign_id,
                 "repository": repository,
@@ -6091,9 +6095,16 @@ def test_registered_checkout_continuation_binds_mutations_in_same_execution(
     assert response["ok"] is True
     projected = json.loads(response["result"]["stdout"])
     assert projected["status"] == "ready"
-    assert projected["selection_basis"] == "authenticated-registered-checkout"
+    assert projected["selection_basis"] == (
+        "authenticated-project-environment-and-checkout"
+    )
     assert projected["selected_session_id"] == "ses_registered_checkout"
     assert record.bound_session_id == "ses_registered_checkout"
+    assert continuation_context == {
+        "working_checkout": checkout,
+        "definition_id": "env_legacy_campaign",
+        "workspace_root": str(workspace),
+    }
 
 
 @pytest.mark.parametrize(
