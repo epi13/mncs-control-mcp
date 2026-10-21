@@ -5109,11 +5109,11 @@ class EnvironmentRPCServer:
             }
             return capsule
 
-        selector = project_context
         task_selector = capsule.get("task_selector")
         task_selector_session_id = None
+        selector = project_context
         selection_basis = "authenticated-project-environment-definition"
-        if selector is None and isinstance(task_selector, dict):
+        if isinstance(task_selector, dict):
             task_definition = task_selector.get("definition_id")
             task_workspace = task_selector.get("workspace_root")
             candidate_session_id = task_selector.get("session_id")
@@ -5140,7 +5140,7 @@ class EnvironmentRPCServer:
             return capsule
         if project_checkout is not None and selector is None:
             selection_basis = "authenticated-registered-checkout"
-        elif project_checkout is not None:
+        elif project_checkout is not None and task_selector_session_id is None:
             selection_basis = "authenticated-project-environment-and-checkout"
 
         if capsule.get("repository") not in (None, repository):
@@ -5162,6 +5162,26 @@ class EnvironmentRPCServer:
                    if selector is not None else {}),
             }
             return capsule
+
+        # A project can enter through a campaign-level Environment definition
+        # whose identity and workspace differ from the local project default.
+        # Once the authenticated campaign capsule proves that the local
+        # definition is not one of its contexts, let the verified checkout
+        # select the canonical campaign context below. Keep resolved task
+        # selectors bound to their own exact definition and workspace.
+        if (
+            task_selector_session_id is None
+            and selector is not None
+            and project_context == selector
+            and project_checkout is not None
+            and not any(
+                row.get("definition_id") == selector[0]
+                and row.get("workspace_root") == selector[1]
+                for row in rows
+            )
+        ):
+            selector = None
+            selection_basis = "authenticated-registered-checkout"
 
         exact_context_rows = list(rows)
         if selector is not None:

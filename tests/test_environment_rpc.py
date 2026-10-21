@@ -6079,7 +6079,7 @@ def test_registered_checkout_continuation_binds_mutations_in_same_execution(
                 "continuations_truncated": False,
                 "continuations": [{
                     "session_id": "ses_registered_checkout",
-                    "definition_id": "env_legacy_campaign",
+                    "definition_id": "env_external_campaign",
                     "workspace_root": str(workspace),
                     "selected_checkout": checkout,
                     "lifecycle": "active",
@@ -6101,9 +6101,7 @@ def test_registered_checkout_continuation_binds_mutations_in_same_execution(
     assert response["ok"] is True
     projected = json.loads(response["result"]["stdout"])
     assert projected["status"] == "ready"
-    assert projected["selection_basis"] == (
-        "authenticated-project-environment-and-checkout"
-    )
+    assert projected["selection_basis"] == "authenticated-registered-checkout"
     assert projected["selected_session_id"] == "ses_registered_checkout"
     assert record.bound_session_id == "ses_registered_checkout"
     assert continuation_context == {
@@ -6823,6 +6821,27 @@ def test_project_root_resolves_unique_verified_nested_continuation(
     assert selected_legacy["status"] == "ready"
     assert selected_legacy["selected_session_id"] == "ses_nested_legacy"
     assert selected_legacy["selected_checkout"] == first_checkout
+
+    external_definition = row(
+        "ses_external_campaign", None, definition="env_campaign_environment",
+    )
+    external_definition["repositories"] = [{
+        "repository": "mncs-compiler",
+        "branch": first_checkout["branch"],
+        "head": first_checkout["head"],
+    }]
+    selected_external = server._select_project_campaign_context(
+        capsule([external_definition]), record, "mncs-compiler",
+        project_context=("env_local_compiler", str(workspace)),
+        derive_project_context=False,
+        project_checkout=root_checkout,
+    )
+    assert selected_external["status"] == "ready"
+    assert selected_external["selected_session_id"] == "ses_external_campaign"
+    assert selected_external["selected_checkout"] == first_checkout
+    assert selected_external["selection_basis"] == (
+        "authenticated-project-root-registered-worktree"
+    )
 
     independent = select([
         row("ses_nested_one", first_checkout),
