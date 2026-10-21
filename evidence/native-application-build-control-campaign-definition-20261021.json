@@ -1,0 +1,21 @@
+{
+  "name": "luna-max-control-native-build-gate",
+  "working_checkout": "current",
+  "workspace_scope": {
+    "kind": "workspace",
+    "repositories": ["mncs-control-mcp"]
+  },
+  "required_capabilities": [],
+  "services": [],
+  "intent": {
+    "goal": "Route a selected Compiler session's native application build request through its typed Environment capability.",
+    "repositories": ["mncs-control-mcp"],
+    "protected_repositories": [],
+    "constraints": [
+      "Keep authorization bound to the authenticated selected session and its declared Compiler capability.",
+      "Preserve the exact relative JSON request-file contract.",
+      "Retain Environment-side capability availability, claim, and output authority checks."
+    ],
+    "forbidden_actions": ["delete", "retire"]
+  }
+}

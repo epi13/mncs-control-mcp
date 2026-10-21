@@ -1,0 +1,61 @@
+{
+  "schema_version": "mncs.control.native-application-build-project-grant-evidence/1",
+  "campaign": {
+    "campaign_id": "cmp_9b72758abb63b4c9",
+    "session_id": "ses_4a2e26b2d308c75a",
+    "goal": "Route a selected Compiler session's native application build request through its typed Environment capability."
+  },
+  "coordination": {
+    "repository": "mncs-control-mcp",
+    "branch": "campaign/luna-max-rights-control-gate-20261021",
+    "checkout": "/home/epi13/Documents/Projects/mncs-control-mcp/.worktrees/luna-max-rights-control-gate-20261021",
+    "claim_id": "claim:mncs-control-mcp:worktree:9478a2d0206f",
+    "claim_basis": "explicit-adoption",
+    "claim_scope": {
+      "kind": "worktree",
+      "branch": "campaign/luna-max-rights-control-gate-20261021",
+      "exclusive": false
+    },
+    "requested_paths": [
+      "src/mncs_control_mcp/environment_rpc.py",
+      "tests/test_environment_rpc.py"
+    ],
+    "reason": "Adopt the isolated campaign checkout containing only its Environment definition, then implement the scoped authorization repair.",
+    "prior_state": "Environment claim inventory showed no live Control main-checkout lease; other active Compiler and Environment work remained on separate checkouts."
+  },
+  "observed_failure": {
+    "project_grant": "mncs-compiler",
+    "capability": "mncs-compiler:native-application-build",
+    "error_code": "ENVIRONMENT_AUTHORITY_DENIED",
+    "message": "Compiler application build requires one selected Environment session and a relative JSON request path",
+    "provider_started": false
+  },
+  "repair": {
+    "files": [
+      "src/mncs_control_mcp/environment_rpc.py",
+      "tests/test_environment_rpc.py",
+      "docs/SECURITY.md"
+    ],
+    "policy": "The existing bounded native-application build contract may use either the selected Environment project grant or the selected Compiler project grant.",
+    "retained_checks": [
+      "project-scoped grant only",
+      "grant-bound session identity equals requested Environment session",
+      "exact mncs-compiler:native-application-build capability",
+      "exact --request-file JSON invocation form",
+      "safe relative request path",
+      "all other capabilities retain their existing project boundary"
+    ]
+  },
+  "validation": {
+    "focused_tests": [
+      "test_compiler_project_rpc_admits_only_its_typed_native_application_build",
+      "test_environment_project_rpc_admits_typed_native_application_flow",
+      "test_project_rpc_invokes_only_its_fixed_verification_capabilities",
+      "test_campaign_state_read_uses_the_bound_compiler_project_session"
+    ],
+    "result": "4 passed",
+    "ruff": "passed",
+    "diff_check": "passed",
+    "full_suite": "not run; validation remained bounded to the affected Environment RPC paths"
+  }
+}

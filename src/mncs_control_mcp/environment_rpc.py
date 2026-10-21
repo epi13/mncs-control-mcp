@@ -932,6 +932,9 @@ class EnvironmentRPCServer:
             project_verification = self._authorize_project_verification_invocation(
                 argv, record,
             )
+            native_application_build = (
+                argv[2] == "mncs-compiler:native-application-build"
+            )
             if (argv[2] not in ALLOWED_INVOKE_CAPABILITIES
                     and not project_verification):
                 raise ControlError(
@@ -948,7 +951,7 @@ class EnvironmentRPCServer:
             )
             if resource_evaluation:
                 self._authorize_resource_headroom_invocation(argv, record)
-            elif argv[2] == "mncs-compiler:native-application-build":
+            elif native_application_build:
                 self._authorize_native_application_build_invocation(argv, record)
             elif argv[2] == "mncs-forge:native-application-execution":
                 self._authorize_native_application_execution_invocation(argv, record)
@@ -974,7 +977,7 @@ class EnvironmentRPCServer:
                     "System Monitor observability requires the session selected by this grant's authenticated continuation",
                     details={"next": "run project continuation and use its selected session"},
                 )
-            if not project_verification:
+            if not project_verification and not native_application_build:
                 environment_project = self.config.repositories.get(
                     "environment", "mncs-environment"
                 )
@@ -1696,13 +1699,18 @@ class EnvironmentRPCServer:
     def _authorize_native_application_build_invocation(
         self, argv: list[str], record: _GrantRecord,
     ) -> None:
-        """Expose Compiler's bounded native-application request-file contract."""
+        """Expose Compiler's bounded request-file contract to its own session."""
         environment_project = self.config.repositories.get(
             "environment", "mncs-environment"
         )
+        compiler_project = self.config.repositories.get(
+            "compiler", "mncs-compiler"
+        )
         allowed = (
             record.scope == "project"
-            and self._project_repository(record) == environment_project
+            and self._project_repository(record) in {
+                environment_project, compiler_project,
+            }
             and record.bound_session_id == argv[1]
             and len(argv) == 6
             and argv[:5] == [
@@ -1715,7 +1723,7 @@ class EnvironmentRPCServer:
         if not allowed:
             raise ControlError(
                 "ENVIRONMENT_AUTHORITY_DENIED",
-                "Compiler application build requires one selected Environment session and a relative JSON request path",
+                "Compiler application build requires one selected Environment or Compiler session and a relative JSON request path",
                 details={"capability": "mncs-compiler:native-application-build"},
             )
 

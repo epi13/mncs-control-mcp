@@ -115,6 +115,14 @@ belongs to the grant's authenticated principal, fixes the configured state
 directory and Store persistence provider, and forwards no Store path or file
 handle. Bare Store inspection, alternate persistence roots, and other Store
 operations remain unavailable through this endpoint.
+
+The typed `mncs-compiler:native-application-build` request-file invocation
+accepts a project grant from either Environment or Compiler. In both cases,
+Control requires the grant's selected session, the exact Compiler capability,
+the fixed `--request-file` form, and a safe relative JSON path. Other
+capabilities keep their existing project boundary; in particular, Compiler
+project grants do not gain Forge application-execution access. Environment
+remains authoritative for session capability availability, rights, and claims.
 The bridge exposes read-only retirement inventory across immediate configured
 workspace repositories through `--inventory --dry-run`; registered checkouts
 outside the mapped execution root remain unprobed. Its separate local mutation

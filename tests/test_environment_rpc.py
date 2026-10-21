@@ -4128,6 +4128,7 @@ def test_campaign_state_read_uses_the_bound_compiler_project_session(
     class Environment:
         state_dir = tmp_path / "state"
         environment_path = tmp_path / "environment"
+        rights_provenance_path = tmp_path / "rights-provenance"
 
         def _pkg(self) -> object:
             return object()
@@ -4222,6 +4223,7 @@ def test_project_rpc_invokes_only_its_fixed_verification_capabilities(
     class Environment:
         state_dir = tmp_path / "state"
         environment_path = tmp_path / "environment"
+        rights_provenance_path = tmp_path / "rights-provenance"
 
         def _pkg(self) -> object:
             return object()
@@ -4322,6 +4324,7 @@ def test_environment_project_rpc_admits_typed_native_application_flow(
     class Environment:
         state_dir = tmp_path / "state"
         environment_path = tmp_path / "environment"
+        rights_provenance_path = tmp_path / "rights-provenance"
 
         def _pkg(self) -> object:
             return object()
@@ -4412,6 +4415,102 @@ def test_environment_project_rpc_admits_typed_native_application_flow(
         }, peer_uid=0)
         assert rejected["ok"] is False
     assert len(calls) == 2
+
+
+def test_compiler_project_rpc_admits_only_its_typed_native_application_build(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "projects"
+    project = workspace / "mncs-compiler"
+    checkout = project / ".worktrees" / "rights-handoff"
+    checkout.mkdir(parents=True)
+    token = "compiler-native-application-build-grant"
+
+    class Store:
+        def load_snapshot(self, _session_id: str) -> dict[str, str]:
+            return {"authenticated_principal_id": "principal-agent"}
+
+        def close(self) -> None:
+            pass
+
+    class Environment:
+        state_dir = tmp_path / "state"
+        environment_path = tmp_path / "environment"
+        rights_provenance_path = tmp_path / "rights-provenance"
+
+        def _pkg(self) -> object:
+            return object()
+
+        def _store(self, _pkg: object) -> Store:
+            return Store()
+
+    server = EnvironmentRPCServer(
+        ControlConfig(
+            workspace_root=workspace,
+            repositories={
+                "environment": "mncs-environment",
+                "compiler": "mncs-compiler",
+            },
+            sandbox_home=tmp_path / "home",
+            environment_rpc_socket=tmp_path / "rpc" / "environment.sock",
+        ),
+        environment_service=Environment(),
+        policy=object(),
+    )
+    server._grants[hashlib.sha256(token.encode()).hexdigest()] = _GrantRecord(
+        grant_id="compiler-native-application-build-grant",
+        principal_id="principal-agent",
+        host_root=project,
+        sandbox_root="/workspace/mncs-compiler",
+        scope="project",
+        uid=0,
+        expires_at=time.monotonic() + 60,
+        token_file=tmp_path / "grant",
+        bound_session_id="ses_compiler",
+    )
+    calls: list[tuple[list[str], dict[str, object]]] = []
+
+    def run(argv: list[str], **kwargs: object) -> SimpleNamespace:
+        calls.append((argv, kwargs))
+        return SimpleNamespace(returncode=0, stdout='{"status":"stored"}\n', stderr="")
+
+    monkeypatch.setattr("mncs_control_mcp.environment_rpc.subprocess.run", run)
+    build_argv = [
+        "invoke", "ses_compiler", "mncs-compiler:native-application-build",
+        "--", "--request-file", "build/rights-handoff/request.json",
+    ]
+    request = {
+        "grant": token,
+        "request_id": "req_compiler_native_application_build",
+        "cwd": "/workspace/mncs-compiler/.worktrees/rights-handoff",
+        "argv": build_argv,
+    }
+
+    built = server.dispatch(request, peer_uid=0)
+    assert built["ok"] is True
+    assert json.loads(built["result"]["stdout"]) == {"status": "stored"}
+    assert calls[0][0][-len(build_argv):] == build_argv
+    assert calls[0][1]["env"]["MNCS_ENV_AUTH_PRINCIPAL_ID"] == "principal-agent"
+
+    rejected_argv = (
+        (["invoke", "ses_other", *build_argv[2:]], "ENVIRONMENT_AUTHORITY_DENIED"),
+        ([*build_argv[:-1], "../outside.json"], "ENVIRONMENT_AUTHORITY_DENIED"),
+        ([*build_argv[:-1], "/tmp/request.json"], "ENVIRONMENT_AUTHORITY_DENIED"),
+        ([*build_argv, "--timeout-seconds", "900"], "ENVIRONMENT_AUTHORITY_DENIED"),
+        (["invoke", "ses_compiler", "mncs-forge:native-application-execution"],
+         "ENVIRONMENT_AUTHORITY_DENIED"),
+        (["invoke", "ses_compiler", "mncs-language:compile"],
+         "ENVIRONMENT_OPERATION_UNAVAILABLE"),
+    )
+    for index, (argv, expected_code) in enumerate(rejected_argv):
+        rejected = server.dispatch({
+            **request,
+            "request_id": f"req_compiler_native_application_build_rejected_{index}",
+            "argv": argv,
+        }, peer_uid=0)
+        assert rejected["ok"] is False
+        assert rejected["error"]["code"] == expected_code
+    assert len(calls) == 1
 
 
 def test_project_rpc_invokes_the_declared_canonical_test_vm_capability(
