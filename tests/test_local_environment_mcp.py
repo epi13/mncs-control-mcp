@@ -239,13 +239,53 @@ def test_claim_target_accepts_canonical_absolute_checkout_inside_workspace(
     ]
 
 
+def test_claim_target_maps_an_absolute_checkout_from_another_project_by_workspace_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "Projects"
+    language_project = workspace / "mncs-language"
+    language_project.mkdir(parents=True)
+    checkout = (
+        workspace / "mncs-compiler" / ".worktrees" / "native-app"
+        / "mncs-language" / ".worktrees" / "verified-facts"
+    )
+    checkout.mkdir(parents=True)
+    monkeypatch.setattr(
+        local_environment_mcp,
+        "load_config",
+        lambda: SimpleNamespace(workspace_root=workspace),
+    )
+    context = _ProjectContext("secret", "/workspace/mncs-language")
+    context.selected_session_id = "ses_selected"
+
+    argv, selected = _build_argv(
+        "claims",
+        {
+            "mode": "acquire",
+            "repository": "mncs-language",
+            "worktree": str(checkout),
+            "branch": "campaign/language-verified-fact-reuse",
+        },
+        context,
+        "mncs-language",
+    )
+
+    assert selected is True
+    assert argv[-4:] == [
+        "--worktree",
+        "/workspace/mncs-compiler/.worktrees/native-app/mncs-language/.worktrees/verified-facts",
+        "--branch",
+        "campaign/language-verified-fact-reuse",
+    ]
+
+
 def test_claim_target_rejects_absolute_escape_and_symlinked_checkout(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     workspace = tmp_path / "Projects"
     workspace.mkdir()
     (workspace / "mncs-compiler").mkdir()
-    outside_workspace = workspace / "mncs-language"
+    outside_workspace = tmp_path / "outside-projects"
     outside_workspace.mkdir(parents=True)
     outside = outside_workspace / ".worktrees" / "feature"
     outside.mkdir(parents=True)
@@ -260,7 +300,7 @@ def test_claim_target_rejects_absolute_escape_and_symlinked_checkout(
     context.selected_session_id = "ses_selected"
 
     for target, message in (
-        (outside, "selected project sandbox"),
+        (outside, "authorized workspace"),
         (link, "symbolic link"),
     ):
         with pytest.raises(ValueError, match=message):

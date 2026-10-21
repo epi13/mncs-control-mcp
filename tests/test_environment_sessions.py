@@ -26,7 +26,14 @@ from mncs_control_mcp.environment_sessions import (
 )
 from mncs_control_mcp.errors import ControlError
 
-PROJECTS = Path(__file__).parents[2]
+_CONTROL_COMMON_DIRECTORY = Path(
+    subprocess.check_output(
+        ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+        cwd=Path(__file__).resolve().parent,
+        text=True,
+    ).strip()
+).resolve()
+PROJECTS = _CONTROL_COMMON_DIRECTORY.parent.parent
 ENVIRONMENT = PROJECTS / "mncs-environment"
 
 needs_environment = pytest.mark.skipif(

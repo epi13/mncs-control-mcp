@@ -92,14 +92,14 @@ def _relative_path(value: Any, name: str) -> str:
 
 
 def _worktree_path(value: Any, name: str, project: str) -> str:
-    """Map a claim target through the selected project's sandbox boundary.
+    """Map a claim target through the authorized workspace sandbox.
 
-    Relative targets retain the project-scoped grammar. An absolute target is
-    useful when a campaign workspace contains one linked checkout while the
-    repository's main checkout lives elsewhere in the same authorized
-    project. It is translated into the sandbox's project path; Environment
-    still verifies repository identity, Git registration, common-directory
-    provenance, and the selected checkout anchor before publishing the claim.
+    Relative targets retain the project-scoped grammar. Absolute targets may
+    identify a registered checkout in another selected repository inside the
+    same workspace, such as a Language worktree nested under a Compiler
+    campaign checkout. The Environment owner still verifies repository
+    identity, Git registration, common-directory provenance, and the selected
+    session's workspace boundary before publishing the claim.
     """
     text = _string(value, name, max_length=4096)
     requested = Path(text).expanduser()
@@ -122,12 +122,12 @@ def _worktree_path(value: Any, name: str, project: str) -> str:
     if absolute != resolved:
         raise ValueError(f"{name} must not traverse a symbolic link")
     try:
-        relative = resolved.relative_to(project_root)
+        relative = resolved.relative_to(workspace_root)
     except ValueError:
-        raise ValueError(f"{name} must stay inside the selected project sandbox") from None
+        raise ValueError(f"{name} must stay inside the authorized workspace") from None
     if not resolved.is_dir():
         raise ValueError(f"{name} must name a checkout directory")
-    sandbox_path = Path("/workspace") / project / relative
+    sandbox_path = Path("/workspace") / relative
     return sandbox_path.as_posix()
 
 
