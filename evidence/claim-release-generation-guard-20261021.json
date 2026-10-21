@@ -1,0 +1,39 @@
+{
+  "schema_version": "mncs.control.claim-release-generation-guard-evidence/1",
+  "observed_at": "2026-10-21T14:05:14Z",
+  "environment_session": {
+    "session_id": "ses_4bf39094d90a96dc",
+    "task_identity": "luna-max-control-claim-release-fence-20261021",
+    "repository": "mncs-control-mcp",
+    "branch": "campaign/luna-max-control-claim-release-fence-20261021",
+    "claim_id": "claim:mncs-control-mcp:worktree:99e60e3839f3",
+    "claim_basis": "explicit-adoption",
+    "adopted_dirty_path": ".mncs/environment.json"
+  },
+  "reproduction": {
+    "operation": "claims release",
+    "supplied_argument": "expected_store_generation",
+    "environment_cli_exit_code": 2,
+    "error": "--expected-store-generation requires --acquire and cannot be combined with other claim operations",
+    "claim_mutated": false,
+    "same_claim_release_without_generation_exit_code": 0,
+    "same_claim_released_without_generation": true
+  },
+  "change": {
+    "file": "src/mncs_control_mcp/local_environment_mcp.py",
+    "behavior": "Reject expected_store_generation on claims release before invoking Environment; preserve generation fencing on claims acquire.",
+    "test_file": "tests/test_local_environment_mcp.py"
+  },
+  "verification": {
+    "command": "pytest -q tests/test_local_environment_mcp.py",
+    "tests_passed": 25,
+    "ruff": "passed for the changed source and test files",
+    "diff_check": "passed"
+  },
+  "coordination": {
+    "active_peer_claim_id": "claim:mncs-control-mcp:worktree:9478a2d0206f",
+    "active_peer_branch": "campaign/luna-max-rights-control-gate-20261021",
+    "peer_worktree_modified": false,
+    "note": "The peer task is the typed Compiler application-build gate and remained isolated in its own worktree."
+  }
+}

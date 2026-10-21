@@ -412,9 +412,12 @@ def _build_argv(
                     raise ValueError("expected_store_generation must be a nonnegative integer")
                 argv.extend(["--expected-store-generation", str(generation)])
         else:
-            if set(values) - {"session_id", "mode", "claim_id", "repository",
-                              "expected_store_generation"}:
-                raise ValueError("claims release accepts only claim_id and expected generation")
+            if "expected_store_generation" in values:
+                raise ValueError(
+                    "expected_store_generation is supported only when acquiring a claim"
+                )
+            if set(values) - {"session_id", "mode", "claim_id", "repository"}:
+                raise ValueError("claims release accepts only claim_id and repository")
             claim_id = _string(values.get("claim_id"), "claim_id", max_length=128)
             repository = values.get("repository")
             if repository is None:
@@ -429,11 +432,6 @@ def _build_argv(
                     )):
                 raise ValueError("repository must be a valid repository identifier")
             argv.extend(["--release", repository, "--claim-id", claim_id])
-            if "expected_store_generation" in values:
-                generation = values["expected_store_generation"]
-                if type(generation) is not int or generation < 0:
-                    raise ValueError("expected_store_generation must be a nonnegative integer")
-                argv.extend(["--expected-store-generation", str(generation)])
         return argv, True
     if operation == "campaign_state":
         argv = ["campaign-state", session_id]

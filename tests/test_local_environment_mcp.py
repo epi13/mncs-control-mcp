@@ -161,6 +161,14 @@ def test_claim_release_mapping_is_explicit_and_bounded() -> None:
             context, "mncs-compiler",
         )
 
+    with pytest.raises(ValueError, match="supported only when acquiring a claim"):
+        _build_argv(
+            "claims",
+            {"mode": "release", "claim_id": "claim_123",
+             "expected_store_generation": 17},
+            context, "mncs-compiler",
+        )
+
     with pytest.raises(ValueError, match="valid repository identifier"):
         _build_argv(
             "claims",
@@ -196,6 +204,19 @@ def test_claim_targets_forward_to_authenticated_selected_session() -> None:
     assert compiler_argv == [
         "claims", "ses_selected", "--acquire", "mncs-language",
         "--reason", "Language fact implementation", "--basis", "intent-scope",
+    ]
+
+    fenced_argv, fenced_selected = _build_argv(
+        "claims",
+        {"mode": "acquire", "repository": "mncs-compiler",
+         "expected_store_generation": 61},
+        context,
+        "mncs-environment",
+    )
+    assert fenced_selected is True
+    assert fenced_argv == [
+        "claims", "ses_selected", "--acquire", "mncs-compiler",
+        "--expected-store-generation", "61",
     ]
 
     with pytest.raises(ValueError, match="valid repository identifier"):
