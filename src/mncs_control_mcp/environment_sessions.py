@@ -818,6 +818,20 @@ class EnvironmentService:
             results: list[dict[str, Any]] = []
             for selected_campaign in candidate_campaigns:
                 matching = owned_by_campaign.get(selected_campaign, [])
+                if working_checkout is not None:
+                    matching = [
+                        (session_id, snapshot)
+                        for session_id, snapshot in matching
+                        if matches_working_checkout(snapshot)
+                    ]
+                if task_selector_projection is not None:
+                    bound_session = task_selector_projection.get("session_id")
+                    if isinstance(bound_session, str):
+                        matching = [
+                            (session_id, snapshot)
+                            for session_id, snapshot in matching
+                            if session_id == bound_session
+                        ]
                 project_sessions = [
                     (session_id, snapshot) for session_id, snapshot in matching
                     if self._snapshot_references_repository(
@@ -826,6 +840,35 @@ class EnvironmentService:
                 ]
                 if not project_sessions:
                     continue
+                authoritative_session = None
+                authoritative_selection_basis = None
+                if len(project_sessions) > 1 and working_checkout is not None:
+                    package_entry = getattr(pkg, "entry", None)
+                    duplicate_selector = getattr(
+                        package_entry, "_authoritative_duplicate_session", None,
+                    )
+                    if callable(duplicate_selector):
+                        authoritative_session, selection_evidence = duplicate_selector(
+                            store,
+                            [session_id for session_id, _snapshot in project_sessions],
+                            working_checkout,
+                        )
+                        if authoritative_session is not None:
+                            project_sessions = [
+                                (session_id, snapshot)
+                                for session_id, snapshot in project_sessions
+                                if session_id == authoritative_session
+                            ]
+                            evidence_basis = selection_evidence.get("basis")
+                            authoritative_selection_basis = {
+                                "unique_active_checkout_claim":
+                                    "authenticated-project-checkout-live-claim-owner",
+                                "unique_session_checkpoint":
+                                    "authenticated-project-checkout-unique-checkpoint",
+                                "unique_registered_checkout":
+                                    "authenticated-registered-checkout",
+                            }.get(evidence_basis, "authenticated-project-checkout")
+                matching = project_sessions
                 contexts = {
                     (str((snapshot.get("provenance") or {}).get("definition_id", "")),
                      str((snapshot.get("workspace") or {}).get("root", "")))
@@ -906,6 +949,10 @@ class EnvironmentService:
                     "status": "ready" if len(continuations) == 1 else "ambiguous",
                     "continuations": continuations[:16],
                     "continuations_truncated": len(continuations) > 16,
+                    **({
+                        "selected_session_id": authoritative_session,
+                        "selection_basis": authoritative_selection_basis,
+                    } if authoritative_session is not None else {}),
                     "next": (
                         "resume the listed project-linked session by its exact session identity"
                         if len(continuations) == 1

@@ -1143,6 +1143,31 @@ def test_campaign_continuation_reads_real_isolated_store(tmp_path: Path) -> None
     store = service._store(pkg)
     recorded = store.load_snapshot(entered["session_id"])
     assert isinstance(recorded, dict)
+    working_checkout = pkg.workspace.verify_registered_checkout(
+        checkout, repository=repository, workspace_root=service._config.workspace_root,
+        expected_repository_root=checkout,
+    )
+    checkpoint_owner = pkg.sessions.Session.open(
+        state_dir=service.state_dir, session_id=entered["session_id"],
+        backend="store", store=store,
+    )
+    checkpoint_owner.snapshot["selected_checkouts"] = {
+        repository: {
+            key: working_checkout[key] for key in (
+                "repository", "path", "workspace_root", "repository_root",
+                "git_common_directory", "git_common_directory_identity",
+                "checkout_identity", "branch", "head",
+            )
+        }
+    }
+    checkpoint_owner.snapshot["selected_checkouts"][repository]["head"] = recorded_head
+    checkpoint_owner._save()
+    recorded = store.load_snapshot(entered["session_id"])
+    assert isinstance(recorded, dict)
+    checkpoint = checkpoint_owner.checkpoint(
+        progress="unique checkpoint identifies the continuing checkout session",
+    )
+    assert checkpoint["sequence"] == 1
     environment = {
         "identity": recorded["environment_id"],
         "intent": recorded.get("intent"),
@@ -1189,7 +1214,7 @@ def test_campaign_continuation_reads_real_isolated_store(tmp_path: Path) -> None
     assert selected["work_intent"]["goal"] == "prove authenticated campaign lookup"
     checkout_ref = selected["repositories"][0]
     assert checkout_ref["repository"] == repository
-    assert checkout_ref["observed_path"] == str(checkout)
+    assert checkout_ref.get("observed_path", checkout_ref.get("path")) == str(checkout)
     assert checkout_ref["branch"] in {"main", "master"}
     assert len(checkout_ref["head"]) == 40
     assert checkout_ref["head"] == recorded_head
@@ -1203,10 +1228,21 @@ def test_campaign_continuation_reads_real_isolated_store(tmp_path: Path) -> None
     assert comparison["status"] == "checkout_head_changed"
     assert comparison["recorded_head"] == recorded_head
     assert comparison["live_head"] == live_head
+    exact_checkout = service.campaign_continuation(
+        repository, "cmp_isolated_test", working_checkout=working_checkout,
+    )
+    assert exact_checkout["status"] == "ready"
+    assert exact_checkout["selected_session_id"] == entered["session_id"]
+    assert [item["session_id"] for item in exact_checkout["continuations"]] == [
+        entered["session_id"],
+    ]
     task_capsule = service.campaign_continuation(
         repository, task_identity=task_identity,
     )
-    assert task_capsule["status"] == "ambiguous"
+    assert task_capsule["status"] == "ready"
+    assert [item["session_id"] for item in task_capsule["continuations"]] == [
+        entered["session_id"],
+    ]
     assert task_capsule["task_selector"] == {
         "status": "resolved",
         "campaign_id": "cmp_isolated_test",
@@ -1258,8 +1294,9 @@ print(json.dumps({
         check=True,
     )
     continued = json.loads(child.stdout)
-    assert continued["status"] == "ambiguous"
-    assert continued["candidate_ids"] == continued["expected_ids"]
+    assert continued["status"] == "ready"
+    assert continued["candidate_ids"] == [entered["session_id"]]
+    assert continued["expected_ids"] == sorted((entered["session_id"], duplicate_session_id))
     assert continued["task_selector"]["status"] == "resolved"
     assert continued["task_selector"]["session_id"] == entered["session_id"]
     assert continued["resumed_session_id"] == entered["session_id"]
