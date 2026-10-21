@@ -4816,6 +4816,177 @@ class EnvironmentRPCServer:
             )
         return definition_id, str(workspace_root)
 
+    @staticmethod
+    def _unique_authoritative_same_checkout_session(
+        rows: list[dict[str, Any]], repository: str,
+        checkout_by_session: dict[str, dict[str, str]], package: Any,
+    ) -> tuple[dict[str, Any] | None, str | None, dict[str, Any] | None]:
+        """Resolve only duplicates with one canonical live owner or checkpoint.
+
+        A campaign can accumulate multiple Environment sessions that point at
+        the same checkout. Prefer the unique session holding a live claim for
+        that exact checkout. If no candidate holds such a claim, a single
+        session-specific checkpoint can identify the continuation. Incomplete
+        claim/checkpoint projections and equally authoritative duplicates stay
+        unresolved.
+        """
+        if len(rows) < 2:
+            return None, None, None
+
+        contexts = {
+            (row.get("definition_id"), row.get("workspace_root")) for row in rows
+        }
+        session_ids = [row.get("session_id") for row in rows]
+        if (len(contexts) != 1 or not all(isinstance(item, str) for item in session_ids)
+                or len(set(session_ids)) != len(session_ids)):
+            return None, None, None
+
+        checkouts = [checkout_by_session.get(session_id) for session_id in session_ids]
+        if not all(isinstance(item, dict) for item in checkouts):
+            return None, None, {
+                "status": "unknown",
+                "reason": "duplicate-session-checkout-projection-incomplete",
+                "candidate_sessions": sorted(session_ids),
+            }
+        checkout_fields = (
+            "repository", "path", "workspace_root", "repository_root",
+            "git_common_directory", "git_common_directory_identity",
+            "checkout_identity", "branch", "head",
+        )
+        checkout_keys = {
+            tuple(checkout.get(field) for field in checkout_fields)
+            for checkout in checkouts if isinstance(checkout, dict)
+        }
+        if len(checkout_keys) != 1:
+            return None, None, None
+        checkout = checkouts[0]
+        assert isinstance(checkout, dict)
+        if (checkout.get("repository") != repository
+                or not isinstance(checkout.get("path"), str)):
+            return None, None, {
+                "status": "unknown",
+                "reason": "duplicate-session-checkout-identity-invalid",
+                "candidate_sessions": sorted(session_ids),
+            }
+
+        claims_module = getattr(package, "claims", None)
+        scopes_conflict = getattr(claims_module, "scopes_conflict", None)
+        if not callable(scopes_conflict):
+            return None, None, {
+                "status": "unknown",
+                "reason": "duplicate-session-claim-scope-checker-unavailable",
+                "candidate_sessions": sorted(session_ids),
+            }
+        selected_scope = {
+            "kind": "worktree",
+            "repository": repository,
+            "checkout": checkout["path"],
+            "branch": checkout.get("branch"),
+            "paths": None,
+            "exclusive": False,
+        }
+
+        claim_owners: list[str] = []
+        unknown_claims: list[str] = []
+        for row, session_id in zip(rows, session_ids, strict=True):
+            claim_ids = row.get("claim_ids")
+            claims = row.get("claims")
+            if (not isinstance(claim_ids, list) or not isinstance(claims, list)
+                    or row.get("claims_truncated") is True
+                    or not all(isinstance(item, str) for item in claim_ids)):
+                unknown_claims.append(session_id)
+                continue
+            projected_ids = [
+                claim.get("claim_id") for claim in claims if isinstance(claim, dict)
+            ]
+            if (len(projected_ids) != len(claims)
+                    or not all(isinstance(item, str) for item in projected_ids)
+                    or sorted(projected_ids) != sorted(claim_ids)):
+                unknown_claims.append(session_id)
+                continue
+
+            has_overlap = False
+            has_unknown = False
+            for claim in claims:
+                assert isinstance(claim, dict)
+                if claim.get("repository") != repository or claim.get("status") != "held":
+                    continue
+                scope = claim.get("scope")
+                if not isinstance(scope, dict):
+                    has_unknown = True
+                    continue
+                try:
+                    has_overlap = (
+                        scopes_conflict(scope, selected_scope) is not None or has_overlap
+                    )
+                except (TypeError, ValueError):
+                    has_unknown = True
+            if has_overlap:
+                claim_owners.append(session_id)
+            if has_unknown:
+                unknown_claims.append(session_id)
+
+        if len(claim_owners) > 1:
+            return None, None, {
+                "status": "blocked",
+                "reason": "multiple-same-checkout-sessions-hold-overlapping-project-claims",
+                "candidate_sessions": sorted(session_ids),
+                "competing_claim_sessions": sorted(set(claim_owners)),
+            }
+        if unknown_claims:
+            return None, None, {
+                "status": "unknown",
+                "reason": "duplicate-session-claim-projection-incomplete",
+                "candidate_sessions": sorted(session_ids),
+                "unknown_claim_sessions": sorted(set(unknown_claims)),
+            }
+        if len(claim_owners) == 1:
+            owner = claim_owners[0]
+            selected = next(row for row in rows if row.get("session_id") == owner)
+            return selected, "authenticated-project-checkout-live-claim-owner", None
+
+        checkpoint_owners: list[tuple[int, dict[str, Any]]] = []
+        for row, session_id in zip(rows, session_ids, strict=True):
+            checkpoint = row.get("latest_checkpoint")
+            checkpoint_ids = row.get("checkpoint_ids")
+            if checkpoint is None:
+                if (not isinstance(checkpoint_ids, list)
+                        or not all(isinstance(item, str) for item in checkpoint_ids)):
+                    return None, None, {
+                        "status": "unknown",
+                        "reason": "duplicate-session-checkpoint-projection-incomplete",
+                        "candidate_sessions": sorted(session_ids),
+                    }
+                if checkpoint_ids:
+                    return None, None, {
+                        "status": "unknown",
+                        "reason": "duplicate-session-checkpoint-projection-incomplete",
+                        "candidate_sessions": sorted(session_ids),
+                    }
+                continue
+            if (not isinstance(checkpoint, dict)
+                    or not isinstance(checkpoint.get("identity"), str)
+                    or re.fullmatch(r"chk_[A-Za-z0-9_-]{1,120}", checkpoint["identity"])
+                    is None
+                    or type(checkpoint.get("sequence")) is not int
+                    or checkpoint["sequence"] < 1
+                    or (checkpoint_ids is not None
+                        and (not isinstance(checkpoint_ids, list)
+                             or not all(isinstance(item, str) for item in checkpoint_ids)
+                             or checkpoint["identity"] not in checkpoint_ids))):
+                return None, None, {
+                    "status": "unknown",
+                    "reason": "duplicate-session-checkpoint-identity-invalid",
+                    "candidate_sessions": sorted(session_ids),
+                    "session_id": session_id,
+                }
+            checkpoint_owners.append((checkpoint["sequence"], row))
+
+        if len(checkpoint_owners) == 1:
+            return (checkpoint_owners[0][1],
+                    "authenticated-project-checkout-unique-checkpoint", None)
+        return None, None, None
+
     def _select_project_campaign_context(
         self, capsule: dict[str, Any], record: _GrantRecord, repository: str,
         *, project_context: tuple[str, str] | None = None,
@@ -5217,6 +5388,28 @@ class EnvironmentRPCServer:
         selected_rows = [
             row for row in exact_context_rows if is_selectable_continuation(row)
         ]
+        if len(exact_context_rows) > 1 and project_checkout is not None:
+            package_loader = getattr(self.environment_service, "_pkg", None)
+            package = package_loader() if callable(package_loader) else None
+            authoritative, basis, unresolved = (
+                self._unique_authoritative_same_checkout_session(
+                    exact_context_rows, repository, checkout_by_session, package,
+                )
+            )
+            if unresolved is not None:
+                capsule["project_selection"] = unresolved
+                capsule["next"] = (
+                    "refresh the exact checkout claim and checkpoint projections before selecting a duplicate session"
+                )
+                if capsule.get("status") == "ready":
+                    capsule["context_conflict_status"] = "ready"
+                    capsule["status"] = unresolved["status"]
+                return capsule
+            if authoritative is not None:
+                exact_context_rows = [authoritative]
+                selected_rows = [authoritative]
+                assert basis is not None
+                selection_basis = basis
         if len(exact_context_rows) != 1:
             if capsule.get("status") == "ready":
                 capsule["context_conflict_status"] = "ready"
@@ -5705,6 +5898,8 @@ class EnvironmentRPCServer:
                 and capsule.get("selection_basis") in {
                     "authenticated-project-environment-definition",
                     "authenticated-project-environment-and-checkout",
+                    "authenticated-project-checkout-live-claim-owner",
+                    "authenticated-project-checkout-unique-checkpoint",
                     "authenticated-task-selector",
                     "authenticated-explicit-linked-campaign",
                     "authenticated-registered-checkout",

@@ -6407,6 +6407,7 @@ def test_registered_checkout_selects_one_campaign_and_scoped_claims(
             "claim_ids": [] if claim is None else [str(claim["claim_id"])],
             "claims": claims,
             "claims_truncated": False,
+            "checkpoint_ids": [],
         }
 
     capsule = {
@@ -6497,6 +6498,117 @@ def test_registered_checkout_selects_one_campaign_and_scoped_claims(
     )
     assert unresolved["status"] == "ambiguous"
     assert unresolved["project_selection"]["candidate_sessions"] == ["ses_duplicate", "ses_one"]
+
+    # Multiple sessions with the same canonical checkout are recoverable when
+    # exactly one holds the live claim for that checkout.
+    owned_duplicate = dict(capsule)
+    owned_duplicate["continuations"] = [
+        row("ses_unowned", selected_checkout),
+        row("ses_owner", selected_checkout, {
+            "claim_id": "claim-selected-checkout", "repository": "mncs-environment",
+            "status": "held",
+            "scope": {"kind": "worktree", "repository": "mncs-environment",
+                      "checkout": str(selected_path)},
+        }),
+    ]
+    owned_duplicate["continuations_count"] = 2
+    owner_selected = server._select_project_campaign_context(
+        owned_duplicate, record, "mncs-environment", project_checkout=selected_checkout,
+    )
+    assert owner_selected["status"] == "ready"
+    assert owner_selected["selected_session_id"] == "ses_owner"
+    assert owner_selected["selection_basis"] == (
+        "authenticated-project-checkout-live-claim-owner"
+    )
+    assert owner_selected["unselected_sessions_count"] == 1
+
+    # With no live claims, one session-specific checkpoint can identify the
+    # continuation. A pair of equally progressed sessions remains ambiguous.
+    checkpointed_duplicate = dict(capsule)
+    checkpointed = row("ses_checkpointed", selected_checkout)
+    checkpointed["checkpoint_ids"] = ["chk_saved"]
+    checkpointed["latest_checkpoint"] = {"identity": "chk_saved", "sequence": 9}
+    checkpointed_duplicate["continuations"] = [
+        row("ses_empty", selected_checkout), checkpointed,
+    ]
+    checkpointed_duplicate["continuations_count"] = 2
+    checkpoint_selected = server._select_project_campaign_context(
+        checkpointed_duplicate, record, "mncs-environment",
+        project_checkout=selected_checkout,
+    )
+    assert checkpoint_selected["status"] == "ready"
+    assert checkpoint_selected["selected_session_id"] == "ses_checkpointed"
+    assert checkpoint_selected["selection_basis"] == (
+        "authenticated-project-checkout-unique-checkpoint"
+    )
+
+    equally_checkpointed = dict(capsule)
+    equally_checkpointed["continuations"] = []
+    for session_id, sequence in (("ses_checkpoint_one", 9), ("ses_checkpoint_two", 10)):
+        candidate = row(session_id, selected_checkout)
+        checkpoint_id = f"chk_saved_{sequence}"
+        candidate["checkpoint_ids"] = [checkpoint_id]
+        candidate["latest_checkpoint"] = {
+            "identity": checkpoint_id, "sequence": sequence,
+        }
+        equally_checkpointed["continuations"].append(candidate)
+    equally_checkpointed["continuations_count"] = 2
+    equal_progress = server._select_project_campaign_context(
+        equally_checkpointed, record, "mncs-environment",
+        project_checkout=selected_checkout,
+    )
+    assert equal_progress["status"] == "ambiguous"
+    assert "selected_session_id" not in equal_progress
+    assert equal_progress["project_selection"]["candidate_sessions"] == [
+        "ses_checkpoint_one", "ses_checkpoint_two",
+    ]
+
+    conflicting_duplicates = dict(capsule)
+    conflicting_duplicates["continuations"] = [
+        row("ses_writer_one", selected_checkout, {
+            "claim_id": "claim-writer-one", "repository": "mncs-environment",
+            "status": "held",
+            "scope": {"kind": "worktree", "repository": "mncs-environment",
+                      "checkout": str(selected_path)},
+        }),
+        row("ses_writer_two", selected_checkout, {
+            "claim_id": "claim-writer-two", "repository": "mncs-environment",
+            "status": "held",
+            "scope": {"kind": "worktree", "repository": "mncs-environment",
+                      "checkout": str(selected_path)},
+        }),
+    ]
+    conflicting_duplicates["continuations_count"] = 2
+    conflict = server._select_project_campaign_context(
+        conflicting_duplicates, record, "mncs-environment",
+        project_checkout=selected_checkout,
+    )
+    assert conflict["status"] == "ambiguous"
+    assert "selected_session_id" not in conflict
+    assert conflict["project_selection"]["status"] == "blocked"
+    assert conflict["project_selection"]["competing_claim_sessions"] == [
+        "ses_writer_one", "ses_writer_two",
+    ]
+
+    unknown_duplicate = dict(capsule)
+    unknown_duplicate["continuations"] = [
+        row("ses_unknown_owner", selected_checkout, {
+            "claim_id": "claim-unknown", "repository": "mncs-environment",
+            "status": "held",
+        }),
+        row("ses_no_claim", selected_checkout),
+    ]
+    unknown_duplicate["continuations_count"] = 2
+    unknown = server._select_project_campaign_context(
+        unknown_duplicate, record, "mncs-environment",
+        project_checkout=selected_checkout,
+    )
+    assert unknown["status"] == "ambiguous"
+    assert "selected_session_id" not in unknown
+    assert unknown["project_selection"]["status"] == "unknown"
+    assert unknown["project_selection"]["unknown_claim_sessions"] == [
+        "ses_unknown_owner",
+    ]
 
     conflicting = dict(capsule)
     conflicting["continuations"] = [
