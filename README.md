@@ -123,6 +123,14 @@ Any session-scoped operation may include `campaign_id` or `task_identity` to
 reselect through Control after a fresh MCP process starts; the caller does not
 need to reuse an in-memory session ID or depend on a prior connector process.
 
+The authenticated Environment subprocess keeps its configured Environment
+checkout first on `PYTHONPATH`. When the configured Rights repository contains
+`src/mncs_rights_provenance/__init__.py`, Control adds that package source after
+Environment so Rights context resolution can use the selected provider. The
+repository defaults to `mncs-rights-provenance` and can be changed with
+`[mncs.repos].rights_provenance`; if the package is unavailable, Environment
+keeps Rights state unresolved and reports the missing provider.
+
 Claim recovery uses the persisted, project-scoped Environment audit trail as
 host liveness evidence. It binds a live process to its recorded PID start time
 and boot ID, and recognizes only the same-user launcher ancestry that can be

@@ -204,6 +204,13 @@ class ControlConfig:
         return self.workspace_root / self.repositories.get("environment", "mncs-environment")
 
     @property
+    def rights_provenance_path(self) -> Path:
+        """Resolve the configured source checkout for the Rights provider."""
+        return self.workspace_root / self.repositories.get(
+            "rights_provenance", "mncs-rights-provenance"
+        )
+
+    @property
     def resolved_language_binary(self) -> Path:
         """Resolve the MNCS language CLI binary used to verify frozen experiments.
 

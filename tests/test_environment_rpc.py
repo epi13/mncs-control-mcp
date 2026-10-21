@@ -23,9 +23,24 @@ from mncs_control_mcp.environment_rpc import (
     MAX_ARGUMENT_BYTES,
     MAX_RESPONSE_BYTES,
     EnvironmentRPCServer,
+    _environment_pythonpath,
     _GrantRecord,
 )
 from mncs_control_mcp.errors import ControlError
+
+
+def test_environment_pythonpath_includes_only_a_present_configured_rights_package(
+    tmp_path: Path,
+) -> None:
+    environment_path = tmp_path / "environment"
+    rights_path = tmp_path / "rights"
+    package = rights_path / "src" / "mncs_rights_provenance"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+
+    value = _environment_pythonpath(environment_path, rights_path)
+    assert value == os.pathsep.join((str(environment_path), str(rights_path / "src")))
+    assert _environment_pythonpath(environment_path, tmp_path / "missing") == str(environment_path)
 
 
 def test_post_commit_response_drop_requires_exact_successful_checkpoint(

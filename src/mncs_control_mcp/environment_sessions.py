@@ -152,6 +152,10 @@ class EnvironmentService:
         return self._config.environment_path
 
     @property
+    def rights_provenance_path(self) -> Path:
+        return self._config.rights_provenance_path
+
+    @property
     def state_dir(self) -> Path:
         if self._config.environment_state_dir is not None:
             return self._config.environment_state_dir

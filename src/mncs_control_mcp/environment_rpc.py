@@ -85,6 +85,18 @@ def _requires_selected_session_for_mutation(command: str, argv: list[Any]) -> bo
     return False
 
 
+def _environment_pythonpath(environment_path: Path, rights_provenance_path: Path) -> str:
+    """Build an isolated import path for Environment and its configured Rights provider."""
+    entries = [str(environment_path)]
+    source = rights_provenance_path / "src"
+    package = source / "mncs_rights_provenance" / "__init__.py"
+    if (source.is_dir() and not rights_provenance_path.is_symlink()
+            and not source.is_symlink()
+            and package.is_file() and not package.is_symlink()):
+        entries.append(str(source))
+    return os.pathsep.join(entries)
+
+
 def _safe_relative_artifact_path(value: Any) -> bool:
     """Accept a bounded relative path; Environment checks the binding whitelist."""
     if (not isinstance(value, str) or not value or len(value) > 1024
@@ -4144,7 +4156,9 @@ class EnvironmentRPCServer:
             "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
             "HOME": str(Path.home()),
             "LANG": os.environ.get("LANG", "C.UTF-8"),
-            "PYTHONPATH": str(cli_source),
+            "PYTHONPATH": _environment_pythonpath(
+                cli_source, self.environment_service.rights_provenance_path
+            ),
             "MNCS_ENV_AUTH_PRINCIPAL_ID": record.principal_id,
             "MNCS_ENV_RPC_REQUEST_ID": request_id,
         }

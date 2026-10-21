@@ -107,6 +107,19 @@ fixture = "fixture"
     assert config.max_concurrent_jobs == 2
 
 
+def test_rights_provider_path_has_a_configurable_workspace_default(tmp_path: Path) -> None:
+    config = ControlConfig(workspace_root=tmp_path)
+    assert config.rights_provenance_path == tmp_path / "mncs-rights-provenance"
+
+    config_path = tmp_path / "control.toml"
+    config_path.write_text(
+        f'[workspace]\nroot = "{tmp_path}"\n[mncs.repos]\nrights_provenance = "rights-source"\n',
+        encoding="utf-8",
+    )
+    configured = load_config(config_path)
+    assert configured.rights_provenance_path == tmp_path / "rights-source"
+
+
 def test_configuration_loads_owner_scoped_environment_grant_file(
     tmp_path: Path,
 ) -> None:
