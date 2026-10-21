@@ -6695,14 +6695,15 @@ def test_project_root_resolves_unique_verified_nested_continuation(
 
     def verify_registered_checkout(
         path: str, *, repository: str, workspace_root: str,
-        expected_repository_root: str, expected_branch: str, expected_head: str,
+        expected_repository_root: str, expected_branch: str,
+        expected_head: str | None = None,
     ) -> dict[str, str]:
         assert repository == "mncs-compiler"
         assert workspace_root == str(workspace)
         assert expected_repository_root == str(project)
         observed = registered.get(path)
         if (observed is None or observed["branch"] != expected_branch
-                or observed["head"] != expected_head):
+                or (expected_head is not None and observed["head"] != expected_head)):
             raise ValueError("checkout is not a current registered worktree")
         return observed
 
@@ -6843,6 +6844,31 @@ def test_project_root_resolves_unique_verified_nested_continuation(
         "authenticated-project-root-registered-worktree"
     )
 
+    advanced_first_checkout = dict(first_checkout, head="head-one-after-commit")
+    registered[str(nested_one)] = advanced_first_checkout
+    external_path_reference = row(
+        "ses_external_path_campaign", None, definition="env_campaign_environment",
+    )
+    external_path_reference["repositories"] = [{
+        "repository": "mncs-compiler",
+        "observed_path": "mncs-compiler/.worktrees/one/mncs-compiler",
+        "checkout_identity": first_checkout["checkout_identity"],
+        "git_common_directory_identity": first_checkout[
+            "git_common_directory_identity"
+        ],
+        "branch": first_checkout["branch"],
+        "head": first_checkout["head"],
+    }]
+    selected_after_commit = server._select_project_campaign_context(
+        capsule([external_path_reference]), record, "mncs-compiler",
+        project_context=("env_local_compiler", str(workspace)),
+        derive_project_context=False,
+        project_checkout=root_checkout,
+    )
+    assert selected_after_commit["status"] == "ready"
+    assert selected_after_commit["selected_checkout"] == advanced_first_checkout
+    registered[str(nested_one)] = first_checkout
+
     independent = select([
         row("ses_nested_one", first_checkout),
         row("ses_completed_old", first_checkout, lifecycle="completed"),
@@ -6897,10 +6923,15 @@ def test_project_root_resolves_unique_verified_nested_continuation(
         "candidate_checkouts"
     ]] == ["checkout-one", "checkout-two"]
 
-    stale = dict(first_checkout, head="stale-head")
-    rejected = select([row("ses_stale", stale)])
-    assert rejected["status"] == "context-mismatch"
-    assert rejected["project_selection"]["reason"] == (
+    stale_head = dict(first_checkout, head="stale-head")
+    resumed_after_commit = select([row("ses_stale_head", stale_head)])
+    assert resumed_after_commit["status"] == "ready"
+    assert resumed_after_commit["selected_checkout"] == first_checkout
+
+    forged_identity = dict(first_checkout, checkout_identity="checkout-from-another-path")
+    rejected_identity = select([row("ses_forged_identity", forged_identity)])
+    assert rejected_identity["status"] == "context-mismatch"
+    assert rejected_identity["project_selection"]["reason"] == (
         "no-session-matches-registered-checkout"
     )
 

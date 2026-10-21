@@ -5299,6 +5299,7 @@ class EnvironmentRPCServer:
                 for row in context_rows:
                     selected = row.get("selected_checkout")
                     selected_identity = isinstance(selected, dict)
+                    path_identity: dict[str, Any] | None = None
                     if selected_identity:
                         if (
                             selected.get("repository") != repository
@@ -5313,12 +5314,16 @@ class EnvironmentRPCServer:
                             continue
                         candidate_path = selected.get("path")
                         expected_branch = selected["branch"]
-                        expected_head = selected["head"]
+                        # The exact registered checkout and branch survive
+                        # ordinary commits after the snapshot. HEAD is useful
+                        # evidence, but it is not a checkout identity.
+                        expected_head = None
                     else:
-                        # Older continuation capsules retain only the exact
-                        # repository branch and HEAD. Resolve that pair through
-                        # Environment's Git worktree registry, then run the
-                        # same canonical checkout verifier as newer sessions.
+                        # Campaign-level definitions can record a repository
+                        # checkout relative to their own nested workspace.
+                        # Resolve that exact path inside the authorized project
+                        # and verify its Git registration and stable identity.
+                        # This remains valid after HEAD advances on that branch.
                         references = row.get("repositories")
                         if not isinstance(references, list):
                             continue
@@ -5327,66 +5332,120 @@ class EnvironmentRPCServer:
                             if isinstance(reference, dict)
                             and reference.get("repository") == repository
                         ]
-                        if (
-                            len(repository_references) != 1
-                            or not callable(registered_worktrees)
-                        ):
+                        if not repository_references:
                             continue
-                        reference = repository_references[0]
-                        expected_branch = reference.get("branch")
-                        expected_head = reference.get("head")
-                        if not isinstance(expected_branch, str) or not isinstance(
-                            expected_head, str
-                        ):
-                            continue
-                        registry_rows = registered_worktrees(repository_root)
-                        matching_worktrees = []
-                        for worktree in registry_rows:
-                            if not isinstance(worktree, dict):
+                        path_references: list[tuple[Path, dict[str, Any]]] = []
+                        for reference in repository_references:
+                            reference_path = reference.get("observed_path") or reference.get("path")
+                            reference_branch = reference.get("branch")
+                            if (not isinstance(reference_path, str) or not reference_path
+                                    or not isinstance(reference_branch, str)
+                                    or not reference_branch):
                                 continue
-                            registered_branch = worktree.get("branch", "")
-                            if isinstance(registered_branch, str) and registered_branch.startswith(
-                                "refs/heads/"
-                            ):
-                                registered_branch = registered_branch.removeprefix(
-                                    "refs/heads/"
+                            recorded_path = Path(reference_path)
+                            if ".." in recorded_path.parts:
+                                continue
+                            if not recorded_path.is_absolute():
+                                recorded_workspace = row.get("workspace_root")
+                                if not isinstance(recorded_workspace, str) or not recorded_workspace:
+                                    continue
+                                recorded_path = Path(recorded_workspace) / recorded_path
+                            try:
+                                recorded_workspace_path = Path(
+                                    str(row.get("workspace_root", ""))
+                                ).resolve(strict=True)
+                                resolved_recorded_workspace = Path(workspace_root).resolve(
+                                    strict=True
                                 )
-                            if (
-                                registered_branch == expected_branch
-                                and worktree.get("head") == expected_head
-                                and "prunable" not in worktree
-                                and isinstance(worktree.get("path"), str)
-                            ):
-                                matching_worktrees.append(worktree)
-                        if len(matching_worktrees) != 1:
-                            continue
-                        candidate_path = matching_worktrees[0]["path"]
+                                recorded_workspace_path.relative_to(resolved_recorded_workspace)
+                                raw_recorded_path = Path(os.path.abspath(recorded_path))
+                                resolved_recorded_path = raw_recorded_path.resolve(strict=True)
+                                raw_recorded_path.relative_to(Path(repository_root))
+                            except (OSError, RuntimeError, ValueError):
+                                continue
+                            if (recorded_workspace_path
+                                    != Path(str(row.get("workspace_root", "")))
+                                    or raw_recorded_path != resolved_recorded_path
+                                    or not resolved_recorded_path.is_dir()):
+                                continue
+                            path_references.append((resolved_recorded_path, reference))
+
+                        if path_references:
+                            contexts = {
+                                (str(path), reference.get("branch"),
+                                 reference.get("checkout_identity"),
+                                 reference.get("git_common_directory_identity"))
+                                for path, reference in path_references
+                            }
+                            if len(contexts) != 1:
+                                continue
+                            candidate_path, path_identity = path_references[0]
+                            candidate_path = str(candidate_path)
+                            expected_branch = path_identity["branch"]
+                            expected_head = None
+                        else:
+                            # Pathless older references still need an exact
+                            # branch-and-HEAD match in the registered Git list.
+                            if (len(repository_references) != 1
+                                    or not callable(registered_worktrees)):
+                                continue
+                            reference = repository_references[0]
+                            expected_branch = reference.get("branch")
+                            expected_head = reference.get("head")
+                            if (not isinstance(expected_branch, str)
+                                    or not isinstance(expected_head, str)):
+                                continue
+                            registry_rows = registered_worktrees(repository_root)
+                            matching_worktrees = []
+                            for worktree in registry_rows:
+                                if not isinstance(worktree, dict):
+                                    continue
+                                registered_branch = worktree.get("branch", "")
+                                if isinstance(registered_branch, str) and registered_branch.startswith(
+                                    "refs/heads/"
+                                ):
+                                    registered_branch = registered_branch.removeprefix(
+                                        "refs/heads/"
+                                    )
+                                if (
+                                    registered_branch == expected_branch
+                                    and worktree.get("head") == expected_head
+                                    and "prunable" not in worktree
+                                    and isinstance(worktree.get("path"), str)
+                                ):
+                                    matching_worktrees.append(worktree)
+                            if len(matching_worktrees) != 1:
+                                continue
+                            candidate_path = matching_worktrees[0]["path"]
 
                     if not isinstance(candidate_path, str) or candidate_path == root_path:
                         continue
                     try:
-                        verified = checkout_verifier(
-                            candidate_path,
-                            repository=repository,
-                            workspace_root=workspace_root,
-                            expected_repository_root=repository_root,
-                            expected_branch=expected_branch,
-                            expected_head=expected_head,
-                        )
+                        verifier_args = {
+                            "repository": repository,
+                            "workspace_root": workspace_root,
+                            "expected_repository_root": repository_root,
+                            "expected_branch": expected_branch,
+                        }
+                        if expected_head is not None:
+                            verifier_args["expected_head"] = expected_head
+                        verified = checkout_verifier(candidate_path, **verifier_args)
                     except Exception:
                         # A stale or unregistered candidate cannot establish
                         # continuation identity. Keep it out of the match set.
                         continue
                     if not isinstance(verified, dict):
                         continue
-                    if selected_identity and any(
-                            selected.get(key) != verified.get(key)
-                            for key in (
-                                "repository", "path", "workspace_root",
-                                "repository_root", "git_common_directory",
-                                "git_common_directory_identity", "checkout_identity",
-                                "branch", "head",
-                            )
+                    identity_source = selected if selected_identity else path_identity
+                    identity_fields = (
+                        "repository", "path", "workspace_root", "repository_root",
+                        "git_common_directory", "git_common_directory_identity",
+                        "checkout_identity", "branch",
+                    )
+                    if isinstance(identity_source, dict) and any(
+                        isinstance(identity_source.get(key), str)
+                        and identity_source.get(key) != verified.get(key)
+                        for key in identity_fields
                     ):
                         continue
                     session_id = row.get("session_id")
