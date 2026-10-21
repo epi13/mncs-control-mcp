@@ -306,7 +306,7 @@ def test_native_application_invocations_map_to_fixed_typed_contracts() -> None:
         "native-application-build.json", "--",
     ]
     assert execution[9] == "--call-json"
-    assert json.loads(execution[10]) == {"arguments": [{
+    forwarded_call = {"arguments": [{
         "record": {
             "type_identity": (
                 "mncs:0.2:record-type:tests.native_readiness::ReadinessRequest::"
@@ -320,6 +320,40 @@ def test_native_application_invocations_map_to_fixed_typed_contracts() -> None:
             ],
         },
     }]}
+    assert json.loads(execution[10]) == forwarded_call
+
+    structured_provider = {
+        "schema_version": "mncs.forge.structured-file-capability/1",
+        "capability_identity": (
+            "mncs:0.2:capability:mncs.test.digest::digest_app::test_artifact"
+        ),
+        "input_schema": "mncs.test.digest-request/1",
+        "input_value": {"record": {"name": "DigestRequest", "fields": []}},
+        "output_schema": "mncs.test.digest/1",
+    }
+    provider_execution, selected = _build_argv(
+        "invoke",
+        {
+            "capability": "mncs-forge:native-application-execution",
+            "input_artifact": {
+                "name": "native-application-build",
+                "capability": "mncs-compiler:native-application-build",
+                "binding_id": "cap_0123456789abcdef",
+                "path": "native-application-build.json",
+            },
+            "call": {
+                **forwarded_call,
+                "capability_providers": [structured_provider],
+            },
+        },
+        context,
+        "mncs-environment",
+    )
+    assert selected is True
+    assert json.loads(provider_execution[10]) == {
+        **forwarded_call,
+        "capability_providers": [structured_provider],
+    }
 
     for arguments in (
         {"capability": "mncs-compiler:compiler-build", "request_file": "request.json"},
@@ -338,6 +372,30 @@ def test_native_application_invocations_map_to_fixed_typed_contracts() -> None:
                 "path": "native-application-build.json",
             },
             "call": {"arguments": {}, "callable": "arbitrary"},
+        },
+        {
+            "capability": "mncs-forge:native-application-execution",
+            "input_artifact": {
+                "name": "native-application-build",
+                "capability": "mncs-compiler:native-application-build",
+                "binding_id": "cap_0123456789abcdef",
+                "path": "native-application-build.json",
+            },
+            "call": {"arguments": [], "capability_providers": [
+                structured_provider, structured_provider,
+            ]},
+        },
+        {
+            "capability": "mncs-forge:native-application-execution",
+            "input_artifact": {
+                "name": "native-application-build",
+                "capability": "mncs-compiler:native-application-build",
+                "binding_id": "cap_0123456789abcdef",
+                "path": "native-application-build.json",
+            },
+            "call": {"arguments": [], "capability_providers": [{
+                **structured_provider, "schema_version": "mncs.forge.structured-file-capability/0",
+            }]},
         },
     ):
         with pytest.raises(ValueError):

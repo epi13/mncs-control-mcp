@@ -266,10 +266,32 @@ def _build_argv(
                     or artifact.get("path") != "native-application-build.json"):
                 raise ValueError("Forge execution requires the exact Compiler application-build Store artifact")
             call = values.get("call")
-            if (not isinstance(call, dict) or set(call) != {"arguments"}
+            if (not isinstance(call, dict)
+                    or set(call) not in ({"arguments"}, {"arguments", "capability_providers"})
                     or not isinstance(call.get("arguments"), list)
                     or len(call["arguments"]) > 32):
                 raise ValueError("Forge execution call must contain a bounded typed argument array")
+            providers = call.get("capability_providers", [])
+            if not isinstance(providers, list) or len(providers) > 1:
+                raise ValueError("Forge execution call accepts at most one bounded capability provider")
+            for provider in providers:
+                if (not isinstance(provider, dict)
+                        or set(provider) != {
+                            "schema_version", "capability_identity", "input_schema",
+                            "input_value", "output_schema",
+                        }
+                        or provider.get("schema_version") != "mncs.forge.structured-file-capability/1"
+                        or not isinstance(provider.get("capability_identity"), str)
+                        or not provider["capability_identity"].strip()
+                        or len(provider["capability_identity"]) > 1024
+                        or not isinstance(provider.get("input_schema"), str)
+                        or not provider["input_schema"].strip()
+                        or len(provider["input_schema"]) > 128
+                        or not isinstance(provider.get("output_schema"), str)
+                        or not provider["output_schema"].strip()
+                        or len(provider["output_schema"]) > 128
+                        or not isinstance(provider.get("input_value"), dict)):
+                    raise ValueError("Forge structured-file capability provider is malformed")
             try:
                 encoded_call = json.dumps(
                     call, ensure_ascii=False, sort_keys=True,
