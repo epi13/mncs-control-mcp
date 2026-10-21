@@ -908,3 +908,39 @@ def test_local_bridge_uses_owner_resolved_context_without_leaking_grant(
         assert context.grant
     finally:
         server.close()
+
+
+def test_compact_context_preserves_the_environment_rights_projection() -> None:
+    rights_context = {
+        "schema_version": "mncs.rights-provenance.agent-context/1",
+        "identity": "sha256:" + "a" * 64,
+        "status": "review",
+        "sources": {
+            "rights_manifest": {
+                "reference": "RIGHTS.json",
+                "sha256": "sha256:" + "b" * 64,
+            },
+            "governance_profile": {"reference": "governance/agent-governance.json"},
+            "license_resolver": {
+                "reference": "mncs_rights_provenance.license_resolution/1",
+            },
+        },
+        "rights": {
+            "distribution_license": "Apache-2.0",
+            "compatibility": {"status": "unknown"},
+        },
+        "provenance": {"evidence_state": "declared-unverified"},
+        "governance": {"status": "authorized", "profile_id": "native-open@0.1.0"},
+        "diagnostics": [{"code": "rights-basis-unknown"}],
+    }
+
+    compact = LocalEnvironmentMCP._compact_context({
+        "schema_version": "mncs.environment.entry-context/1",
+        "session_id": "ses_rights_context",
+        "lifecycle": "active",
+        "rights_context": rights_context,
+        "unrelated_full_workspace_detail": {"large": "omitted"},
+    })
+
+    assert compact["rights_context"] == rights_context
+    assert "unrelated_full_workspace_detail" not in compact

@@ -707,6 +707,12 @@ class LocalEnvironmentMCP:
             "writable_repositories", "protected_repositories",
         )
         compact = {key: payload[key] for key in keys if key in payload}
+        # Environment already supplies a bounded, authoritative Rights
+        # projection. Preserve that provider-owned summary at the admission
+        # boundary instead of forcing each consumer to reconstruct it.
+        rights_context = payload.get("rights_context")
+        if isinstance(rights_context, dict):
+            compact["rights_context"] = rights_context
         authority = payload.get("authority")
         if isinstance(authority, dict):
             compact["authority"] = {
