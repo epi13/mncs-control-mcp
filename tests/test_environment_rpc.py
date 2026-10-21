@@ -6752,6 +6752,17 @@ def test_project_root_resolves_unique_verified_nested_continuation(
                 workspace=SimpleNamespace(
                     verify_registered_checkout=verify_registered_checkout,
                     _worktrees=list_registered_worktrees,
+                    repository_checkout_identity=lambda root, repository, path: {
+                        "checkout_identity": registered[str(Path(path).resolve())][
+                            "checkout_identity"
+                        ],
+                        "git_common_directory_identity": registered[
+                            str(Path(path).resolve())
+                        ]["git_common_directory_identity"],
+                        "observed_path": Path(path).resolve().relative_to(
+                            Path(root).resolve()
+                        ).as_posix(),
+                    },
                 ),
                 claims=SimpleNamespace(scopes_conflict=scopes_conflict),
             )

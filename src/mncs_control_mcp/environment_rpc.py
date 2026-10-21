@@ -5284,6 +5284,9 @@ class EnvironmentRPCServer:
                     workspace_module, "verify_registered_checkout", None,
                 )
                 registered_worktrees = getattr(workspace_module, "_worktrees", None)
+                checkout_identity_resolver = getattr(
+                    workspace_module, "repository_checkout_identity", None,
+                )
                 if not callable(checkout_verifier):
                     capsule["project_selection"] = {
                         "status": "unknown",
@@ -5300,13 +5303,10 @@ class EnvironmentRPCServer:
                     selected = row.get("selected_checkout")
                     selected_identity = isinstance(selected, dict)
                     path_identity: dict[str, Any] | None = None
+                    identity_source: dict[str, Any] | None = None
                     if selected_identity:
                         if (
                             selected.get("repository") != repository
-                            or selected.get("workspace_root") != workspace_root
-                            or selected.get("repository_root") != repository_root
-                            or selected.get("git_common_directory") != common_directory
-                            or selected.get("git_common_directory_identity") != common_identity
                             or not isinstance(selected.get("checkout_identity"), str)
                             or not isinstance(selected.get("branch"), str)
                             or not isinstance(selected.get("head"), str)
@@ -5318,6 +5318,7 @@ class EnvironmentRPCServer:
                         # ordinary commits after the snapshot. HEAD is useful
                         # evidence, but it is not a checkout identity.
                         expected_head = None
+                        identity_source = selected
                     else:
                         # Campaign-level definitions can record a repository
                         # checkout relative to their own nested workspace.
@@ -5383,6 +5384,7 @@ class EnvironmentRPCServer:
                             candidate_path = str(candidate_path)
                             expected_branch = path_identity["branch"]
                             expected_head = None
+                            identity_source = path_identity
                         else:
                             # Pathless older references still need an exact
                             # branch-and-HEAD match in the registered Git list.
@@ -5417,6 +5419,7 @@ class EnvironmentRPCServer:
                             if len(matching_worktrees) != 1:
                                 continue
                             candidate_path = matching_worktrees[0]["path"]
+                            identity_source = reference
 
                     if not isinstance(candidate_path, str) or candidate_path == root_path:
                         continue
@@ -5436,16 +5439,52 @@ class EnvironmentRPCServer:
                         continue
                     if not isinstance(verified, dict):
                         continue
-                    identity_source = selected if selected_identity else path_identity
+
+                    # Checkout digests are scoped to the Environment session's
+                    # workspace root. Recompute them in that same identity
+                    # namespace after Control has independently verified the
+                    # path under its configured project boundary.
+                    recorded_workspace_value = row.get("workspace_root")
+                    try:
+                        if (not isinstance(recorded_workspace_value, str)
+                                or not recorded_workspace_value
+                                or not callable(checkout_identity_resolver)):
+                            continue
+                        if (selected_identity
+                                and isinstance(selected.get("workspace_root"), str)
+                                and selected.get("workspace_root")
+                                != recorded_workspace_value):
+                            continue
+                        recorded_workspace = Path(recorded_workspace_value)
+                        resolved_recorded_workspace = recorded_workspace.resolve(strict=True)
+                        authorized_workspace = Path(workspace_root).resolve(strict=True)
+                        resolved_recorded_workspace.relative_to(authorized_workspace)
+                        if recorded_workspace != resolved_recorded_workspace:
+                            continue
+                        observed_identity = checkout_identity_resolver(
+                            resolved_recorded_workspace, repository, verified["path"],
+                        )
+                    except (OSError, RuntimeError, ValueError, KeyError, TypeError):
+                        continue
+                    if not isinstance(observed_identity, dict):
+                        continue
                     identity_fields = (
-                        "repository", "path", "workspace_root", "repository_root",
-                        "git_common_directory", "git_common_directory_identity",
-                        "checkout_identity", "branch",
+                        "checkout_identity", "git_common_directory_identity",
+                        "observed_path",
                     )
-                    if isinstance(identity_source, dict) and any(
-                        isinstance(identity_source.get(key), str)
-                        and identity_source.get(key) != verified.get(key)
-                        for key in identity_fields
+                    if (isinstance(identity_source, dict) and any(
+                            isinstance(identity_source.get(key), str)
+                            and identity_source.get(key) != observed_identity.get(key)
+                            for key in identity_fields
+                    )):
+                        continue
+                    if selected_identity and any(
+                        isinstance(selected.get(key), str)
+                        and selected.get(key) != verified.get(key)
+                        for key in (
+                            "repository", "path", "repository_root",
+                            "git_common_directory", "branch",
+                        )
                     ):
                         continue
                     session_id = row.get("session_id")
