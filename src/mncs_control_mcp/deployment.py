@@ -108,8 +108,9 @@ WantedBy=default.target
 
 def render_update_path(
     *, repository: Path, environment_repository: Path | None = None,
+    scope_grants_file: Path | None = None, home: Path | None = None,
 ) -> str:
-    """Watch Control and Environment refs so source updates reload Control.
+    """Watch Control inputs so source and authority updates reload Control.
 
     The tunnel process is intentionally long-lived. An editable Python install
     therefore makes new source available after ``git pull`` but does not make
@@ -122,26 +123,39 @@ def render_update_path(
     ``packed-refs`` for both repositories so branch switches and detached
     checkouts also trigger a reload; without it, a process started on older
     source keeps serving stale behavior even though status reports revision
-    drift.
+    drift. The owner-managed repository scope grants file is watched as well,
+    because Control reads those exact approvals at process startup and would
+    otherwise continue denying a newly approved campaign until manually
+    restarted.
     """
 
     repo = repository.expanduser().resolve()
+    home_root = (home or Path.home()).expanduser().resolve()
     environment_repo = (
         (environment_repository or repo.parent / "mncs-environment")
         .expanduser()
         .resolve()
     )
+    grant_path = (
+        scope_grants_file
+        or home_root / ".config" / "mncs-control-mcp" / "environment-scope-grants.toml"
+    ).expanduser().resolve()
     roots = tuple(dict.fromkeys((repo, environment_repo)))
     watched_refs = "\n".join(
         f"PathChanged={str(root).replace('%', '%%')}/.git/{ref}"
         for root in roots
         for ref in ("HEAD", "refs/heads/main", "packed-refs")
     )
+    try:
+        grant_path_value = f"%h/{grant_path.relative_to(home_root).as_posix()}"
+    except ValueError:
+        grant_path_value = str(grant_path).replace("%", "%%")
     return f"""[Unit]
-Description=Watch MNCS Control and Environment source revisions
+Description=Watch MNCS Control sources and owner scope grants
 
 [Path]
 {watched_refs}
+PathChanged={grant_path_value}
 Unit=mncs-control-update.service
 
 [Install]

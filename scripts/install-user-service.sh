@@ -140,6 +140,24 @@ fi
 install -m 0644 "$repository/deploy/systemd/mncs-control-tunnel.service" "$unit_directory/mncs-control-tunnel.service"
 install -m 0644 "$repository/deploy/systemd/mncs-control-update.path" "$unit_directory/mncs-control-update.path"
 install -m 0644 "$repository/deploy/systemd/mncs-control-update.service" "$unit_directory/mncs-control-update.service"
+"$venv_python" - "$repository" "$unit_directory/mncs-control-update.path" <<'PYPATH'
+from pathlib import Path
+import sys
+
+from mncs_control_mcp.config import load_config
+from mncs_control_mcp.deployment import render_update_path
+
+repository = Path(sys.argv[1]).resolve()
+target = Path(sys.argv[2])
+config = load_config(repository / "control.toml")
+rendered = render_update_path(
+    repository=repository,
+    environment_repository=config.environment_path,
+    scope_grants_file=config.environment_scope_grants_path,
+)
+target.write_text(rendered, encoding="utf-8")
+target.chmod(0o644)
+PYPATH
 chmod 0755 "$repository/scripts/run-tunnel.sh"
 
 if [[ -n "${SSH_AUTH_SOCK:-}" ]]; then

@@ -116,9 +116,12 @@ def test_update_watcher_units_reload_tunnel_for_control_and_environment_changes(
 ) -> None:
     repository = tmp_path / "mncs-control-mcp"
     environment_repository = tmp_path / "mncs-environment"
+    scope_grants_file = tmp_path / ".config" / "mncs-control-mcp" / "environment-scope-grants.toml"
     path_unit = render_update_path(
         repository=repository,
         environment_repository=environment_repository,
+        scope_grants_file=scope_grants_file,
+        home=tmp_path,
     )
     service_unit = render_update_service()
     for root in (repository, environment_repository):
@@ -126,6 +129,7 @@ def test_update_watcher_units_reload_tunnel_for_control_and_environment_changes(
         assert f"PathChanged={root}/.git/refs/heads/main" in path_unit
         assert f"PathChanged={root}/.git/packed-refs" in path_unit
     assert "Unit=mncs-control-update.service" in path_unit
+    assert "PathChanged=%h/.config/mncs-control-mcp/environment-scope-grants.toml" in path_unit
     assert "try-restart mncs-control-tunnel.service" in service_unit
     assert "NoNewPrivileges=true" in service_unit
     deployed = (
@@ -138,6 +142,19 @@ def test_update_watcher_units_reload_tunnel_for_control_and_environment_changes(
     assert "%h/Documents/Projects/mncs-environment/.git/HEAD" in deployed
     assert "%h/Documents/Projects/mncs-environment/.git/refs/heads/main" in deployed
     assert "%h/Documents/Projects/mncs-environment/.git/packed-refs" in deployed
+    assert "%h/.config/mncs-control-mcp/environment-scope-grants.toml" in deployed
+
+
+def test_update_watcher_renders_scope_grant_path_outside_home_as_absolute(
+    tmp_path: Path,
+) -> None:
+    rendered = render_update_path(
+        repository=tmp_path / "mncs-control-mcp",
+        environment_repository=tmp_path / "mncs-environment",
+        scope_grants_file=tmp_path.parent / "private-scope-grants.toml",
+        home=tmp_path,
+    )
+    assert f"PathChanged={tmp_path.parent}/private-scope-grants.toml" in rendered
 
 
 def test_update_service_can_reach_user_bus_for_restart() -> None:

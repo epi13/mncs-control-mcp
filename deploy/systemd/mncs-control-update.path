@@ -1,5 +1,5 @@
 [Unit]
-Description=Watch MNCS Control and Environment source revisions
+Description=Watch MNCS Control sources and owner scope grants
 
 [Path]
 PathChanged=%h/Documents/Projects/mncs-control-mcp/.git/HEAD
@@ -8,6 +8,7 @@ PathChanged=%h/Documents/Projects/mncs-control-mcp/.git/packed-refs
 PathChanged=%h/Documents/Projects/mncs-environment/.git/HEAD
 PathChanged=%h/Documents/Projects/mncs-environment/.git/refs/heads/main
 PathChanged=%h/Documents/Projects/mncs-environment/.git/packed-refs
+PathChanged=%h/.config/mncs-control-mcp/environment-scope-grants.toml
 Unit=mncs-control-update.service
 
 [Install]

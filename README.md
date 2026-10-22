@@ -64,7 +64,7 @@ cd ~/Documents/Projects/mncs-control-mcp
 ./scripts/doctor.sh
 ```
 
-The installer creates or updates `.venv`, installs the editable package, preserves an existing `control.toml`, creates private state/config directories, installs the tunnel unit plus the `mncs-control-update.path` source-revision watcher under `~/.config/systemd/user/`, and enables them. It is safe to rerun after `git pull`. Once the watcher has been installed, advancing the checked-out local `main` ref automatically recycles the tunnel so the long-lived MCP child imports the new source instead of remaining on stale code.
+The installer creates or updates `.venv`, installs the editable package, preserves an existing `control.toml`, creates private state/config directories, installs the tunnel unit plus the `mncs-control-update.path` watcher under `~/.config/systemd/user/`, and enables them. It watches Control and Environment source refs plus the configured owner scope grants file. It is safe to rerun after `git pull` or a grant update. Changes automatically recycle the tunnel so the long-lived MCP child uses current code and authority without a manual connector refresh.
 
 For a normal operator setup, install the official `tunnel-client`, put `CONTROL_PLANE_API_KEY` in `~/.config/mncs-control-mcp/tunnel.env` with mode 0600, create a real tunnel in Platform settings, and bind the tunnel to its OpenAI organization context. The installer persists the organization ID without printing it:
 
