@@ -151,11 +151,15 @@ def test_scope_grant_bridge_preserves_the_campaign_selector(
             "repository": "mncs-environment",
             "expected_authority_revision": "a" * 64,
             "approval_reference": "user-authorization:environment-integration",
+            "checkout_path": ".worktrees/compiler/mncs-environment",
         },
     )
 
     assert response["ok"] is True
     assert captured[0]["argv"][2:4] == ["--campaign-id", "cmp_selected"]
+    assert captured[0]["argv"][-2:] == [
+        "--checkout", ".worktrees/compiler/mncs-environment",
+    ]
 
 
 def test_resume_revalidates_the_selected_session() -> None:

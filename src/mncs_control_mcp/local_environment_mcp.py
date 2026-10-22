@@ -900,6 +900,7 @@ class LocalEnvironmentMCP:
                     "mode", "repository", "claim_id", "offset", "limit", "reason", "ttl",
                     "basis", "paths", "worktree", "branch", "expected_store_generation",
                     "expected_authority_revision", "approval_reference",
+                    "checkout_path",
                     "evidence_offset", "evidence_limit", "capability", "binding_id", "path",
                     "request_file", "input_artifact", "call",
                     *SESSION_SELECTOR_FIELDS,
