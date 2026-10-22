@@ -523,7 +523,9 @@ class EnvironmentService:
         )
         claims_by_session: dict[str, list[dict[str, Any]]] = {}
 
-        def scope_grant_context_matches(snapshot: dict[str, Any]) -> bool:
+        def scope_grant_context_matches(
+            snapshot: dict[str, Any], session_id: str | None = None,
+        ) -> bool:
             campaign = snapshot.get("campaign")
             campaign_identity = campaign.get("identity") \
                 if isinstance(campaign, dict) else None
@@ -539,9 +541,30 @@ class EnvironmentService:
             provenance = provenance if isinstance(provenance, dict) else {}
             workspace = snapshot.get("workspace")
             workspace = workspace if isinstance(workspace, dict) else {}
-            return bool(
+            same_project_context = bool(
                 (not definition_id or provenance.get("definition_id") == definition_id)
                 and (not workspace_root or workspace.get("root") == workspace_root)
+            )
+            if same_project_context:
+                return True
+            principal_id = snapshot.get("authenticated_principal_id")
+            # A project-specific Environment definition may select an exact
+            # worktree belonging to a different campaign workspace (for
+            # example, a compiler campaign's explicitly admitted Language or
+            # Environment checkout). In that case the same campaign/project
+            # definition check cannot match. Its authenticated scope grant is
+            # the durable cross-repository link, and only the complete
+            # current checkout identity may bridge the context boundary.
+            return bool(
+                isinstance(session_id, str)
+                and principal_id == self.authenticated_principal_id
+                and working_checkout is not None
+                and self._scope_grant_matches_checkout(
+                    snapshot,
+                    repository,
+                    scope_grants_for_session(session_id),
+                    working_checkout,
+                )
             )
 
         def matches_working_checkout(
@@ -562,7 +585,7 @@ class EnvironmentService:
                 )
             ) or bool(
                 isinstance(session_id, str)
-                and scope_grant_context_matches(snapshot)
+                and scope_grant_context_matches(snapshot, session_id)
                 and self._scope_grant_matches_checkout(
                     snapshot, repository,
                     scope_grants_for_session(session_id), working_checkout,
@@ -651,7 +674,7 @@ class EnvironmentService:
                     return True
                 grants = (
                     scope_grants_for_session(session_id)
-                    if scope_grant_context_matches(snapshot)
+                    if scope_grant_context_matches(snapshot, session_id)
                     and snapshot.get("authenticated_principal_id")
                     == self.authenticated_principal_id
                     and working_checkout is not None

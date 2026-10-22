@@ -685,6 +685,13 @@ def test_owner_scope_grant_links_only_its_exact_campaign_worktree(
         definition_id="env-compiler",
         workspace_root=str(config.workspace_root),
     )
+    cross_project_context_a = service.campaign_continuation(
+        repository,
+        "cmp-multi-repository",
+        working_checkout=checkout_a,
+        definition_id="env-language-project",
+        workspace_root=str(repo_root),
+    )
 
     assert selected_a["status"] == "ready"
     assert selected_a["continuations"][0]["session_id"] == "ses-language-a"
@@ -707,6 +714,12 @@ def test_owner_scope_grant_links_only_its_exact_campaign_worktree(
     assert discovered_a["status"] == "ready"
     assert discovered_a["campaign_id"] == "cmp-multi-repository"
     assert discovered_a["continuations"][0]["session_id"] == "ses-language-a"
+    assert cross_project_context_a["status"] == "ready"
+    assert cross_project_context_a["continuations"][0]["session_id"] == "ses-language-a"
+    assert cross_project_context_a["continuations"][0]["project_reference"] == {
+        "status": "linked",
+        "basis": ["authenticated-scope-grant.exact-checkout"],
+    }
 
 
 def test_campaign_continuation_recovers_one_authenticated_nested_checkout(
