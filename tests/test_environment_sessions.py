@@ -575,6 +575,7 @@ def test_campaign_continuation_recovers_one_authenticated_nested_checkout(
         "checkout_identity": "checkout-native-application-readiness",
         "observed_path": "mncs-compiler/.worktrees/campaign/mncs-compiler",
     }
+    nested_path.mkdir(parents=True)
     snapshots = {
         session_id: {
             "session_id": session_id,
@@ -603,6 +604,8 @@ def test_campaign_continuation_recovers_one_authenticated_nested_checkout(
         for session_id in ("ses_uncheckpointed", "ses_checkpoint_owner")
     }
 
+    claim_rows: list[dict[str, object]] = []
+
     class Store:
         closed = False
 
@@ -613,7 +616,7 @@ def test_campaign_continuation_recovers_one_authenticated_nested_checkout(
             return snapshots.get(session_id)
 
         def read_claims(self):
-            return []
+            return claim_rows
 
         def close(self):
             self.closed = True
@@ -636,6 +639,11 @@ def test_campaign_continuation_recovers_one_authenticated_nested_checkout(
     def select_duplicate(_store, session_ids, requested):
         assert set(session_ids) == set(snapshots)
         assert requested == recovered_checkout
+        if not all(matches(snapshots[session_id], requested) for session_id in session_ids):
+            return None, {
+                "basis": "no_unique_registered_checkout",
+                "candidate_sessions": sorted(session_ids),
+            }
         return "ses_checkpoint_owner", {
             "basis": "unique_session_checkpoint",
             "checkpoint_session": "ses_checkpoint_owner",
@@ -648,7 +656,11 @@ def test_campaign_continuation_recovers_one_authenticated_nested_checkout(
             _authoritative_duplicate_session=select_duplicate,
         ),
         claims=SimpleNamespace(
-            active_claims=lambda _claims: {},
+            active_claims=lambda rows: {
+                str(row.get("claim_id", index)): row
+                for index, row in enumerate(rows)
+                if isinstance(row, dict) and row.get("status") == "held"
+            },
             scopes_conflict=lambda *_args: None,
         ),
         sessions=SimpleNamespace(),
@@ -702,6 +714,64 @@ def test_campaign_continuation_recovers_one_authenticated_nested_checkout(
         "ses_checkpoint_owner",
     ]
     assert store_instance.closed is True
+
+    # A fresh process can enter through the registered nested checkout after
+    # the snapshot still describes the repository root. The exact active
+    # worktree claim identifies the one session for this checkout.
+    for snapshot in snapshots.values():
+        snapshot["selected_checkouts"]["mncs-compiler"] = {
+            key: checkout_root[key]
+            for key in (
+                "repository", "path", "workspace_root", "repository_root",
+                "branch", "head", "checkout_identity",
+                "git_common_directory_identity",
+            )
+        }
+    claim_rows[:] = [{
+        "claim_id": "claim:mncs-compiler:worktree:nested",
+        "version": 1,
+        "repository": "mncs-compiler",
+        "session_id": "ses_checkpoint_owner",
+        "status": "held",
+        "scope": {
+            "kind": "worktree",
+            "repository": "mncs-compiler",
+            "checkout": str(nested_path),
+            "branch": recovered_checkout["branch"],
+        },
+    }]
+    store_instance.closed = False
+    direct_nested = service.campaign_continuation(
+        "mncs-compiler",
+        "cmp_native_application",
+        working_checkout=recovered_checkout,
+        definition_id=definition_id,
+        workspace_root=str(workspace),
+    )
+    assert len(recovery_calls) == 1  # direct nested entry needs no root recovery
+    assert direct_nested["status"] == "ready"
+    assert [item["session_id"] for item in direct_nested["continuations"]] == [
+        "ses_checkpoint_owner",
+    ]
+
+    # Two exact active claims on the same checkout remain ambiguous.
+    claim_rows.append({
+        **claim_rows[0],
+        "claim_id": "claim:mncs-compiler:worktree:nested-duplicate",
+        "session_id": "ses_uncheckpointed",
+    })
+    store_instance.closed = False
+    duplicate_nested = service.campaign_continuation(
+        "mncs-compiler",
+        "cmp_native_application",
+        working_checkout=recovered_checkout,
+        definition_id=definition_id,
+        workspace_root=str(workspace),
+    )
+    assert duplicate_nested["status"] == "ambiguous"
+    assert [item["session_id"] for item in duplicate_nested["continuations"]] == [
+        "ses_checkpoint_owner", "ses_uncheckpointed",
+    ]
 
 
 def test_campaign_continuation_preserves_distinct_worktree_conflict(

@@ -1,0 +1,64 @@
+{
+  "schema_version": "mncs.control.evidence/1",
+  "evidence_id": "registered-nested-checkout-claim-continuation-20261022",
+  "recorded_at": "2026-10-22T02:53:44Z",
+  "campaign_id": "cmp_e9d685431376bfd7",
+  "session_id": "ses_4d8c1e931bada455",
+  "owner_repository": "mncs-control-mcp",
+  "purpose": "Select a registered nested worktree continuation from its exact authenticated live checkout claim when the persisted selected-checkout projection still names the repository root.",
+  "authorization": {
+    "scope": "mncs-control-mcp",
+    "basis": "Active Control campaign claim claim:mncs-control-mcp:worktree:09711c2d8fda for the exact registered checkout and branch."
+  },
+  "implementation": {
+    "base_main": "613ac6151142bda0be64cf75618c8ef68c3109c1",
+    "branch": "campaign/control-cross-repo-scope-routing-20261020",
+    "checkout": "/home/epi13/Documents/Projects/mncs-control-mcp/.worktrees/control-cross-repo-scope-routing-20261020",
+    "files": {
+      "src/mncs_control_mcp/environment_sessions.py": "cf6cfc4f1d62982589a08426b20e32e9c305865652ceb7f3dd783d745e50b96a",
+      "tests/test_environment_sessions.py": "f605fb2c0b637ba9d1f415628a7ebe45d65d8a05e403d2d35c35cdb0e72cd7d6"
+    },
+    "behavior": [
+      "A snapshot match against the validated Git checkout remains sufficient.",
+      "A stale snapshot may match only through an active worktree-scoped claim for the same repository, canonical checkout path, and branch; available checkout and common-directory identities must also agree.",
+      "A repository-wide claim does not identify a nested checkout.",
+      "Distinct registered worktrees remain independently selectable.",
+      "Two active sessions claiming the exact same checkout remain ambiguous."
+    ]
+  },
+  "verification": {
+    "result": "PASS",
+    "tests": [
+      {
+        "command": "pytest -q tests/test_environment_sessions.py::test_campaign_continuation_recovers_one_authenticated_nested_checkout",
+        "result": "passed"
+      },
+      {
+        "command": "pytest -q tests/test_environment_sessions.py",
+        "result": "passed; one expected skip"
+      },
+      {
+        "command": "pytest -q tests/test_environment_rpc.py -k 'registered_checkout_continuation_binds_mutations_in_same_execution or registered_nested_worktree_drives_project_profile_selection or registered_checkout_selects_one_campaign_and_scoped_claims'",
+        "result": "3 passed"
+      },
+      {
+        "command": "ruff check src/mncs_control_mcp/environment_sessions.py tests/test_environment_sessions.py",
+        "result": "passed"
+      },
+      {
+        "command": "git diff --check",
+        "result": "passed"
+      }
+    ]
+  },
+  "readiness": {
+    "direct_nested_checkout_selection": "verified by unit regression for exact authenticated claim evidence",
+    "duplicate_same_checkout": "continues to return ambiguous",
+    "live_gateway_readback": "pending merged-source gateway revalidation",
+    "canonical_checkpoint": "pending delivery"
+  },
+  "limitations": [
+    "This change does not create, transfer, or expand claims; claims are consumed as read-only authenticated continuation evidence.",
+    "The live Environment gateway and canonical checkpoint are validated after merge and push."
+  ]
+}

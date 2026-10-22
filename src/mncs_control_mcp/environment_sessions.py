@@ -472,13 +472,69 @@ class EnvironmentService:
         checkout_matcher = getattr(
             getattr(pkg, "entry", None), "_working_checkout_matches_snapshot", None,
         )
+        claims_by_session: dict[str, list[dict[str, Any]]] = {}
 
-        def matches_working_checkout(snapshot: dict[str, Any]) -> bool:
+        def claim_matches_working_checkout(claim: dict[str, Any]) -> bool:
+            """Match a registered checkout to its exact live claim owner.
+
+            A campaign snapshot may still describe the repository root after
+            work moved to a registered nested worktree. In that case, the
+            authenticated Store claim for that exact checkout is stronger
+            continuation evidence than the stale selected-checkout projection.
+            Control has already verified the requested path against Git's
+            worktree registry before this selector is called.
+            """
+            if working_checkout is None:
+                return False
+            scope = claim.get("scope")
+            checkout_path = working_checkout.get("path")
+            scope_path = scope.get("checkout") if isinstance(scope, dict) else None
+            branch = working_checkout.get("branch")
+            if (
+                not isinstance(scope, dict)
+                or claim.get("repository") != repository
+                or scope.get("kind") != "worktree"
+                or scope.get("repository", repository) != repository
+                or not isinstance(checkout_path, str)
+                or not isinstance(scope_path, str)
+                or scope.get("branch") != branch
+            ):
+                return False
+            current_identity = working_checkout.get("checkout_identity")
+            scope_identity = scope.get("checkout_identity")
+            if (isinstance(current_identity, str)
+                    and isinstance(scope_identity, str)
+                    and current_identity != scope_identity):
+                return False
+            current_common = working_checkout.get("git_common_directory_identity")
+            scope_common = scope.get("git_common_directory_identity")
+            if (isinstance(current_common, str)
+                    and isinstance(scope_common, str)
+                    and current_common != scope_common):
+                return False
+            try:
+                current_path = Path(checkout_path)
+                claimed_path = Path(scope_path)
+                if current_path.is_symlink() or claimed_path.is_symlink():
+                    return False
+                return current_path.resolve(strict=True) == claimed_path.resolve(strict=True)
+            except (OSError, RuntimeError):
+                return False
+
+        def matches_working_checkout(
+            snapshot: dict[str, Any], session_id: str | None = None,
+        ) -> bool:
             if working_checkout is None:
                 return True
+            if (callable(checkout_matcher)
+                    and checkout_matcher(snapshot, working_checkout)):
+                return True
             return bool(
-                callable(checkout_matcher)
-                and checkout_matcher(snapshot, working_checkout)
+                isinstance(session_id, str)
+                and any(
+                    claim_matches_working_checkout(claim)
+                    for claim in claims_by_session.get(session_id, [])
+                )
             )
 
         def claim_overlaps_working_checkout(claim: dict[str, Any]) -> bool:
@@ -576,7 +632,6 @@ class EnvironmentService:
                     "canonical Environment session inventory exceeds the bounded lookup limit",
                     details={"session_count": len(session_ids), "limit": 10000},
                 )
-            claims_by_session: dict[str, list[dict[str, Any]]] = {}
             all_claims = store.read_claims()
             active_claims = pkg.claims.active_claims(all_claims)
             for claim in active_claims.values():
@@ -605,7 +660,7 @@ class EnvironmentService:
                 references_repository = self._snapshot_references_repository(
                     snapshot, repository, claims_by_session.get(session_id, [])
                 )
-                checkout_matches = matches_working_checkout(snapshot)
+                checkout_matches = matches_working_checkout(snapshot, session_id)
                 if snapshot.get("authenticated_principal_id") != self.authenticated_principal_id:
                     # Explicit campaign identities are globally unique and
                     # always preserve foreign-owner refusal. Project discovery
@@ -672,7 +727,9 @@ class EnvironmentService:
                         if isinstance(candidate_campaign, dict) else None
                     )
                     if (isinstance(candidate_identity, str)
-                            and matches_working_checkout(candidate_snapshot)
+                            and matches_working_checkout(
+                                candidate_snapshot, candidate_session_id,
+                            )
                             and self._snapshot_references_repository(
                                 candidate_snapshot, repository,
                                 claims_by_session.get(candidate_session_id, []),
@@ -690,7 +747,7 @@ class EnvironmentService:
                         continue
                     if (snapshot.get("authenticated_principal_id")
                             != self.authenticated_principal_id
-                            or not matches_working_checkout(snapshot)):
+                            or not matches_working_checkout(snapshot, session_id)):
                         continue
                     provenance = snapshot.get("provenance")
                     workspace = snapshot.get("workspace")
@@ -757,7 +814,9 @@ class EnvironmentService:
                         not isinstance(bound_snapshot, dict)
                         or bound_snapshot.get("authenticated_principal_id")
                         != self.authenticated_principal_id
-                        or not matches_working_checkout(bound_snapshot)
+                        or not matches_working_checkout(
+                            bound_snapshot, bound_session_id,
+                        )
                         or not isinstance(bound_campaign, dict)
                         or bound_campaign.get("identity") != binding.get("campaign_id")
                         or not isinstance(bound_provenance, dict)
@@ -892,7 +951,7 @@ class EnvironmentService:
                     matching = [
                         (session_id, snapshot)
                         for session_id, snapshot in matching
-                        if matches_working_checkout(snapshot)
+                        if matches_working_checkout(snapshot, session_id)
                     ]
                 if task_selector_projection is not None:
                     bound_session = task_selector_projection.get("session_id")
