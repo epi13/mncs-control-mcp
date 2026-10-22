@@ -548,6 +548,167 @@ def test_campaign_continuation_returns_project_scoped_duplicate_capsules(tmp_pat
     assert discovered["campaign_id"] == "campaign-1"
 
 
+def test_owner_scope_grant_links_only_its_exact_campaign_worktree(
+    tmp_path: Path,
+) -> None:
+    repository = "mncs-language"
+    config = _config(tmp_path)
+    repo_root = config.workspace_root / repository
+    repo_root.mkdir(parents=True)
+    service = EnvironmentService(config)
+    service.authenticated_principal_id = "principal-caller"
+
+    def checkout(name: str) -> dict[str, str]:
+        path = str(repo_root / ".worktrees" / name)
+        return {
+            "repository": repository,
+            "path": path,
+            "branch": f"campaign/{name}",
+            "head": (name[0] * 40),
+            "checkout_identity": f"checkout-{name}",
+            "git_common_directory_identity": f"common-{name}",
+        }
+
+    checkout_a = checkout("language-a")
+    checkout_b = checkout("language-b")
+
+    def grant(session_id: str, selected: dict[str, str], *, branch: str | None = None):
+        return {
+            "schema_version": "mncs.environment.authority-scope-grant/1",
+            "identity": f"scope-{session_id}",
+            "session_id": session_id,
+            "campaign_id": "cmp-multi-repository",
+            "repository": repository,
+            "scope": {"kind": "repository", "repository": repository},
+            "authorized_by_principal_id": "principal-caller",
+            "repository_identity": {
+                "path": selected["path"],
+                "branch": branch or selected["branch"],
+                "checkout_identity": selected["checkout_identity"],
+                "git_common_directory_identity": selected[
+                    "git_common_directory_identity"
+                ],
+                "head": selected["head"],
+            },
+        }
+
+    grants = {
+        "ses-language-a": [grant("ses-language-a", checkout_a)],
+        "ses-language-b": [grant("ses-language-b", checkout_b)],
+        # A same-campaign session with a branch mismatch must not become a
+        # continuation for checkout B merely because its repository matches.
+        "ses-language-forged": [grant(
+            "ses-language-forged", checkout_b, branch="campaign/other-branch",
+        )],
+    }
+    snapshots = {
+        session_id: {
+            "session_id": session_id,
+            "snapshot_sequence": 1,
+            "lifecycle": "active",
+            "authenticated_principal_id": "principal-caller",
+            "provenance": {"definition_id": "env-compiler"},
+            "workspace": {"root": str(config.workspace_root)},
+            "campaign": {
+                "identity": "cmp-multi-repository",
+                "work_intent": {
+                    "goal": "continue compiler and Language work",
+                    "repositories": ["mncs-compiler"],
+                },
+                "repository_refs": [],
+            },
+            "selected_checkouts": {},
+        }
+        for session_id in grants
+    }
+
+    class Store:
+        def list_sessions(self):
+            return list(snapshots)
+
+        def load_snapshot(self, session_id: str):
+            return snapshots.get(session_id)
+
+        def read_claims(self):
+            return []
+
+        def close(self):
+            pass
+
+    class Session:
+        def __init__(self, session_id: str):
+            self.session_id = session_id
+
+        def authority_scope_grants(self):
+            return grants[self.session_id]
+
+        def effective_authority(self):
+            return {
+                "writable": [repository],
+                "scope_grants": grants[self.session_id],
+            }
+
+        def context(self):
+            return {
+                "authority": {
+                    "writable": [repository],
+                    "scope_grants": grants[self.session_id],
+                },
+                "continuation": {"repositories": [], "evidence": []},
+            }
+
+    pkg = SimpleNamespace(
+        entry=SimpleNamespace(),
+        claims=SimpleNamespace(
+            active_claims=lambda _rows: {},
+            scopes_conflict=lambda *_args: None,
+        ),
+        sessions=SimpleNamespace(
+            Session=SimpleNamespace(open=lambda **kwargs: Session(kwargs["session_id"])),
+        ),
+    )
+    service._pkg = lambda: pkg
+    service._store = lambda _pkg: Store()
+    service._observe_project_checkout = lambda name: {
+        "status": "unknown", "repository": name,
+    }
+
+    selected_a = service.campaign_continuation(
+        repository, "cmp-multi-repository", working_checkout=checkout_a,
+    )
+    selected_b = service.campaign_continuation(
+        repository, "cmp-multi-repository", working_checkout=checkout_b,
+    )
+    discovered_a = service.campaign_continuation(
+        repository,
+        working_checkout=checkout_a,
+        definition_id="env-compiler",
+        workspace_root=str(config.workspace_root),
+    )
+
+    assert selected_a["status"] == "ready"
+    assert selected_a["continuations"][0]["session_id"] == "ses-language-a"
+    assert selected_a["continuations"][0]["project_reference"] == {
+        "status": "linked",
+        "basis": ["authenticated-scope-grant.exact-checkout"],
+    }
+    assert selected_a["continuations"][0]["selected_checkout"][
+        "checkout_identity"
+    ] == checkout_a["checkout_identity"]
+    assert selected_a["continuations"][0]["repositories"][0][
+        "scope_grant_identity"
+    ] == "scope-ses-language-a"
+    assert selected_b["status"] == "ready"
+    assert selected_b["continuations"][0]["session_id"] == "ses-language-b"
+    assert selected_b["continuations"][0]["project_reference"] == {
+        "status": "linked",
+        "basis": ["authenticated-scope-grant.exact-checkout"],
+    }
+    assert discovered_a["status"] == "ready"
+    assert discovered_a["campaign_id"] == "cmp-multi-repository"
+    assert discovered_a["continuations"][0]["session_id"] == "ses-language-a"
+
+
 def test_campaign_continuation_recovers_one_authenticated_nested_checkout(
     tmp_path: Path,
 ) -> None:
@@ -675,6 +836,7 @@ def test_campaign_continuation_recovers_one_authenticated_nested_checkout(
     }
     def continuation_capsule(
         _pkg, _store, session_id, snapshot, repository, _claims, _live,
+        *, working_checkout=None,
     ):
         return {
             "session_id": session_id,
@@ -976,7 +1138,10 @@ def test_campaign_continuation_surfaces_bounded_context_conflict_capsules(
     service._observe_project_checkout = lambda repository: {
         "status": "unknown", "repository": repository,
     }
-    def capsule(_pkg, _store, session_id, snapshot, _repository, _claims, _observation):
+    def capsule(
+        _pkg, _store, session_id, snapshot, _repository, _claims, _observation,
+        *, working_checkout=None,
+    ):
         return {
             "session_id": session_id,
             "definition_id": snapshot["provenance"]["definition_id"],

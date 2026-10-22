@@ -4164,13 +4164,17 @@ class EnvironmentRPCServer:
                         "exit_code": 0,
                     }}
         cli_source = self.environment_service.environment_path
+        rights_source = (
+            getattr(self.environment_service, "rights_provenance_path", None)
+            or cli_source
+        )
         program = "from mncs_env.cli import main; raise SystemExit(main())"
         process_env = {
             "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
             "HOME": str(Path.home()),
             "LANG": os.environ.get("LANG", "C.UTF-8"),
             "PYTHONPATH": _environment_pythonpath(
-                cli_source, self.environment_service.rights_provenance_path
+                cli_source, rights_source
             ),
             "MNCS_ENV_AUTH_PRINCIPAL_ID": record.principal_id,
             "MNCS_ENV_RPC_REQUEST_ID": request_id,

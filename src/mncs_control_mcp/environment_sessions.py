@@ -496,8 +496,9 @@ class EnvironmentService:
         When a task identity is supplied, the Environment-owned selector
         validator resolves only an existing binding for the exact principal,
         definition, and workspace. The repository selector must already occur
-        in a campaign's intent, checkout facts, repository references, or live
-        claim; a selector never grants ownership or adopts a campaign.
+        in a campaign's intent, checkout facts, repository references, live
+        claim, or exact authenticated scope grant; a selector never grants
+        ownership or adopts a campaign.
         """
         if (campaign_id is not None
                 and (not isinstance(campaign_id, str) or not campaign_id.strip()
@@ -515,11 +516,33 @@ class EnvironmentService:
             raise ControlError("ENVIRONMENT_AUTHORITY_DENIED",
                                "campaign lookup requires a Control-authenticated principal")
         repository = self._validate_repository_selector(repository)
+        requested_campaign_id = campaign_id
         pkg = self._pkg()
         checkout_matcher = getattr(
             getattr(pkg, "entry", None), "_working_checkout_matches_snapshot", None,
         )
         claims_by_session: dict[str, list[dict[str, Any]]] = {}
+
+        def scope_grant_context_matches(snapshot: dict[str, Any]) -> bool:
+            campaign = snapshot.get("campaign")
+            campaign_identity = campaign.get("identity") \
+                if isinstance(campaign, dict) else None
+            if requested_campaign_id is not None:
+                if campaign_identity != requested_campaign_id:
+                    return False
+            elif not (isinstance(definition_id, str) and definition_id
+                      and isinstance(workspace_root, str) and workspace_root):
+                # Discovery from a repository name alone is too weak to
+                # consult project-scope grants across unrelated campaigns.
+                return False
+            provenance = snapshot.get("provenance")
+            provenance = provenance if isinstance(provenance, dict) else {}
+            workspace = snapshot.get("workspace")
+            workspace = workspace if isinstance(workspace, dict) else {}
+            return bool(
+                (not definition_id or provenance.get("definition_id") == definition_id)
+                and (not workspace_root or workspace.get("root") == workspace_root)
+            )
 
         def matches_working_checkout(
             snapshot: dict[str, Any], session_id: str | None = None,
@@ -536,6 +559,13 @@ class EnvironmentService:
                         claim, working_checkout, repository, session_id=session_id,
                     )
                     for claim in claims_by_session.get(session_id, [])
+                )
+            ) or bool(
+                isinstance(session_id, str)
+                and scope_grant_context_matches(snapshot)
+                and self._scope_grant_matches_checkout(
+                    snapshot, repository,
+                    scope_grants_for_session(session_id), working_checkout,
                 )
             )
 
@@ -563,6 +593,76 @@ class EnvironmentService:
 
         store = self._store(pkg)
         try:
+            scope_grants_cache: dict[str, list[dict[str, Any]]] = {}
+            scope_grants_lookup_count = 0
+
+            def scope_grants_for_session(session_id: str) -> list[dict[str, Any]]:
+                nonlocal scope_grants_lookup_count
+                if session_id in scope_grants_cache:
+                    return scope_grants_cache[session_id]
+                scope_grants_lookup_count += 1
+                if scope_grants_lookup_count > 128:
+                    raise ControlError(
+                        "ENVIRONMENT_LOOKUP_LIMIT",
+                        "scope-grant continuation search exceeds the bounded same-context session limit",
+                        details={"session_count": scope_grants_lookup_count, "limit": 128},
+                    )
+                session_type = getattr(pkg.sessions, "Session", None)
+                opener = getattr(session_type, "open", None)
+                if not callable(opener):
+                    records = []
+                else:
+                    session = opener(
+                        state_dir=Path("."), session_id=session_id,
+                        backend="store", store=store,
+                    )
+                    authority_reader = getattr(session, "effective_authority", None)
+                    if callable(authority_reader):
+                        authority = authority_reader()
+                        if (not isinstance(authority, dict)
+                                or repository not in authority.get("writable", [])):
+                            records = []
+                        else:
+                            records = authority.get("scope_grants", [])
+                    else:
+                        grant_reader = getattr(session, "authority_scope_grants", None)
+                        if callable(grant_reader):
+                            records = grant_reader()
+                        else:
+                            context = session.context()
+                            authority = context.get("authority", {})
+                            if (isinstance(authority, dict)
+                                    and repository in authority.get("writable", [])):
+                                records = authority.get("scope_grants", [])
+                            else:
+                                records = []
+                valid = [record for record in records
+                         if isinstance(record, dict)] if isinstance(records, list) else []
+                scope_grants_cache[session_id] = valid
+                return valid
+
+            def references_repository(
+                snapshot: dict[str, Any], session_id: str,
+            ) -> bool:
+                session_claims = claims_by_session.get(session_id, [])
+                if self._snapshot_references_repository(
+                    snapshot, repository, session_claims,
+                ):
+                    return True
+                grants = (
+                    scope_grants_for_session(session_id)
+                    if scope_grant_context_matches(snapshot)
+                    and snapshot.get("authenticated_principal_id")
+                    == self.authenticated_principal_id
+                    and working_checkout is not None
+                    else []
+                )
+                return self._snapshot_references_repository(
+                    snapshot, repository, session_claims,
+                    scope_grants=grants,
+                    working_checkout=working_checkout,
+                )
+
             # A fresh project entry may begin at the repository root even
             # though its authenticated campaign selected a registered nested
             # worktree. Recover that checkout only from the exact campaign,
@@ -659,9 +759,7 @@ class EnvironmentService:
                 lifecycle = snapshot.get("lifecycle")
                 if lifecycle in _TERMINAL_LIFECYCLES:
                     continue
-                references_repository = self._snapshot_references_repository(
-                    snapshot, repository, claims_by_session.get(session_id, [])
-                )
+                references_project = references_repository(snapshot, session_id)
                 checkout_matches = matches_working_checkout(snapshot, session_id)
                 if snapshot.get("authenticated_principal_id") != self.authenticated_principal_id:
                     # Explicit campaign identities are globally unique and
@@ -677,12 +775,12 @@ class EnvironmentService:
                     )
                     foreign_owner = (
                         foreign_owner or campaign_id is not None
-                        or (references_repository and checkout_matches)
+                        or (references_project and checkout_matches)
                         or overlapping_claim
                     )
                     continue
                 owned_by_campaign.setdefault(identity, []).append((session_id, snapshot))
-                if references_repository and checkout_matches:
+                if references_project and checkout_matches:
                     project_campaigns.add(identity)
 
             foreign_owner = foreign_owner or bool(project_campaigns & foreign_campaigns)
@@ -732,9 +830,8 @@ class EnvironmentService:
                             and matches_working_checkout(
                                 candidate_snapshot, candidate_session_id,
                             )
-                            and self._snapshot_references_repository(
-                                candidate_snapshot, repository,
-                                claims_by_session.get(candidate_session_id, []),
+                            and references_repository(
+                                candidate_snapshot, candidate_session_id,
                             )):
                         relevant_campaigns.add(candidate_identity)
                 if campaign_id is not None:
@@ -836,9 +933,8 @@ class EnvironmentService:
                         "definition_id": definition_id,
                         "workspace_root": workspace_root,
                         "lifecycle": bound_snapshot.get("lifecycle"),
-                        "references_repository": self._snapshot_references_repository(
-                            bound_snapshot, repository,
-                            claims_by_session.get(str(bound_session_id), []),
+                        "references_repository": references_repository(
+                            bound_snapshot, str(bound_session_id),
                         ),
                     })
 
@@ -965,9 +1061,7 @@ class EnvironmentService:
                         ]
                 project_sessions = [
                     (session_id, snapshot) for session_id, snapshot in matching
-                    if self._snapshot_references_repository(
-                        snapshot, repository, claims_by_session.get(session_id, [])
-                    )
+                    if references_repository(snapshot, session_id)
                 ]
                 if not project_sessions:
                     continue
@@ -1025,6 +1119,7 @@ class EnvironmentService:
                         self._continuation_capsule(
                             pkg, store, session_id, snapshot, repository,
                             claims_by_session.get(session_id, []), live_observation,
+                            working_checkout=working_checkout,
                         )
                         for session_id, snapshot in ordered_matching[:16]
                     ]
@@ -1069,6 +1164,7 @@ class EnvironmentService:
                         pkg, store, session_id, snapshot, repository,
                         claims_by_session.get(session_id, []),
                         live_observation,
+                        working_checkout=working_checkout,
                     )
                     # Once the campaign is proven to include this project,
                     # retain same-principal duplicates even if one projection
@@ -1154,14 +1250,20 @@ class EnvironmentService:
     @staticmethod
     def _snapshot_references_repository(
         snapshot: dict[str, Any], repository: str, claims: list[dict[str, Any]],
+        *, scope_grants: list[dict[str, Any]] | None = None,
+        working_checkout: dict[str, Any] | None = None,
     ) -> bool:
         return bool(EnvironmentService._snapshot_repository_reference_basis(
             snapshot, repository, claims,
+            scope_grants=scope_grants,
+            working_checkout=working_checkout,
         ))
 
     @staticmethod
     def _snapshot_repository_reference_basis(
         snapshot: dict[str, Any], repository: str, claims: list[dict[str, Any]],
+        *, scope_grants: list[dict[str, Any]] | None = None,
+        working_checkout: dict[str, Any] | None = None,
     ) -> tuple[str, ...]:
         """Name the persisted facts that link one session to a project.
 
@@ -1192,7 +1294,68 @@ class EnvironmentService:
                 basis.append(label)
         if any(claim.get("repository") == repository for claim in claims):
             basis.append("active_claim.repository")
+        if EnvironmentService._scope_grant_matches_checkout(
+            snapshot, repository, scope_grants or [], working_checkout,
+        ):
+            basis.append("authenticated-scope-grant.exact-checkout")
         return tuple(basis)
+
+    @staticmethod
+    def _scope_grant_matches_checkout(
+        snapshot: dict[str, Any], repository: str,
+        scope_grants: list[dict[str, Any]],
+        working_checkout: dict[str, Any] | None,
+    ) -> bool:
+        """Match owner-admitted scope to the exact registered checkout selected now.
+
+        A repository scope grant is both mutation authority and durable evidence
+        that the campaign intentionally includes this repository. It may link a
+        project continuation only when its immutable checkout identity matches
+        the checkout Environment selected for this request.
+        """
+        if (not isinstance(working_checkout, dict)
+                or working_checkout.get("repository") != repository):
+            return False
+        campaign = snapshot.get("campaign")
+        campaign_id = campaign.get("identity") if isinstance(campaign, dict) else None
+        session_id = snapshot.get("session_id")
+        principal_id = snapshot.get("authenticated_principal_id")
+        selected_path = working_checkout.get("path")
+        selected_branch = working_checkout.get("branch")
+        selected_checkout_id = working_checkout.get("checkout_identity")
+        selected_common_id = working_checkout.get("git_common_directory_identity")
+        if (not isinstance(campaign_id, str) or not isinstance(session_id, str)
+                or not isinstance(principal_id, str)
+                or not isinstance(selected_path, str) or not selected_path
+                or not isinstance(selected_branch, str) or not selected_branch
+                or not isinstance(selected_checkout_id, str) or not selected_checkout_id
+                or not isinstance(selected_common_id, str) or not selected_common_id):
+            return False
+        selected_path = os.path.abspath(selected_path)
+        for grant in scope_grants:
+            if (not isinstance(grant, dict)
+                    or grant.get("schema_version") != "mncs.environment.authority-scope-grant/1"
+                    or grant.get("campaign_id") != campaign_id
+                    or grant.get("session_id") != session_id
+                    or grant.get("repository") != repository
+                    or grant.get("authorized_by_principal_id") != principal_id):
+                continue
+            scope = grant.get("scope")
+            identity = grant.get("repository_identity")
+            if (not isinstance(scope, dict)
+                    or scope.get("kind") != "repository"
+                    or scope.get("repository") != repository
+                    or not isinstance(identity, dict)):
+                continue
+            grant_path = identity.get("path")
+            if (not isinstance(grant_path, str) or not grant_path
+                    or os.path.abspath(grant_path) != selected_path
+                    or identity.get("branch") != selected_branch
+                    or identity.get("checkout_identity") != selected_checkout_id
+                    or identity.get("git_common_directory_identity") != selected_common_id):
+                continue
+            return True
+        return False
 
     def _observe_project_checkout(self, repository: str) -> dict[str, Any]:
         """Add a fresh, bounded Environment-owned Git observation to the capsule.
@@ -1379,11 +1542,18 @@ class EnvironmentService:
         pkg: Any, store: Any, session_id: str, snapshot: dict[str, Any],
         repository: str, claims: list[dict[str, Any]],
         live_observation: dict[str, Any],
+        *, working_checkout: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         session = pkg.sessions.Session.open(
             state_dir=Path("."), session_id=session_id, backend="store", store=store,
         )
         context = session.context()
+        authority = context.get("authority", {})
+        authority = authority if isinstance(authority, dict) else {}
+        scope_grants = authority.get("scope_grants", [])
+        scope_grants = scope_grants if isinstance(scope_grants, list) else []
+        if repository not in authority.get("writable", []):
+            scope_grants = []
         continuation = context.get("continuation", {})
         continuation = continuation if isinstance(continuation, dict) else {}
         campaign = snapshot.get("campaign")
@@ -1462,8 +1632,44 @@ class EnvironmentService:
             }
         else:
             selected_checkout = None
+        exact_scope_grants = [
+            grant for grant in scope_grants
+            if self._scope_grant_matches_checkout(
+                snapshot, repository, [grant], working_checkout,
+            )
+        ]
+        if len(exact_scope_grants) == 1:
+            grant = exact_scope_grants[0]
+            grant_identity = grant.get("repository_identity")
+            if isinstance(grant_identity, dict):
+                # The Environment RPC also validates the current Git worktree
+                # before binding this capsule. Project selection must use the
+                # exact owner-admitted checkout identity, not a stale checkout
+                # projection for another repository or worktree.
+                selected_checkout = {
+                    "repository": repository,
+                    **{key: grant_identity[key] for key in (
+                        "path", "checkout_identity",
+                        "git_common_directory_identity", "branch", "head",
+                    ) if key in grant_identity},
+                }
+                selected_references = [{
+                    "repository": repository,
+                    "observed_path": grant_identity.get("path"),
+                    "checkout_identity": grant_identity.get("checkout_identity"),
+                    "git_common_directory_identity": grant_identity.get(
+                        "git_common_directory_identity"
+                    ),
+                    "branch": grant_identity.get("branch"),
+                    "head": grant_identity.get("head"),
+                    "clean": grant_identity.get("clean"),
+                    "observation": "authenticated_scope_grant",
+                    "scope_grant_identity": grant.get("identity"),
+                }]
         project_reference_basis = self._snapshot_repository_reference_basis(
             snapshot, repository, claims,
+            scope_grants=scope_grants,
+            working_checkout=working_checkout,
         )
         intent_repositories = intent.get("repositories", [])
         intent_project_scope = (
