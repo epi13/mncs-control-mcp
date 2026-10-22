@@ -277,6 +277,85 @@ def test_scope_grant_rpc_requires_exact_campaign_approval_and_selected_project_g
     assert raised.value.code == "ENVIRONMENT_WORKSPACE_ESCAPE"
 
 
+def test_scope_grant_forwards_only_control_verified_registered_worktree(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "projects"
+    compiler = workspace / "mncs-compiler"
+    environment = workspace / "mncs-environment"
+    nested = environment / ".worktrees" / "compiler-scope" / "mncs-environment"
+    compiler.mkdir(parents=True)
+    nested.mkdir(parents=True)
+    (compiler / ".git").mkdir()
+    (environment / ".git").mkdir()
+    approval = "user-approval:compiler-environment-scope"
+    checkout_facts = {
+        "repository": "mncs-environment",
+        "path": str(nested.resolve()),
+        "workspace_root": str(workspace.resolve()),
+        "repository_root": str(environment.resolve()),
+        "git_common_directory": str((environment / ".git").resolve()),
+        "git_common_directory_identity": "git-common-environment",
+        "checkout_identity": "checkout-environment-campaign",
+        "observed_path": "mncs-environment/.worktrees/compiler-scope/mncs-environment",
+        "branch": "campaign/compiler-scope",
+        "head": "a" * 40,
+    }
+    verify = mock.Mock(return_value=checkout_facts)
+    server = EnvironmentRPCServer(
+        ControlConfig(
+            workspace_root=workspace,
+            sandbox_home=tmp_path / "home",
+            environment_rpc_socket=tmp_path / "rpc" / "environment.sock",
+            environment_scope_grants={
+                "cmp_scope_test": {"mncs-environment": approval},
+            },
+        ),
+        environment_service=SimpleNamespace(
+            state_dir=tmp_path / "state",
+            _pkg=lambda: SimpleNamespace(
+                workspace=SimpleNamespace(verify_registered_checkout=verify),
+            ),
+        ),
+        policy=object(),
+    )
+    grant = _GrantRecord(
+        grant_id="scope-grant-nested-checkout",
+        principal_id="principal-test",
+        host_root=compiler,
+        sandbox_root="/workspace/mncs-compiler",
+        scope="project",
+        uid=os.getuid(),
+        expires_at=time.monotonic() + 60,
+        token_file=tmp_path / "grant",
+        bound_session_id="ses_scope_test",
+    )
+    args = [
+        "scope-grant", "ses_scope_test",
+        "--campaign-id", "cmp_scope_test",
+        "--repository", "mncs-environment",
+        "--expected-authority-revision", "b" * 64,
+        "--approval-reference", approval,
+        "--checkout", ".worktrees/compiler-scope/mncs-environment",
+    ]
+
+    translated = server._translate_argv(args, compiler, grant)
+
+    verify.assert_called_once_with(
+        nested.resolve(), repository="mncs-environment",
+        workspace_root=workspace.resolve(), expected_repository_root=environment.resolve(),
+    )
+    assert translated[:len(args)] == args
+    assert translated[-2] == "--owner-authorized-checkout-json"
+    assert json.loads(translated[-1]) == checkout_facts
+
+    with pytest.raises(ControlError) as raised:
+        server._translate_argv(
+            args[:-2] + ["--checkout", "../mncs-compiler"], compiler, grant,
+        )
+    assert raised.value.code == "ENVIRONMENT_WORKSPACE_ESCAPE"
+
+
 def test_claim_recovery_rpc_requires_exact_owner_approval_generation_and_session(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

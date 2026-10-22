@@ -181,7 +181,7 @@ def _build_argv(
         },
         "scope_grant": {
             "session_id", "campaign_id", "repository",
-            "expected_authority_revision", "approval_reference",
+            "expected_authority_revision", "approval_reference", "checkout_path",
         },
         "handoff": {"session_id", "to", "notes", "blockers", "next"},
         "complete": {"session_id", "outcome", "retry_pending", "summary"},
@@ -303,13 +303,26 @@ def _build_argv(
         )
         if not approval_reference.strip():
             raise ValueError("approval_reference must be nonempty text")
-        return [
+        argv = [
             "scope-grant", session_id,
             "--campaign-id", campaign_id,
             "--repository", repository,
             "--expected-authority-revision", revision,
             "--approval-reference", approval_reference,
-        ], True
+        ]
+        if "checkout_path" in values:
+            checkout_path = _string(
+                values["checkout_path"], "checkout_path", max_length=1024,
+            )
+            if (not checkout_path or PurePosixPath(checkout_path).is_absolute()
+                    or "\\" in checkout_path
+                    or any(part in {"", ".", ".."}
+                           for part in checkout_path.split("/"))):
+                raise ValueError(
+                    "checkout_path must stay inside the configured repository"
+                )
+            argv.extend(["--checkout", checkout_path])
+        return argv, True
     if operation == "health":
         argv = ["health", session_id]
         if values.get("live") is True:

@@ -2299,6 +2299,7 @@ class EnvironmentRPCServer:
             "--campaign-id", "--repository", "--expected-authority-revision",
             "--approval-reference",
         }
+        optional = {"--checkout"}
         values: dict[str, str] = {}
         index = 2  # command plus the positional Environment session identity
         if len(argv) < 2 or not re.fullmatch(r"ses_[A-Za-z0-9_-]{1,120}", argv[1]):
@@ -2310,7 +2311,7 @@ class EnvironmentRPCServer:
             item = argv[index]
             if item.startswith("--") and "=" in item:
                 option, value = item.split("=", 1)
-            elif item in required and index + 1 < len(argv):
+            elif item in required | optional and index + 1 < len(argv):
                 option, value = item, argv[index + 1]
                 index += 1
             else:
@@ -2318,14 +2319,15 @@ class EnvironmentRPCServer:
                     "ENVIRONMENT_RPC_INVALID_REQUEST",
                     "scope admission arguments are incomplete or contain unsupported options",
                 )
-            if option not in required or option in values or not value or "\x00" in value:
+            if (option not in required | optional or option in values
+                    or not value or "\x00" in value):
                 raise ControlError(
                     "ENVIRONMENT_RPC_INVALID_REQUEST",
                     "scope admission arguments are invalid or repeated",
                 )
             values[option] = value
             index += 1
-        if set(values) != required:
+        if not required.issubset(values):
             raise ControlError(
                 "ENVIRONMENT_RPC_INVALID_REQUEST",
                 "scope admission requires campaign, repository, authority revision, and approval reference",
@@ -2393,6 +2395,61 @@ class EnvironmentRPCServer:
                 "ENVIRONMENT_WORKSPACE_ESCAPE",
                 "scope admission target must be an immediate configured Git checkout",
             )
+        if "--checkout" in values:
+            relative_checkout = values["--checkout"]
+            if (Path(relative_checkout).is_absolute()
+                    or "\\" in relative_checkout
+                    or any(part in {"", ".", ".."}
+                           for part in relative_checkout.split("/"))):
+                raise ControlError(
+                    "ENVIRONMENT_WORKSPACE_ESCAPE",
+                    "scope admission checkout must be a safe repository-relative path",
+                )
+            requested_checkout = resolved_target.joinpath(*relative_checkout.split("/"))
+            absolute_checkout = Path(os.path.abspath(requested_checkout))
+            try:
+                resolved_checkout = requested_checkout.resolve(strict=True)
+                resolved_checkout.relative_to(resolved_target)
+            except (OSError, ValueError) as error:
+                raise ControlError(
+                    "ENVIRONMENT_WORKSPACE_ESCAPE",
+                    "scope admission checkout must remain inside its configured repository",
+                ) from error
+            if absolute_checkout != resolved_checkout:
+                raise ControlError(
+                    "ENVIRONMENT_WORKSPACE_ESCAPE",
+                    "scope admission checkout path cannot traverse a symbolic link",
+                )
+            package_loader = getattr(self.environment_service, "_pkg", None)
+            package = package_loader() if callable(package_loader) else None
+            workspace_module = getattr(package, "workspace", None)
+            verify_registered = getattr(
+                workspace_module, "verify_registered_checkout", None,
+            )
+            if not callable(verify_registered):
+                raise ControlError(
+                    "ENVIRONMENT_WORKSPACE_UNKNOWN",
+                    "registered-worktree verification is unavailable for scope admission",
+                )
+            try:
+                checkout_facts = verify_registered(
+                    resolved_checkout,
+                    repository=repository_name,
+                    workspace_root=workspace_root,
+                    expected_repository_root=resolved_target,
+                )
+            except Exception as error:
+                raise ControlError(
+                    "ENVIRONMENT_WORKSPACE_UNKNOWN",
+                    "scope admission checkout is not the configured repository's registered MNCS worktree",
+                    details={"repository": repository_name,
+                             "path": str(resolved_checkout)},
+                ) from error
+            encoded_facts = json.dumps(
+                checkout_facts, ensure_ascii=False, sort_keys=True,
+                separators=(",", ":"),
+            )
+            argv.extend(["--owner-authorized-checkout-json", encoded_facts])
 
     def _authorize_session(self, session_id: str, principal_id: str) -> None:
         pkg = self.environment_service._pkg()

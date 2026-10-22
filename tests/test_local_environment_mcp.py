@@ -78,12 +78,42 @@ def test_scope_grant_maps_only_the_owner_checked_scope_admission_contract() -> N
         "--approval-reference", "user-authorization:environment-integration",
     ]
 
+    checkout_argv, _selected = _build_argv(
+        "scope_grant",
+        {
+            "campaign_id": "cmp_selected",
+            "repository": "mncs-environment",
+            "expected_authority_revision": revision,
+            "approval_reference": "user-authorization:environment-integration",
+            "checkout_path": ".worktrees/compiler/mncs-environment",
+        },
+        context,
+        "mncs-compiler",
+    )
+    assert checkout_argv[-2:] == [
+        "--checkout", ".worktrees/compiler/mncs-environment",
+    ]
+
     with pytest.raises(ValueError, match="revision"):
         _build_argv(
             "scope_grant",
             {"campaign_id": "cmp_selected", "repository": "mncs-environment",
              "expected_authority_revision": "stale",
              "approval_reference": "user-authorization:environment-integration"},
+            context,
+            "mncs-compiler",
+        )
+
+    with pytest.raises(ValueError, match="inside the configured repository"):
+        _build_argv(
+            "scope_grant",
+            {
+                "campaign_id": "cmp_selected",
+                "repository": "mncs-environment",
+                "expected_authority_revision": revision,
+                "approval_reference": "user-authorization:environment-integration",
+                "checkout_path": "../outside",
+            },
             context,
             "mncs-compiler",
         )
