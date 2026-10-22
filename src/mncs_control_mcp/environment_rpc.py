@@ -2449,6 +2449,19 @@ class EnvironmentRPCServer:
                 checkout_facts, ensure_ascii=False, sort_keys=True,
                 separators=(",", ":"),
             )
+            forwarded: list[str] = []
+            argument_index = 0
+            while argument_index < len(argv):
+                item = argv[argument_index]
+                if item == "--checkout":
+                    argument_index += 2
+                    continue
+                if item.startswith("--checkout="):
+                    argument_index += 1
+                    continue
+                forwarded.append(item)
+                argument_index += 1
+            argv[:] = forwarded
             argv.extend(["--owner-authorized-checkout-json", encoded_facts])
 
     def _authorize_session(self, session_id: str, principal_id: str) -> None:

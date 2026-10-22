@@ -345,7 +345,8 @@ def test_scope_grant_forwards_only_control_verified_registered_worktree(
         nested.resolve(), repository="mncs-environment",
         workspace_root=workspace.resolve(), expected_repository_root=environment.resolve(),
     )
-    assert translated[:len(args)] == args
+    assert translated[:len(args) - 2] == args[:-2]
+    assert "--checkout" not in translated
     assert translated[-2] == "--owner-authorized-checkout-json"
     assert json.loads(translated[-1]) == checkout_facts
 
