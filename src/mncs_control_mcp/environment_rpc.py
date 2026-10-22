@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any
 
 from .errors import ControlError
+from .native_application_contract import canonical_native_application_call
 
 MAX_REQUEST_BYTES = 256 * 1024
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
@@ -1757,17 +1758,8 @@ class EnvironmentRPCServer:
         if len(encoded_call.encode("utf-8")) <= 32768:
             try:
                 call = json.loads(encoded_call)
-                canonical = json.dumps(
-                    call, ensure_ascii=False, sort_keys=True,
-                    separators=(",", ":"), allow_nan=False,
-                )
-                canonical_call = (
-                    isinstance(call, dict)
-                    and set(call) == {"arguments"}
-                    and isinstance(call.get("arguments"), list)
-                    and len(call["arguments"]) <= 32
-                    and canonical == encoded_call
-                )
+                canonical = canonical_native_application_call(call)
+                canonical_call = canonical == encoded_call
             except (TypeError, ValueError, UnicodeDecodeError, json.JSONDecodeError):
                 canonical_call = False
         allowed = (

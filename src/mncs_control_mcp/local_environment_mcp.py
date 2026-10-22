@@ -14,6 +14,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from .config import load_config
+from .native_application_contract import canonical_native_application_call
 
 MAX_FRAME = 256 * 1024
 # The largest artifact-read result is a 1 MiB file encoded as base64 plus
@@ -269,42 +270,10 @@ def _build_argv(
                     or not re.fullmatch(r"cap_[0-9a-f]{16}", artifact["binding_id"])
                     or artifact.get("path") != "native-application-build.json"):
                 raise ValueError("Forge execution requires the exact Compiler application-build Store artifact")
-            call = values.get("call")
-            if (not isinstance(call, dict)
-                    or set(call) not in ({"arguments"}, {"arguments", "capability_providers"})
-                    or not isinstance(call.get("arguments"), list)
-                    or len(call["arguments"]) > 32):
-                raise ValueError("Forge execution call must contain a bounded typed argument array")
-            providers = call.get("capability_providers", [])
-            if not isinstance(providers, list) or len(providers) > 1:
-                raise ValueError("Forge execution call accepts at most one bounded capability provider")
-            for provider in providers:
-                if (not isinstance(provider, dict)
-                        or set(provider) != {
-                            "schema_version", "capability_identity", "input_schema",
-                            "input_value", "output_schema",
-                        }
-                        or provider.get("schema_version") != "mncs.forge.structured-file-capability/1"
-                        or not isinstance(provider.get("capability_identity"), str)
-                        or not provider["capability_identity"].strip()
-                        or len(provider["capability_identity"]) > 1024
-                        or not isinstance(provider.get("input_schema"), str)
-                        or not provider["input_schema"].strip()
-                        or len(provider["input_schema"]) > 128
-                        or not isinstance(provider.get("output_schema"), str)
-                        or not provider["output_schema"].strip()
-                        or len(provider["output_schema"]) > 128
-                        or not isinstance(provider.get("input_value"), dict)):
-                    raise ValueError("Forge structured-file capability provider is malformed")
             try:
-                encoded_call = json.dumps(
-                    call, ensure_ascii=False, sort_keys=True,
-                    separators=(",", ":"), allow_nan=False,
-                )
-            except (TypeError, ValueError) as error:
-                raise ValueError("Forge execution call must be bounded JSON data") from error
-            if len(encoded_call.encode("utf-8")) > 32768:
-                raise ValueError("Forge execution call exceeds the 32 KiB input bound")
+                encoded_call = canonical_native_application_call(values.get("call"))
+            except ValueError as error:
+                raise ValueError(f"Forge execution call is invalid: {error}") from error
             return [
                 "invoke", session_id, capability,
                 "--input-artifact", artifact["name"], artifact["capability"],

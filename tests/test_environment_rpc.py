@@ -4399,6 +4399,31 @@ def test_environment_project_rpc_admits_typed_native_application_flow(
     assert executed["ok"] is True
     assert calls[1][0][-len(execution_argv):] == execution_argv
 
+    structured_provider = {
+        "schema_version": "mncs.forge.structured-file-capability/1",
+        "capability_identity": (
+            "mncs:0.2:capability:mncs.test.digest::digest_app::test_artifact"
+        ),
+        "input_schema": "mncs.test.digest-request/1",
+        "input_value": {"schema_version": "mncs.test.digest-request/1", "artifact": "request"},
+        "output_schema": "mncs.test.digest/1",
+    }
+    call_with_provider = {
+        "arguments": json.loads(typed_call)["arguments"],
+        "capability_providers": [structured_provider],
+    }
+    execution_with_provider_argv = [
+        *execution_argv[:-1],
+        json.dumps(call_with_provider, sort_keys=True, separators=(",", ":")),
+    ]
+    executed_with_provider = server.dispatch({
+        **base,
+        "request_id": "req_gatec_application_execution_with_capability",
+        "argv": execution_with_provider_argv,
+    }, peer_uid=0)
+    assert executed_with_provider["ok"] is True
+    assert calls[2][0][-len(execution_with_provider_argv):] == execution_with_provider_argv
+
     for index, invalid_argv in enumerate((
         [*build_argv, "--timeout-seconds", "900"],
         [*execution_argv[:-2], "--call-json", '{"callable":"arbitrary"}'],
@@ -4407,6 +4432,22 @@ def test_environment_project_rpc_admits_typed_native_application_flow(
          "--input-artifact", "other", "mncs-compiler:native-application-build",
          "cap_0123456789abcdef", "native-application-build.json", "--",
          "--call-json", '{"arguments":{}}'],
+        [
+            *execution_argv[:-1],
+            json.dumps({**call_with_provider,
+                        "capability_providers": [structured_provider, structured_provider]},
+                       sort_keys=True, separators=(",", ":")),
+        ],
+        [
+            *execution_argv[:-1],
+            json.dumps({
+                **call_with_provider,
+                "capability_providers": [{
+                    **structured_provider,
+                    "schema_version": "mncs.forge.structured-file-capability/0",
+                }],
+            }, sort_keys=True, separators=(",", ":")),
+        ],
     )):
         rejected = server.dispatch({
             **base,
@@ -4414,7 +4455,7 @@ def test_environment_project_rpc_admits_typed_native_application_flow(
             "argv": invalid_argv,
         }, peer_uid=0)
         assert rejected["ok"] is False
-    assert len(calls) == 2
+    assert len(calls) == 3
 
 
 def test_compiler_project_rpc_admits_only_its_typed_native_application_build(
