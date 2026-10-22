@@ -2376,7 +2376,7 @@ class EnvironmentRPCServer:
             "--campaign-id", "--repository", "--expected-authority-revision",
             "--approval-reference",
         }
-        optional = {"--checkout"}
+        optional = {"--checkout", "--workspace-checkout"}
         values: dict[str, str] = {}
         index = 2  # command plus the positional Environment session identity
         if len(argv) < 2 or not re.fullmatch(r"ses_[A-Za-z0-9_-]{1,120}", argv[1]):
@@ -2408,6 +2408,11 @@ class EnvironmentRPCServer:
             raise ControlError(
                 "ENVIRONMENT_RPC_INVALID_REQUEST",
                 "scope admission requires campaign, repository, authority revision, and approval reference",
+            )
+        if "--checkout" in values and "--workspace-checkout" in values:
+            raise ControlError(
+                "ENVIRONMENT_RPC_INVALID_REQUEST",
+                "scope admission accepts only one checkout selector",
             )
 
         workspace_root = Path(self.config.workspace_root).expanduser().resolve(strict=True)
@@ -2472,25 +2477,33 @@ class EnvironmentRPCServer:
                 "ENVIRONMENT_WORKSPACE_ESCAPE",
                 "scope admission target must be an immediate configured Git checkout",
             )
-        if "--checkout" in values:
-            relative_checkout = values["--checkout"]
+        checkout_option = (
+            "--workspace-checkout" if "--workspace-checkout" in values
+            else "--checkout" if "--checkout" in values else None
+        )
+        if checkout_option is not None:
+            relative_checkout = values[checkout_option]
             if (Path(relative_checkout).is_absolute()
                     or "\\" in relative_checkout
                     or any(part in {"", ".", ".."}
                            for part in relative_checkout.split("/"))):
                 raise ControlError(
                     "ENVIRONMENT_WORKSPACE_ESCAPE",
-                    "scope admission checkout must be a safe repository-relative path",
+                    "scope admission checkout must be a safe workspace-relative path",
                 )
-            requested_checkout = resolved_target.joinpath(*relative_checkout.split("/"))
+            checkout_root = (
+                workspace_root if checkout_option == "--workspace-checkout"
+                else resolved_target
+            )
+            requested_checkout = checkout_root.joinpath(*relative_checkout.split("/"))
             absolute_checkout = Path(os.path.abspath(requested_checkout))
             try:
                 resolved_checkout = requested_checkout.resolve(strict=True)
-                resolved_checkout.relative_to(resolved_target)
+                resolved_checkout.relative_to(checkout_root)
             except (OSError, ValueError) as error:
                 raise ControlError(
                     "ENVIRONMENT_WORKSPACE_ESCAPE",
-                    "scope admission checkout must remain inside its configured repository",
+                    "scope admission checkout must remain inside its selected workspace root",
                 ) from error
             if absolute_checkout != resolved_checkout:
                 raise ControlError(
@@ -2530,10 +2543,11 @@ class EnvironmentRPCServer:
             argument_index = 0
             while argument_index < len(argv):
                 item = argv[argument_index]
-                if item == "--checkout":
+                if item in {"--checkout", "--workspace-checkout"}:
                     argument_index += 2
                     continue
-                if item.startswith("--checkout="):
+                if (item.startswith("--checkout=")
+                        or item.startswith("--workspace-checkout=")):
                     argument_index += 1
                     continue
                 forwarded.append(item)

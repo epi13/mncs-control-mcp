@@ -446,6 +446,174 @@ def test_scope_grant_forwards_only_control_verified_registered_worktree(
     assert raised.value.code == "ENVIRONMENT_WORKSPACE_ESCAPE"
 
 
+def test_scope_grant_accepts_exact_workspace_relative_registered_worktree(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "projects"
+    compiler = workspace / "mncs-compiler"
+    environment = workspace / "mncs-environment"
+    vm_root = workspace / "mncs-vm"
+    nested = (
+        compiler / ".worktrees" / "native-app-readiness" / "mncs-vm"
+    )
+    for path in (compiler, environment, vm_root, nested):
+        path.mkdir(parents=True, exist_ok=True)
+    for root in (compiler, environment, vm_root):
+        (root / ".git").mkdir(exist_ok=True)
+    approval = "user-approval:compiler-vm-workspace-scope"
+    checkout_facts = {
+        "repository": "mncs-vm",
+        "path": str(nested.resolve()),
+        "workspace_root": str(workspace.resolve()),
+        "repository_root": str(vm_root.resolve()),
+        "git_common_directory": str((vm_root / ".git").resolve()),
+        "git_common_directory_identity": "git-common-vm",
+        "checkout_identity": "checkout-vm-campaign",
+        "observed_path": (
+            "mncs-compiler/.worktrees/native-app-readiness/mncs-vm"
+        ),
+        "branch": "campaign/native-app-vm",
+        "head": "b" * 40,
+    }
+    verify = mock.Mock(return_value=checkout_facts)
+    server = EnvironmentRPCServer(
+        ControlConfig(
+            workspace_root=workspace,
+            sandbox_home=tmp_path / "home",
+            environment_rpc_socket=tmp_path / "rpc" / "environment.sock",
+            environment_scope_grants={
+                "cmp_scope_test": {"mncs-vm": approval},
+            },
+        ),
+        environment_service=SimpleNamespace(
+            state_dir=tmp_path / "state",
+            _pkg=lambda: SimpleNamespace(
+                workspace=SimpleNamespace(verify_registered_checkout=verify),
+            ),
+        ),
+        policy=object(),
+    )
+    grant = _GrantRecord(
+        grant_id="scope-grant-workspace-checkout",
+        principal_id="principal-test",
+        host_root=environment,
+        sandbox_root="/workspace/mncs-environment",
+        scope="project",
+        uid=os.getuid(),
+        expires_at=time.monotonic() + 60,
+        token_file=tmp_path / "grant",
+        bound_session_id="ses_scope_test",
+    )
+    args = [
+        "scope-grant", "ses_scope_test",
+        "--campaign-id", "cmp_scope_test",
+        "--repository", "mncs-vm",
+        "--expected-authority-revision", "c" * 64,
+        "--approval-reference", approval,
+        "--workspace-checkout",
+        "mncs-compiler/.worktrees/native-app-readiness/mncs-vm",
+    ]
+
+    translated = server._translate_argv(args, environment, grant)
+
+    verify.assert_called_once_with(
+        nested.resolve(), repository="mncs-vm",
+        workspace_root=workspace.resolve(), expected_repository_root=vm_root.resolve(),
+    )
+    assert "--workspace-checkout" not in translated
+    assert translated[:len(args) - 2] == args[:-2]
+    assert translated[-2] == "--owner-authorized-checkout-json"
+    assert json.loads(translated[-1]) == checkout_facts
+
+
+def test_workspace_relative_scope_checkout_rejects_escape_and_unregistered_path(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "projects"
+    environment = workspace / "mncs-environment"
+    vm_root = workspace / "mncs-vm"
+    compiler = workspace / "mncs-compiler"
+    lookalike = compiler / "unregistered" / "mncs-vm"
+    for path in (environment, vm_root, lookalike):
+        path.mkdir(parents=True, exist_ok=True)
+    for root in (environment, vm_root, compiler):
+        (root / ".git").mkdir(exist_ok=True)
+    approval = "user-approval:compiler-vm-workspace-scope"
+    verify = mock.Mock(side_effect=ValueError("not a registered worktree"))
+    server = EnvironmentRPCServer(
+        ControlConfig(
+            workspace_root=workspace,
+            sandbox_home=tmp_path / "home",
+            environment_rpc_socket=tmp_path / "rpc" / "environment.sock",
+            environment_scope_grants={"cmp_scope_test": {"mncs-vm": approval}},
+        ),
+        environment_service=SimpleNamespace(
+            state_dir=tmp_path / "state",
+            _pkg=lambda: SimpleNamespace(
+                workspace=SimpleNamespace(verify_registered_checkout=verify),
+            ),
+        ),
+        policy=object(),
+    )
+    grant = _GrantRecord(
+        grant_id="scope-grant-workspace-checkout-negative",
+        principal_id="principal-test",
+        host_root=environment,
+        sandbox_root="/workspace/mncs-environment",
+        scope="project",
+        uid=os.getuid(),
+        expires_at=time.monotonic() + 60,
+        token_file=tmp_path / "grant",
+        bound_session_id="ses_scope_test",
+    )
+    base_args = [
+        "scope-grant", "ses_scope_test",
+        "--campaign-id", "cmp_scope_test",
+        "--repository", "mncs-vm",
+        "--expected-authority-revision", "c" * 64,
+        "--approval-reference", approval,
+    ]
+
+    with pytest.raises(ControlError) as traversal:
+        server._translate_argv(
+            [*base_args, "--workspace-checkout", "../mncs-vm"],
+            environment, grant,
+        )
+    assert traversal.value.code == "ENVIRONMENT_WORKSPACE_ESCAPE"
+    verify.assert_not_called()
+
+    with pytest.raises(ControlError) as duplicate_selectors:
+        server._translate_argv(
+            [*base_args, "--checkout", ".worktrees/vm",
+             "--workspace-checkout", "mncs-compiler/unregistered/mncs-vm"],
+            environment, grant,
+        )
+    assert duplicate_selectors.value.code == "ENVIRONMENT_RPC_INVALID_REQUEST"
+    verify.assert_not_called()
+
+    with pytest.raises(ControlError) as unregistered:
+        server._translate_argv(
+            [*base_args, "--workspace-checkout",
+             "mncs-compiler/unregistered/mncs-vm"],
+            environment, grant,
+        )
+    assert unregistered.value.code == "ENVIRONMENT_WORKSPACE_UNKNOWN"
+    verify.assert_called_once_with(
+        lookalike.resolve(), repository="mncs-vm",
+        workspace_root=workspace.resolve(), expected_repository_root=vm_root.resolve(),
+    )
+
+    escape_link = compiler / "escape"
+    escape_link.symlink_to(vm_root, target_is_directory=True)
+    with pytest.raises(ControlError) as symlink:
+        server._translate_argv(
+            [*base_args, "--workspace-checkout", "mncs-compiler/escape"],
+            environment, grant,
+        )
+    assert symlink.value.code == "ENVIRONMENT_WORKSPACE_ESCAPE"
+    verify.assert_called_once()
+
+
 def test_claim_recovery_rpc_requires_exact_owner_approval_generation_and_session(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

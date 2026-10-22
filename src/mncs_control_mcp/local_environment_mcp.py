@@ -182,6 +182,7 @@ def _build_argv(
         "scope_grant": {
             "session_id", "campaign_id", "repository",
             "expected_authority_revision", "approval_reference", "checkout_path",
+            "workspace_checkout",
         },
         "handoff": {"session_id", "to", "notes", "blockers", "next"},
         "complete": {"session_id", "outcome", "retry_pending", "summary"},
@@ -303,6 +304,8 @@ def _build_argv(
         )
         if not approval_reference.strip():
             raise ValueError("approval_reference must be nonempty text")
+        if "checkout_path" in values and "workspace_checkout" in values:
+            raise ValueError("supply only one of checkout_path or workspace_checkout")
         argv = [
             "scope-grant", session_id,
             "--campaign-id", campaign_id,
@@ -322,6 +325,19 @@ def _build_argv(
                     "checkout_path must stay inside the configured repository"
                 )
             argv.extend(["--checkout", checkout_path])
+        if "workspace_checkout" in values:
+            workspace_checkout = _string(
+                values["workspace_checkout"], "workspace_checkout", max_length=1024,
+            )
+            if (not workspace_checkout
+                    or PurePosixPath(workspace_checkout).is_absolute()
+                    or "\\" in workspace_checkout
+                    or any(part in {"", ".", ".."}
+                           for part in workspace_checkout.split("/"))):
+                raise ValueError(
+                    "workspace_checkout must stay inside the configured workspace"
+                )
+            argv.extend(["--workspace-checkout", workspace_checkout])
         return argv, True
     if operation == "health":
         argv = ["health", session_id]
@@ -900,7 +916,7 @@ class LocalEnvironmentMCP:
                     "mode", "repository", "claim_id", "offset", "limit", "reason", "ttl",
                     "basis", "paths", "worktree", "branch", "expected_store_generation",
                     "expected_authority_revision", "approval_reference",
-                    "checkout_path",
+                    "checkout_path", "workspace_checkout",
                     "evidence_offset", "evidence_limit", "capability", "binding_id", "path",
                     "request_file", "input_artifact", "call",
                     *SESSION_SELECTOR_FIELDS,
@@ -991,6 +1007,9 @@ def main() -> None:
             "or task_identity to reselect safely after an MCP process restart. Invoke is "
             "limited to the typed Compiler application-build and Forge application-execution "
             "contracts; Environment enforces the selected session's repository authority. "
+            "Owner-approved scope_grant may select a repository checkout or a registered "
+            "workspace-relative linked worktree, which Environment revalidates against the "
+            "selected campaign workspace. "
             "No shell or arbitrary CLI arguments are accepted."
         ),
     )

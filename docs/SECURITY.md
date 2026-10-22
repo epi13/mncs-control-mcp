@@ -132,6 +132,14 @@ path accepts only explicit branch or worktree targets. A mutation requires an
 exact project grant, a repository equal to that grant's checkout, and the exact
 session selected by Environment continuation within the same protected
 execution. Worktree paths are mapped under that project before forwarding.
+Owner-approved repository scope admission also accepts one explicit
+workspace-relative checkout selector for a registered linked worktree outside
+the repository root. Control resolves it under the configured workspace,
+checks the repository's Git common directory and manifest identity, and passes
+the observed checkout facts to Environment. Environment admits the grant only
+when that exact checkout is inside the selected campaign workspace or the
+configured repository root, then rechecks branch, head, rights, claims, and
+canonical Store generation before publishing the scope event.
 Control also supplies an internal, grant-derived pair of sandbox and host
 project roots so Environment can match Git registrations created under
 `/workspace` without accepting caller-selected mappings. Environment

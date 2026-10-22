@@ -94,6 +94,40 @@ def test_scope_grant_maps_only_the_owner_checked_scope_admission_contract() -> N
         "--checkout", ".worktrees/compiler/mncs-environment",
     ]
 
+    workspace_checkout_argv, _selected = _build_argv(
+        "scope_grant",
+        {
+            "campaign_id": "cmp_selected",
+            "repository": "mncs-vm",
+            "expected_authority_revision": revision,
+            "approval_reference": "user-authorization:compiler-vm-runtime",
+            "workspace_checkout": (
+                "mncs-compiler/.worktrees/native-app-readiness/mncs-vm"
+            ),
+        },
+        context,
+        "mncs-compiler",
+    )
+    assert workspace_checkout_argv[-2:] == [
+        "--workspace-checkout",
+        "mncs-compiler/.worktrees/native-app-readiness/mncs-vm",
+    ]
+
+    with pytest.raises(ValueError, match="only one"):
+        _build_argv(
+            "scope_grant",
+            {
+                "campaign_id": "cmp_selected",
+                "repository": "mncs-vm",
+                "expected_authority_revision": revision,
+                "approval_reference": "user-authorization:compiler-vm-runtime",
+                "checkout_path": ".worktrees/vm",
+                "workspace_checkout": "mncs-compiler/.worktrees/vm",
+            },
+            context,
+            "mncs-compiler",
+        )
+
     with pytest.raises(ValueError, match="revision"):
         _build_argv(
             "scope_grant",
@@ -113,6 +147,20 @@ def test_scope_grant_maps_only_the_owner_checked_scope_admission_contract() -> N
                 "expected_authority_revision": revision,
                 "approval_reference": "user-authorization:environment-integration",
                 "checkout_path": "../outside",
+            },
+            context,
+            "mncs-compiler",
+        )
+
+    with pytest.raises(ValueError, match="inside the configured workspace"):
+        _build_argv(
+            "scope_grant",
+            {
+                "campaign_id": "cmp_selected",
+                "repository": "mncs-vm",
+                "expected_authority_revision": revision,
+                "approval_reference": "user-authorization:compiler-vm-runtime",
+                "workspace_checkout": "mncs-compiler/../outside",
             },
             context,
             "mncs-compiler",
@@ -159,6 +207,22 @@ def test_scope_grant_bridge_preserves_the_campaign_selector(
     assert captured[0]["argv"][2:4] == ["--campaign-id", "cmp_selected"]
     assert captured[0]["argv"][-2:] == [
         "--checkout", ".worktrees/compiler/mncs-environment",
+    ]
+
+    workspace_response = bridge.invoke(
+        "mncs-compiler",
+        "scope_grant",
+        {
+            "campaign_id": "cmp_selected",
+            "repository": "mncs-vm",
+            "expected_authority_revision": "a" * 64,
+            "approval_reference": "user-authorization:compiler-vm-runtime",
+            "workspace_checkout": "mncs-compiler/.worktrees/native-app/vm",
+        },
+    )
+    assert workspace_response["ok"] is True
+    assert captured[1]["argv"][-2:] == [
+        "--workspace-checkout", "mncs-compiler/.worktrees/native-app/vm",
     ]
 
 
