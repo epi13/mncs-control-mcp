@@ -47,6 +47,53 @@ _PACKAGE_LOAD_LOCK = threading.RLock()
 _PACKAGE_SOURCE_IDENTITIES: dict[str, tuple[str, str]] = {}
 
 
+def _claim_matches_working_checkout(
+    claim: dict[str, Any], working_checkout: dict[str, Any], repository: str,
+    *, session_id: str | None = None,
+) -> bool:
+    """Check whether one held worktree claim identifies the exact checkout."""
+    scope = claim.get("scope")
+    checkout_path = working_checkout.get("path")
+    scope_path = scope.get("checkout") if isinstance(scope, dict) else None
+    branch = working_checkout.get("branch")
+    if (
+        claim.get("status") != "held"
+        or (session_id is not None
+            and isinstance(claim.get("session_id"), str)
+            and claim.get("session_id") != session_id)
+        or claim.get("repository") != repository
+        or not isinstance(scope, dict)
+        or scope.get("kind") != "worktree"
+        or scope.get("repository", repository) != repository
+        or not isinstance(checkout_path, str)
+        or not isinstance(scope_path, str)
+        or scope.get("branch") != branch
+    ):
+        return False
+    current_identity = working_checkout.get("checkout_identity")
+    scope_identity = scope.get("checkout_identity")
+    if (isinstance(current_identity, str) and isinstance(scope_identity, str)
+            and current_identity != scope_identity):
+        return False
+    current_common = working_checkout.get("git_common_directory_identity")
+    scope_common = scope.get("git_common_directory_identity")
+    if (isinstance(current_common, str) and isinstance(scope_common, str)
+            and current_common != scope_common):
+        return False
+    try:
+        current_path = Path(checkout_path)
+        claimed_path = Path(scope_path)
+        return (
+            current_path.is_absolute()
+            and claimed_path.is_absolute()
+            and current_path.resolve(strict=True) == current_path
+            and claimed_path.resolve(strict=True) == claimed_path
+            and current_path == claimed_path
+        )
+    except (OSError, RuntimeError):
+        return False
+
+
 def _package_source_identity(package_root: Path) -> str:
     """Fingerprint Python sources so long-lived Control can see sibling updates."""
     digest = hashlib.sha256()
@@ -474,53 +521,6 @@ class EnvironmentService:
         )
         claims_by_session: dict[str, list[dict[str, Any]]] = {}
 
-        def claim_matches_working_checkout(claim: dict[str, Any]) -> bool:
-            """Match a registered checkout to its exact live claim owner.
-
-            A campaign snapshot may still describe the repository root after
-            work moved to a registered nested worktree. In that case, the
-            authenticated Store claim for that exact checkout is stronger
-            continuation evidence than the stale selected-checkout projection.
-            Control has already verified the requested path against Git's
-            worktree registry before this selector is called.
-            """
-            if working_checkout is None:
-                return False
-            scope = claim.get("scope")
-            checkout_path = working_checkout.get("path")
-            scope_path = scope.get("checkout") if isinstance(scope, dict) else None
-            branch = working_checkout.get("branch")
-            if (
-                not isinstance(scope, dict)
-                or claim.get("repository") != repository
-                or scope.get("kind") != "worktree"
-                or scope.get("repository", repository) != repository
-                or not isinstance(checkout_path, str)
-                or not isinstance(scope_path, str)
-                or scope.get("branch") != branch
-            ):
-                return False
-            current_identity = working_checkout.get("checkout_identity")
-            scope_identity = scope.get("checkout_identity")
-            if (isinstance(current_identity, str)
-                    and isinstance(scope_identity, str)
-                    and current_identity != scope_identity):
-                return False
-            current_common = working_checkout.get("git_common_directory_identity")
-            scope_common = scope.get("git_common_directory_identity")
-            if (isinstance(current_common, str)
-                    and isinstance(scope_common, str)
-                    and current_common != scope_common):
-                return False
-            try:
-                current_path = Path(checkout_path)
-                claimed_path = Path(scope_path)
-                if current_path.is_symlink() or claimed_path.is_symlink():
-                    return False
-                return current_path.resolve(strict=True) == claimed_path.resolve(strict=True)
-            except (OSError, RuntimeError):
-                return False
-
         def matches_working_checkout(
             snapshot: dict[str, Any], session_id: str | None = None,
         ) -> bool:
@@ -532,7 +532,9 @@ class EnvironmentService:
             return bool(
                 isinstance(session_id, str)
                 and any(
-                    claim_matches_working_checkout(claim)
+                    _claim_matches_working_checkout(
+                        claim, working_checkout, repository, session_id=session_id,
+                    )
                     for claim in claims_by_session.get(session_id, [])
                 )
             )

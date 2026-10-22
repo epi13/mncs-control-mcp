@@ -28,6 +28,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from .environment_sessions import _claim_matches_working_checkout
 from .errors import ControlError
 from .native_application_contract import canonical_native_application_call
 
@@ -5274,6 +5275,18 @@ class EnvironmentRPCServer:
                         "workspace": {"root": row.get("workspace_root")},
                     }
                 matches = matcher(reference_snapshot, project_checkout)
+                if not matches:
+                    row_session_id = row.get("session_id")
+                    claims = row.get("claims")
+                    if isinstance(row_session_id, str) and isinstance(claims, list):
+                        matches = any(
+                            isinstance(claim, dict)
+                            and _claim_matches_working_checkout(
+                                claim, project_checkout, repository,
+                                session_id=row_session_id,
+                            )
+                            for claim in claims
+                        )
                 session_id = row.get("session_id")
                 if matches and isinstance(session_id, str):
                     checkout_by_session[session_id] = project_checkout

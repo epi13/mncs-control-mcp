@@ -1,0 +1,56 @@
+{
+  "schema_version": "mncs.control.evidence/1",
+  "evidence_id": "registered-nested-checkout-project-selection-20261022",
+  "recorded_at": "2026-10-22T03:00:21Z",
+  "campaign_id": "cmp_e9d685431376bfd7",
+  "session_id": "ses_4d8c1e931bada455",
+  "owner_repository": "mncs-control-mcp",
+  "purpose": "Keep Control's final authenticated project-context filter consistent with Environment continuation when a live exact worktree claim identifies a nested checkout and the persisted checkout snapshot is stale.",
+  "authorization": {
+    "scope": "mncs-control-mcp",
+    "basis": "Active Control campaign claim claim:mncs-control-mcp:worktree:09711c2d8fda for the exact registered checkout and branch."
+  },
+  "implementation": {
+    "base_main": "8e13adae473747e99bd00bc4bb27311cfa10d423",
+    "branch": "campaign/control-cross-repo-scope-routing-20261020",
+    "checkout": "/home/epi13/Documents/Projects/mncs-control-mcp/.worktrees/control-cross-repo-scope-routing-20261020",
+    "files": {
+      "src/mncs_control_mcp/environment_sessions.py": "10db6d24890068f4ad33bc4efc4f8abbd36251fe118771db543c3b8b6f51f260",
+      "src/mncs_control_mcp/environment_rpc.py": "11e6b3aa7f12460879c4f6279d430fade2357844bda9da76cce49c4de2f2adbd",
+      "tests/test_environment_rpc.py": "2fc856591caf819204d23059eb177743d44c2c83f18c4e680785a0981b7a0e9d"
+    },
+    "behavior": [
+      "Both EnvironmentService continuation and Control's final project selection use one exact held worktree-claim matcher.",
+      "The matcher requires repository, canonical checkout path, and branch equality, and checks checkout/common-directory identities when both sides provide them.",
+      "A stale root snapshot is recoverable from the matching nested worktree claim.",
+      "Two sessions with live claims for the same checkout remain blocked with both competing session identities visible.",
+      "A live claim for a different worktree or branch does not select the current checkout."
+    ]
+  },
+  "verification": {
+    "result": "PASS",
+    "tests": [
+      {
+        "command": "pytest -q tests/test_environment_sessions.py::test_campaign_continuation_recovers_one_authenticated_nested_checkout tests/test_environment_rpc.py::test_registered_checkout_selects_one_campaign_and_scoped_claims tests/test_environment_rpc.py::test_registered_checkout_continuation_binds_mutations_in_same_execution tests/test_environment_rpc.py::test_registered_nested_worktree_drives_project_profile_selection",
+        "result": "4 passed"
+      },
+      {
+        "command": "ruff check src/mncs_control_mcp/environment_sessions.py src/mncs_control_mcp/environment_rpc.py tests/test_environment_sessions.py tests/test_environment_rpc.py",
+        "result": "passed"
+      },
+      {
+        "command": "git diff --check",
+        "result": "passed"
+      }
+    ]
+  },
+  "readiness": {
+    "unit_and_rpc_selection": "verified",
+    "live_gateway_readback": "pending delivery-triggered Control reload",
+    "canonical_checkpoint": "pending live continuation and checkpoint"
+  },
+  "limitations": [
+    "This change consumes authenticated live claim projections and does not acquire, transfer, or extend claims.",
+    "The live Environment gateway readback is performed after main delivery causes the normal Control service reload."
+  ]
+}

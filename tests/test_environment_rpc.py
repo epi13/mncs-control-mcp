@@ -6663,6 +6663,87 @@ def test_registered_checkout_selects_one_campaign_and_scoped_claims(
         "no-session-matches-registered-checkout"
     )
 
+    # A fresh entry through the nested registered worktree can recover its
+    # owner when the durable selected-checkout projection still names the
+    # repository root. The worktree claim must match the exact canonical path
+    # and branch; it cannot select a different checkout.
+    stale_root_checkout = {
+        **selected_checkout,
+        "path": str(project.resolve()),
+        "checkout_identity": "checkout-root",
+        "branch": "main",
+        "head": "root-head",
+    }
+    nested_claim = {
+        "claim_id": "claim-nested-owner",
+        "repository": "mncs-environment",
+        "status": "held",
+        "scope": {
+            "kind": "worktree",
+            "repository": "mncs-environment",
+            "checkout": str(selected_path.resolve()),
+            "branch": selected_checkout["branch"],
+        },
+    }
+    stale_checkout_capsule = {
+        "campaign_id": "cmp_nested_claim",
+        "repository": "mncs-environment",
+        "status": "ready",
+        "continuations_count": 1,
+        "continuations_truncated": False,
+        "continuations": [row("ses_nested_claim", stale_root_checkout, nested_claim)],
+    }
+    nested_claim_selected = server._select_project_campaign_context(
+        stale_checkout_capsule, record, "mncs-environment",
+        project_checkout=selected_checkout,
+    )
+    assert nested_claim_selected["status"] == "ready"
+    assert nested_claim_selected["selected_session_id"] == "ses_nested_claim"
+    assert nested_claim_selected["selected_checkout"]["checkout_identity"] == "checkout-one"
+
+    duplicate_nested_claims = dict(stale_checkout_capsule)
+    duplicate_nested_claims["continuations"] = [
+        row("ses_nested_writer_one", stale_root_checkout, nested_claim),
+        row("ses_nested_writer_two", stale_root_checkout, {
+            **nested_claim,
+            "claim_id": "claim-nested-writer-two",
+        }),
+    ]
+    duplicate_nested_claims["continuations_count"] = 2
+    duplicate_nested_result = server._select_project_campaign_context(
+        duplicate_nested_claims, record, "mncs-environment",
+        project_checkout=selected_checkout,
+    )
+    assert duplicate_nested_result["status"] == "blocked"
+    assert "selected_session_id" not in duplicate_nested_result
+    assert duplicate_nested_result["project_selection"]["status"] == "blocked"
+    assert duplicate_nested_result["project_selection"]["competing_claim_sessions"] == [
+        "ses_nested_writer_one", "ses_nested_writer_two",
+    ]
+
+    unrelated_nested_claim = dict(stale_checkout_capsule)
+    unrelated_nested_claim["continuations"] = [row(
+        "ses_other_worktree_claim",
+        stale_root_checkout,
+        {
+            **nested_claim,
+            "claim_id": "claim-other-worktree",
+            "scope": {
+                **nested_claim["scope"],
+                "checkout": str(other_path.resolve()),
+                "branch": other_checkout["branch"],
+            },
+        },
+    )]
+    unrelated_nested_claim_result = server._select_project_campaign_context(
+        unrelated_nested_claim, record, "mncs-environment",
+        project_checkout=selected_checkout,
+    )
+    assert "selected_session_id" not in unrelated_nested_claim_result
+    assert unrelated_nested_claim_result["project_selection"]["reason"] == (
+        "no-session-matches-registered-checkout"
+    )
+
     campaigns = {
         "status": "ambiguous-campaigns",
         "repository": "mncs-environment",
