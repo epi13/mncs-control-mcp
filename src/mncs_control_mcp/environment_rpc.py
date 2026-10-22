@@ -754,10 +754,18 @@ class EnvironmentRPCServer:
             )
         return record
 
-    def _map_client_path(self, value: str, record: _GrantRecord, cwd: Path) -> Path:
+    def _map_client_path(
+        self, value: str, record: _GrantRecord, cwd: Path, *,
+        allow_workspace_worktree: bool = False,
+    ) -> Path:
         if not isinstance(value, str) or "\x00" in value:
             raise ControlError("ENVIRONMENT_WORKSPACE_ESCAPE", "client path is invalid")
         candidate = Path(value)
+        if ".." in candidate.parts:
+            raise ControlError(
+                "ENVIRONMENT_WORKSPACE_ESCAPE",
+                "client path must not contain parent traversal",
+            )
         if candidate.is_absolute():
             sandbox_path = candidate
         else:
@@ -765,7 +773,68 @@ class EnvironmentRPCServer:
         try:
             relative = sandbox_path.relative_to(record.sandbox_root)
         except ValueError as error:
-            raise ControlError("ENVIRONMENT_WORKSPACE_ESCAPE", "client path escapes its scoped sandbox root") from error
+            if not allow_workspace_worktree:
+                raise ControlError(
+                    "ENVIRONMENT_WORKSPACE_ESCAPE",
+                    "client path escapes its scoped sandbox root",
+                ) from error
+            workspace_root = Path(self.config.workspace_root).expanduser().resolve(
+                strict=True
+            )
+            host_root = record.host_root.expanduser().resolve(strict=True)
+            if (record.scope != "project" or host_root.parent != workspace_root
+                    or Path(record.sandbox_root) != Path("/workspace") / host_root.name):
+                raise ControlError(
+                    "ENVIRONMENT_WORKSPACE_ESCAPE",
+                    "cross-project worktree paths require an immediate project grant",
+                ) from error
+            try:
+                relative = sandbox_path.relative_to(Path("/workspace"))
+            except ValueError as workspace_error:
+                raise ControlError(
+                    "ENVIRONMENT_WORKSPACE_ESCAPE",
+                    "client worktree path escapes the configured workspace",
+                ) from workspace_error
+            if not relative.parts or any(part in {"", ".", ".."} for part in relative.parts):
+                raise ControlError(
+                    "ENVIRONMENT_WORKSPACE_ESCAPE",
+                    "client worktree path must name a workspace checkout",
+                )
+            immediate_root = workspace_root / relative.parts[0]
+            if (immediate_root.parent != workspace_root or immediate_root.is_symlink()
+                    or not immediate_root.is_dir()):
+                raise ControlError(
+                    "ENVIRONMENT_WORKSPACE_ESCAPE",
+                    "client worktree path must remain under an immediate workspace project",
+                )
+            marker = immediate_root / ".git"
+            try:
+                marker_stat = marker.lstat()
+            except OSError as marker_error:
+                raise ControlError(
+                    "ENVIRONMENT_WORKSPACE_ESCAPE",
+                    "client worktree path must be under a Git project",
+                ) from marker_error
+            if not (stat.S_ISDIR(marker_stat.st_mode) or stat.S_ISREG(marker_stat.st_mode)):
+                raise ControlError(
+                    "ENVIRONMENT_WORKSPACE_ESCAPE",
+                    "client worktree project marker is invalid",
+                )
+            cursor = workspace_root
+            for part in relative.parts:
+                cursor = cursor / part
+                if cursor.is_symlink():
+                    raise ControlError(
+                        "ENVIRONMENT_WORKSPACE_ESCAPE",
+                        "client worktree path traverses a symbolic link",
+                    )
+            host_path = (workspace_root / relative).resolve(strict=False)
+            if host_path != workspace_root and workspace_root not in host_path.parents:
+                raise ControlError(
+                    "ENVIRONMENT_WORKSPACE_ESCAPE",
+                    "client worktree path resolves outside the configured workspace",
+                )
+            return host_path
         host_path = (record.host_root / relative).resolve(strict=False)
         if host_path != record.host_root and record.host_root not in host_path.parents:
             raise ControlError("ENVIRONMENT_WORKSPACE_ESCAPE", "client path resolves outside its granted root")
@@ -1015,7 +1084,9 @@ class EnvironmentRPCServer:
         if command == "claim-recover":
             self._authorize_claim_recovery_argv(translated, cwd, record)
 
-        def map_path_option(option: str) -> None:
+        def map_path_option(
+            option: str, *, allow_workspace_worktree: bool = False,
+        ) -> None:
             index = 0
             while index < len(translated):
                 item = translated[index]
@@ -1025,7 +1096,10 @@ class EnvironmentRPCServer:
                             "ENVIRONMENT_RPC_INVALID_REQUEST", f"{option} needs a value"
                         )
                     translated[index + 1] = str(
-                        self._map_client_path(translated[index + 1], record, cwd)
+                        self._map_client_path(
+                            translated[index + 1], record, cwd,
+                            allow_workspace_worktree=allow_workspace_worktree,
+                        )
                     )
                     index += 2
                     continue
@@ -1033,7 +1107,10 @@ class EnvironmentRPCServer:
                 if item.startswith(prefix):
                     value = item[len(prefix):]
                     translated[index] = prefix + str(
-                        self._map_client_path(value, record, cwd)
+                        self._map_client_path(
+                            value, record, cwd,
+                            allow_workspace_worktree=allow_workspace_worktree,
+                        )
                     )
                 index += 1
 
@@ -1212,7 +1289,7 @@ class EnvironmentRPCServer:
                         translated.extend(["--workspace", str(entry_workspace)])
         elif command == "claims":
             for option in ("--worktree",):
-                map_path_option(option)
+                map_path_option(option, allow_workspace_worktree=True)
         elif command == "retire":
             has_inventory = any(item == "--inventory"
                                 or item.startswith("--inventory=") for item in argv)

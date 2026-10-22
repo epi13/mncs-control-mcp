@@ -139,6 +139,95 @@ def test_path_options_are_mapped_in_split_and_equals_forms(tmp_path: Path) -> No
     assert equals == ["enter", "--workspace=" + str(host_root / "nested")]
 
 
+def test_claim_worktree_path_can_name_an_exact_checkout_in_the_workspace(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "projects"
+    environment = workspace / "mncs-environment"
+    compiler = workspace / "mncs-compiler"
+    for root in (environment, compiler):
+        (root / ".git").mkdir(parents=True)
+    provider = (
+        compiler / ".worktrees" / "native-application" / "mncs-forge"
+    )
+    provider.mkdir(parents=True)
+
+    server = EnvironmentRPCServer(
+        ControlConfig(
+            workspace_root=workspace,
+            sandbox_home=tmp_path / "home",
+            environment_rpc_socket=tmp_path / "rpc" / "environment.sock",
+        ),
+        environment_service=SimpleNamespace(state_dir=tmp_path / "state"),
+        policy=object(),
+    )
+    grant = _GrantRecord(
+        grant_id="cross-project-claim-path",
+        principal_id="principal-test",
+        host_root=environment,
+        sandbox_root="/workspace/mncs-environment",
+        scope="project",
+        uid=0,
+        expires_at=time.monotonic() + 60,
+        token_file=tmp_path / "grant",
+    )
+    translated = server._translate_argv(
+        [
+            "claims", "ses_cross_project_path",
+            "--acquire", "mncs-forge",
+            "--worktree", "/workspace/mncs-compiler/.worktrees/native-application/mncs-forge",
+            "--branch", "main",
+        ],
+        environment,
+        grant,
+    )
+    assert translated == [
+        "claims", "ses_cross_project_path",
+        "--acquire", "mncs-forge",
+        "--worktree", str(provider),
+        "--branch", "main",
+    ]
+
+    outside = tmp_path / "outside-worktree"
+    outside.mkdir()
+    (compiler / "escape").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(ControlError) as symlink:
+        server._translate_argv(
+            [
+                "claims", "ses_cross_project_path",
+                "--acquire", "mncs-forge",
+                "--worktree", "/workspace/mncs-compiler/escape",
+            ],
+            environment,
+            grant,
+        )
+    assert symlink.value.code == "ENVIRONMENT_WORKSPACE_ESCAPE"
+
+    with pytest.raises(ControlError) as external:
+        server._translate_argv(
+            [
+                "claims", "ses_cross_project_path",
+                "--acquire", "mncs-forge",
+                "--worktree", str(outside),
+            ],
+            environment,
+            grant,
+        )
+    assert external.value.code == "ENVIRONMENT_WORKSPACE_ESCAPE"
+
+    with pytest.raises(ControlError) as traversal:
+        server._translate_argv(
+            [
+                "claims", "ses_cross_project_path",
+                "--acquire", "mncs-forge",
+                "--worktree", "/workspace/mncs-compiler/../outside-worktree",
+            ],
+            environment,
+            grant,
+        )
+    assert traversal.value.code == "ENVIRONMENT_WORKSPACE_ESCAPE"
+
+
 def test_scope_grant_rpc_requires_exact_campaign_approval_and_selected_project_grant(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
