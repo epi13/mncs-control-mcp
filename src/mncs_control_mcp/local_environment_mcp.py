@@ -25,12 +25,12 @@ TOKEN_RE = re.compile(r"[A-Za-z0-9_-]{32,128}")
 OPERATIONS = frozenset({
     "enter", "continuation", "inspect", "context", "health", "capabilities",
     "resume", "verify", "invoke", "checkpoint", "handoff", "complete", "claims",
-    "campaign_state", "artifact_read", "store_generation",
+    "campaign_state", "artifact_read", "store_generation", "scope_grant",
 })
 SESSION_OPERATIONS = frozenset({
     "inspect", "context", "health", "capabilities", "resume", "verify", "invoke",
     "checkpoint", "handoff", "complete", "claims", "campaign_state",
-    "artifact_read", "store_generation",
+    "artifact_read", "store_generation", "scope_grant",
 })
 SESSION_SELECTOR_FIELDS = frozenset({"campaign_id", "task_identity"})
 
@@ -179,6 +179,10 @@ def _build_argv(
             "session_id", "progress", "remaining", "campaign_base_checkpoint",
             "campaign_evidence", "campaign_evidence_delta", "campaign_delivery",
         },
+        "scope_grant": {
+            "session_id", "campaign_id", "repository",
+            "expected_authority_revision", "approval_reference",
+        },
         "handoff": {"session_id", "to", "notes", "blockers", "next"},
         "complete": {"session_id", "outcome", "retry_pending", "summary"},
         "claims": {
@@ -281,6 +285,31 @@ def _build_argv(
                 "--", "--call-json", encoded_call,
             ], True
         raise ValueError("invoke supports only native-application-build and native-application-execution")
+    if operation == "scope_grant":
+        campaign_id = _string(values.get("campaign_id"), "campaign_id", max_length=160)
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,159}", campaign_id):
+            raise ValueError("campaign_id is not a valid campaign identity")
+        repository = _string(values.get("repository"), "repository", max_length=128)
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", repository):
+            raise ValueError("repository is not a valid repository identity")
+        revision = _string(
+            values.get("expected_authority_revision"),
+            "expected_authority_revision", max_length=64,
+        )
+        if not re.fullmatch(r"[0-9a-f]{64}", revision):
+            raise ValueError("expected_authority_revision must be a full lowercase SHA-256 revision")
+        approval_reference = _string(
+            values.get("approval_reference"), "approval_reference", max_length=256,
+        )
+        if not approval_reference.strip():
+            raise ValueError("approval_reference must be nonempty text")
+        return [
+            "scope-grant", session_id,
+            "--campaign-id", campaign_id,
+            "--repository", repository,
+            "--expected-authority-revision", revision,
+            "--approval-reference", approval_reference,
+        ], True
     if operation == "health":
         argv = ["health", session_id]
         if values.get("live") is True:
@@ -684,7 +713,10 @@ class LocalEnvironmentMCP:
         if isinstance(authority, dict):
             compact["authority"] = {
                 key: authority[key]
-                for key in ("readable", "writable", "protected_repositories", "escalation_required")
+                for key in (
+                    "readable", "writable", "protected_repositories",
+                    "escalation_required", "revision",
+                )
                 if key in authority
             }
         readiness = payload.get("readiness")
@@ -854,6 +886,7 @@ class LocalEnvironmentMCP:
                     "notes", "blockers", "next", "outcome", "retry_pending", "summary",
                     "mode", "repository", "claim_id", "offset", "limit", "reason", "ttl",
                     "basis", "paths", "worktree", "branch", "expected_store_generation",
+                    "expected_authority_revision", "approval_reference",
                     "evidence_offset", "evidence_limit", "capability", "binding_id", "path",
                     "request_file", "input_artifact", "call",
                     *SESSION_SELECTOR_FIELDS,
@@ -865,6 +898,8 @@ class LocalEnvironmentMCP:
                     key: value for key, value in values.items()
                     if key not in SESSION_SELECTOR_FIELDS
                 }
+                if operation == "scope_grant" and "campaign_id" in values:
+                    operation_values["campaign_id"] = values["campaign_id"]
             else:
                 values = arguments or {}
                 operation_values = values
@@ -933,7 +968,8 @@ def main() -> None:
             "strictly validated Environment lifecycle operation. Supported operations "
             "include enter, continuation, inspect, context, health, capabilities, "
             "resume, verify, checkpoint, handoff, complete, claims, campaign_state, "
-            "artifact_read, and store_generation. Resume revalidates the selected "
+            "artifact_read, store_generation, and owner-approved scope_grant. "
+            "Resume revalidates the selected "
             "session. Verify runs one already-bound project verification capability "
             "with its descriptor's fixed arguments and selected project authority. "
             "The project and optional project-relative cwd "

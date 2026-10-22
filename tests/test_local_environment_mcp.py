@@ -52,6 +52,82 @@ def test_stable_tool_maps_only_named_environment_operations() -> None:
         )
 
 
+def test_scope_grant_maps_only_the_owner_checked_scope_admission_contract() -> None:
+    context = _ProjectContext("secret", "/workspace/mncs-compiler")
+    context.selected_session_id = "ses_selected"
+    revision = "a" * 64
+
+    argv, selected = _build_argv(
+        "scope_grant",
+        {
+            "campaign_id": "cmp_selected",
+            "repository": "mncs-environment",
+            "expected_authority_revision": revision,
+            "approval_reference": "user-authorization:environment-integration",
+        },
+        context,
+        "mncs-compiler",
+    )
+
+    assert selected is True
+    assert argv == [
+        "scope-grant", "ses_selected",
+        "--campaign-id", "cmp_selected",
+        "--repository", "mncs-environment",
+        "--expected-authority-revision", revision,
+        "--approval-reference", "user-authorization:environment-integration",
+    ]
+
+    with pytest.raises(ValueError, match="revision"):
+        _build_argv(
+            "scope_grant",
+            {"campaign_id": "cmp_selected", "repository": "mncs-environment",
+             "expected_authority_revision": "stale",
+             "approval_reference": "user-authorization:environment-integration"},
+            context,
+            "mncs-compiler",
+        )
+
+
+def test_scope_grant_bridge_preserves_the_campaign_selector(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bridge = LocalEnvironmentMCP()
+    context = _ProjectContext("secret", "/workspace/mncs-compiler")
+    bridge._contexts[("mncs-compiler", "")] = context
+    captured: list[dict] = []
+
+    def select_session(selected_context, _project, values, _cwd=""):
+        assert values["campaign_id"] == "cmp_selected"
+        selected_context.selected_session_id = "ses_selected"
+        return None
+
+    monkeypatch.setattr(bridge, "_context", lambda _project, _cwd: context)
+    monkeypatch.setattr(bridge, "_select_session", select_session)
+    monkeypatch.setattr(
+        local_environment_mcp,
+        "_rpc",
+        lambda _socket, request: captured.append(request) or {
+            "ok": True,
+            "result": {"exit_code": 0, "stdout": "{}", "stderr": ""},
+        },
+    )
+
+    response = bridge.invoke(
+        "mncs-compiler",
+        "scope_grant",
+        {
+            "campaign_id": "cmp_selected",
+            "repository": "mncs-environment",
+            "expected_authority_revision": "a" * 64,
+            "approval_reference": "user-authorization:environment-integration",
+        },
+    )
+
+    assert response["ok"] is True
+    assert captured[0]["argv"][2:4] == ["--campaign-id", "cmp_selected"]
+
+
 def test_resume_revalidates_the_selected_session() -> None:
     context = _ProjectContext("secret", "/workspace/mncs-compiler/.worktrees/run")
     context.selected_session_id = "ses_selected"
@@ -959,9 +1035,12 @@ def test_compact_context_preserves_the_environment_rights_projection() -> None:
         "schema_version": "mncs.environment.entry-context/1",
         "session_id": "ses_rights_context",
         "lifecycle": "active",
+        "authority": {"readable": ["workspace"], "writable": ["mncs-language"],
+                      "revision": "c" * 64},
         "rights_context": rights_context,
         "unrelated_full_workspace_detail": {"large": "omitted"},
     })
 
     assert compact["rights_context"] == rights_context
+    assert compact["authority"]["revision"] == "c" * 64
     assert "unrelated_full_workspace_detail" not in compact
