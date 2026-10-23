@@ -1626,12 +1626,20 @@ class EnvironmentService:
     @staticmethod
     def _compare_recorded_checkouts(
         references: list[dict[str, Any]], live_observation: dict[str, Any],
+        *, reference_workspace_root: str | None = None,
     ) -> list[dict[str, Any]]:
-        """Relate persisted checkout facts to the bounded live Git observation."""
+        """Relate persisted checkout facts to the bounded live Git observation.
+
+        Persisted repository paths are relative to the selected Environment
+        workspace. The live observation is relative to the Control caller's
+        project root, which may be a different repository and worktree.
+        """
         if live_observation.get("status") != "current":
             return [{"status": "unknown_live_observation"} for _ in references[:8]]
 
-        root = str(live_observation.get("workspace_root", ""))
+        root = (reference_workspace_root
+                if isinstance(reference_workspace_root, str) and reference_workspace_root
+                else str(live_observation.get("workspace_root", "")))
 
         def path_key(value: Any) -> str | None:
             if not isinstance(value, str) or not value:
@@ -1901,6 +1909,7 @@ class EnvironmentService:
             "live_repository_observation": live_observation,
             "recorded_checkout_comparisons": EnvironmentService._compare_recorded_checkouts(
                 selected_references, live_observation,
+                reference_workspace_root=(snapshot.get("workspace") or {}).get("root"),
             ),
             "claim_ids": [str(claim.get("claim_id")) for claim in claim_capsules],
             "claims": EnvironmentService._bounded_capsule_value(claim_capsules[:8]),

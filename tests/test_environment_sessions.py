@@ -433,6 +433,43 @@ def test_inspection_rejects_a_foreign_authenticated_session(tmp_path: Path) -> N
     assert excinfo.value.code == "ENVIRONMENT_AUTHORITY_DENIED"
 
 
+def test_recorded_relative_checkout_uses_campaign_workspace_root(tmp_path: Path) -> None:
+    caller_root = tmp_path / "projects" / "mncs-compiler"
+    campaign_root = caller_root / ".worktrees" / "native-app-readiness"
+    nested_checkout = campaign_root / "mncs-compiler"
+    nested_checkout.mkdir(parents=True)
+    branch = "campaign/native-application-readiness"
+    head = "a" * 40
+    references = [{
+        "repository": "mncs-compiler",
+        "observed_path": "mncs-compiler",
+        "branch": branch,
+        "head": head,
+    }]
+    live_observation = {
+        "status": "current",
+        "workspace_root": str(caller_root),
+        "checkout": {
+            "path": str(caller_root),
+            "branch": "main",
+            "head": "b" * 40,
+        },
+        "worktree_registrations": [{
+            "registered_path": str(nested_checkout),
+            "branch": branch,
+            "head": head,
+        }],
+    }
+
+    comparison = EnvironmentService._compare_recorded_checkouts(
+        references, live_observation, reference_workspace_root=str(campaign_root),
+    )[0]
+
+    assert comparison["status"] == "same_checkout"
+    assert comparison["path_matches"] is True
+    assert comparison["live_registered_path"] == str(nested_checkout)
+
+
 def test_campaign_continuation_returns_project_scoped_duplicate_capsules(tmp_path: Path) -> None:
     service = EnvironmentService(_config(tmp_path))
     service.authenticated_principal_id = "principal-caller"
