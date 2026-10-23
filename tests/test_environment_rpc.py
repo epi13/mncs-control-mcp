@@ -439,6 +439,33 @@ def test_scope_grant_forwards_only_control_verified_registered_worktree(
     assert translated[-2] == "--owner-authorized-checkout-json"
     assert json.loads(translated[-1]) == checkout_facts
 
+    verify.reset_mock()
+    legacy_selector = json.dumps({
+        "path": "/workspace/mncs-environment/.worktrees/compiler-scope/mncs-environment",
+        "repository_root": "/workspace/mncs-environment",
+    })
+    legacy_args = args[:-2] + [
+        "--owner-authorized-checkout-json", legacy_selector,
+    ]
+    legacy_translated = server._translate_argv(legacy_args, compiler, grant)
+    verify.assert_called_once_with(
+        nested.resolve(), repository="mncs-environment",
+        workspace_root=workspace.resolve(), expected_repository_root=environment.resolve(),
+    )
+    assert "--owner-authorized-checkout-json" in legacy_translated
+    assert json.loads(legacy_translated[-1]) == checkout_facts
+
+    invalid_legacy_args = args[:-2] + [
+        "--owner-authorized-checkout-json",
+        json.dumps({
+            "path": "/workspace/mncs-compiler/unregistered/mncs-environment",
+            "repository_root": "/workspace/mncs-forge",
+        }),
+    ]
+    with pytest.raises(ControlError) as invalid_owner_selector:
+        server._translate_argv(invalid_legacy_args, compiler, grant)
+    assert invalid_owner_selector.value.code == "ENVIRONMENT_WORKSPACE_ESCAPE"
+
     with pytest.raises(ControlError) as raised:
         server._translate_argv(
             args[:-2] + ["--checkout", "../mncs-compiler"], compiler, grant,

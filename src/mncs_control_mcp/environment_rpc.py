@@ -2376,7 +2376,10 @@ class EnvironmentRPCServer:
             "--campaign-id", "--repository", "--expected-authority-revision",
             "--approval-reference",
         }
-        optional = {"--checkout", "--workspace-checkout"}
+        optional = {
+            "--checkout", "--workspace-checkout",
+            "--owner-authorized-checkout-json",
+        }
         values: dict[str, str] = {}
         index = 2  # command plus the positional Environment session identity
         if len(argv) < 2 or not re.fullmatch(r"ses_[A-Za-z0-9_-]{1,120}", argv[1]):
@@ -2409,7 +2412,11 @@ class EnvironmentRPCServer:
                 "ENVIRONMENT_RPC_INVALID_REQUEST",
                 "scope admission requires campaign, repository, authority revision, and approval reference",
             )
-        if "--checkout" in values and "--workspace-checkout" in values:
+        checkout_selectors = {
+            "--checkout", "--workspace-checkout",
+            "--owner-authorized-checkout-json",
+        }.intersection(values)
+        if len(checkout_selectors) > 1:
             raise ControlError(
                 "ENVIRONMENT_RPC_INVALID_REQUEST",
                 "scope admission accepts only one checkout selector",
@@ -2481,20 +2488,60 @@ class EnvironmentRPCServer:
             "--workspace-checkout" if "--workspace-checkout" in values
             else "--checkout" if "--checkout" in values else None
         )
-        if checkout_option is not None:
-            relative_checkout = values[checkout_option]
+        owner_checkout_option = "--owner-authorized-checkout-json" in values
+        if checkout_option is not None or owner_checkout_option:
+            if owner_checkout_option:
+                try:
+                    owner_checkout = json.loads(
+                        values["--owner-authorized-checkout-json"]
+                    )
+                except (TypeError, json.JSONDecodeError) as error:
+                    raise ControlError(
+                        "ENVIRONMENT_RPC_INVALID_REQUEST",
+                        "owner-authorized checkout selector is invalid",
+                    ) from error
+                if (not isinstance(owner_checkout, dict)
+                        or set(owner_checkout) != {"path", "repository_root"}
+                        or any(not isinstance(item, str) or not item
+                               or "\x00" in item
+                               for item in owner_checkout.values())):
+                    raise ControlError(
+                        "ENVIRONMENT_RPC_INVALID_REQUEST",
+                        "owner-authorized checkout selector is malformed",
+                    )
+                virtual_repository_root = f"/workspace/{repository_name}"
+                virtual_checkout = owner_checkout["path"]
+                if owner_checkout["repository_root"] != virtual_repository_root:
+                    raise ControlError(
+                        "ENVIRONMENT_WORKSPACE_ESCAPE",
+                        "owner-authorized repository root does not match the configured repository",
+                    )
+                virtual_prefix = "/workspace/"
+                relative_checkout = (
+                    virtual_checkout[len(virtual_prefix):]
+                    if virtual_checkout.startswith(virtual_prefix) else ""
+                )
+                if not relative_checkout:
+                    raise ControlError(
+                        "ENVIRONMENT_WORKSPACE_ESCAPE",
+                        "owner-authorized checkout must remain inside the configured workspace",
+                    )
+                checkout_root = workspace_root
+            else:
+                relative_checkout = values[checkout_option]
+                checkout_root = (
+                    workspace_root if checkout_option == "--workspace-checkout"
+                    else resolved_target
+                )
             if (Path(relative_checkout).is_absolute()
                     or "\\" in relative_checkout
+                    or "\x00" in relative_checkout
                     or any(part in {"", ".", ".."}
                            for part in relative_checkout.split("/"))):
                 raise ControlError(
                     "ENVIRONMENT_WORKSPACE_ESCAPE",
                     "scope admission checkout must be a safe workspace-relative path",
                 )
-            checkout_root = (
-                workspace_root if checkout_option == "--workspace-checkout"
-                else resolved_target
-            )
             requested_checkout = checkout_root.joinpath(*relative_checkout.split("/"))
             absolute_checkout = Path(os.path.abspath(requested_checkout))
             try:
@@ -2543,11 +2590,15 @@ class EnvironmentRPCServer:
             argument_index = 0
             while argument_index < len(argv):
                 item = argv[argument_index]
-                if item in {"--checkout", "--workspace-checkout"}:
+                if item in {
+                    "--checkout", "--workspace-checkout",
+                    "--owner-authorized-checkout-json",
+                }:
                     argument_index += 2
                     continue
                 if (item.startswith("--checkout=")
-                        or item.startswith("--workspace-checkout=")):
+                        or item.startswith("--workspace-checkout=")
+                        or item.startswith("--owner-authorized-checkout-json=")):
                     argument_index += 1
                     continue
                 forwarded.append(item)
