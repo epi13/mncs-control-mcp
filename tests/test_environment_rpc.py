@@ -553,6 +553,61 @@ def test_scope_grant_accepts_exact_workspace_relative_registered_worktree(
     assert json.loads(translated[-1]) == checkout_facts
 
 
+def test_client_parent_paths_are_allowed_only_within_the_project_grant(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "projects"
+    environment = workspace / "mncs-environment"
+    campaign_root = environment / ".worktrees" / "native-app-readiness"
+    nested_checkout = campaign_root / "mncs-environment"
+    nested_checkout.mkdir(parents=True)
+    workspace.mkdir(exist_ok=True)
+    definition = campaign_root / "environment.json"
+    definition.write_text("{}", encoding="utf-8")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (campaign_root / "escape").symlink_to(outside, target_is_directory=True)
+
+    server = EnvironmentRPCServer(
+        ControlConfig(
+            workspace_root=workspace,
+            sandbox_home=tmp_path / "home",
+            environment_rpc_socket=tmp_path / "rpc" / "environment.sock",
+        ),
+        environment_service=SimpleNamespace(state_dir=tmp_path / "state"),
+        policy=object(),
+    )
+    grant = _GrantRecord(
+        grant_id="safe-relative-path-grant",
+        principal_id="principal-test",
+        host_root=environment,
+        sandbox_root="/workspace/mncs-environment",
+        scope="project",
+        uid=os.getuid(),
+        expires_at=time.monotonic() + 60,
+        token_file=tmp_path / "grant",
+    )
+
+    assert server._map_client_path(
+        "../environment.json", grant, nested_checkout,
+    ) == definition.resolve()
+    assert server._map_client_path(
+        "..", grant, nested_checkout,
+    ) == campaign_root.resolve()
+
+    with pytest.raises(ControlError) as escape:
+        server._map_client_path(
+            "../../../../outside", grant, nested_checkout,
+        )
+    assert escape.value.code == "ENVIRONMENT_WORKSPACE_ESCAPE"
+
+    with pytest.raises(ControlError) as symlink_escape:
+        server._map_client_path(
+            "../escape", grant, nested_checkout,
+        )
+    assert symlink_escape.value.code == "ENVIRONMENT_WORKSPACE_ESCAPE"
+
+
 def test_workspace_relative_scope_checkout_rejects_escape_and_unregistered_path(
     tmp_path: Path,
 ) -> None:

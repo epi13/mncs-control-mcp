@@ -761,83 +761,120 @@ class EnvironmentRPCServer:
         if not isinstance(value, str) or "\x00" in value:
             raise ControlError("ENVIRONMENT_WORKSPACE_ESCAPE", "client path is invalid")
         candidate = Path(value)
-        if ".." in candidate.parts:
-            raise ControlError(
-                "ENVIRONMENT_WORKSPACE_ESCAPE",
-                "client path must not contain parent traversal",
-            )
         if candidate.is_absolute():
             sandbox_path = candidate
         else:
-            sandbox_path = Path(record.sandbox_root) / cwd.relative_to(record.host_root).as_posix() / candidate
+            sandbox_path = (
+                Path(record.sandbox_root)
+                / cwd.relative_to(record.host_root).as_posix()
+                / candidate
+            )
+        project_relative = None
         try:
-            relative = sandbox_path.relative_to(record.sandbox_root)
-        except ValueError as error:
+            project_relative = sandbox_path.relative_to(record.sandbox_root)
+        except ValueError:
+            pass
+        if project_relative is not None:
+            host_path = (record.host_root / project_relative).resolve(strict=False)
+            host_root = record.host_root.resolve(strict=True)
+            if host_path == host_root or host_root in host_path.parents:
+                return host_path
             if not allow_workspace_worktree:
                 raise ControlError(
                     "ENVIRONMENT_WORKSPACE_ESCAPE",
-                    "client path escapes its scoped sandbox root",
-                ) from error
-            workspace_root = Path(self.config.workspace_root).expanduser().resolve(
-                strict=True
+                    "client path resolves outside its granted root",
+                )
+        elif not allow_workspace_worktree:
+            raise ControlError(
+                "ENVIRONMENT_WORKSPACE_ESCAPE",
+                "client path escapes its scoped sandbox root",
             )
-            host_root = record.host_root.expanduser().resolve(strict=True)
-            if (record.scope != "project" or host_root.parent != workspace_root
-                    or Path(record.sandbox_root) != Path("/workspace") / host_root.name):
+
+        workspace_root = Path(self.config.workspace_root).expanduser().resolve(
+            strict=True
+        )
+        host_root = record.host_root.expanduser().resolve(strict=True)
+        if (record.scope != "project" or host_root.parent != workspace_root
+                or Path(record.sandbox_root) != Path("/workspace") / host_root.name):
+            raise ControlError(
+                "ENVIRONMENT_WORKSPACE_ESCAPE",
+                "cross-project worktree paths require an immediate project grant",
+            )
+
+        normalized_sandbox_path = Path(os.path.normpath(str(sandbox_path)))
+        try:
+            relative = normalized_sandbox_path.relative_to(Path("/workspace"))
+        except ValueError as error:
+            raise ControlError(
+                "ENVIRONMENT_WORKSPACE_ESCAPE",
+                "client worktree path escapes the configured workspace",
+            ) from error
+        try:
+            original_relative = sandbox_path.relative_to(Path("/workspace"))
+        except ValueError as error:
+            raise ControlError(
+                "ENVIRONMENT_WORKSPACE_ESCAPE",
+                "client worktree path escapes the configured workspace",
+            ) from error
+        cursor = Path("/workspace")
+        for part in original_relative.parts:
+            if part in {"", "."}:
+                continue
+            if part == "..":
+                cursor = cursor.parent
+                continue
+            cursor = cursor / part
+            if cursor.is_symlink():
                 raise ControlError(
                     "ENVIRONMENT_WORKSPACE_ESCAPE",
-                    "cross-project worktree paths require an immediate project grant",
-                ) from error
-            try:
-                relative = sandbox_path.relative_to(Path("/workspace"))
-            except ValueError as workspace_error:
-                raise ControlError(
-                    "ENVIRONMENT_WORKSPACE_ESCAPE",
-                    "client worktree path escapes the configured workspace",
-                ) from workspace_error
-            if not relative.parts or any(part in {"", ".", ".."} for part in relative.parts):
-                raise ControlError(
-                    "ENVIRONMENT_WORKSPACE_ESCAPE",
-                    "client worktree path must name a workspace checkout",
+                    "client worktree path traverses a symbolic link",
                 )
-            immediate_root = workspace_root / relative.parts[0]
-            if (immediate_root.parent != workspace_root or immediate_root.is_symlink()
-                    or not immediate_root.is_dir()):
+        try:
+            cursor.relative_to(Path("/workspace"))
+        except ValueError as error:
+            raise ControlError(
+                "ENVIRONMENT_WORKSPACE_ESCAPE",
+                "client worktree path resolves outside the configured workspace",
+            ) from error
+        if not relative.parts or any(part in {"", ".", ".."} for part in relative.parts):
+            raise ControlError(
+                "ENVIRONMENT_WORKSPACE_ESCAPE",
+                "client worktree path must name a workspace checkout",
+            )
+        immediate_root = workspace_root / relative.parts[0]
+        if (immediate_root.parent != workspace_root or immediate_root.is_symlink()
+                or not immediate_root.is_dir()):
+            raise ControlError(
+                "ENVIRONMENT_WORKSPACE_ESCAPE",
+                "client worktree path must remain under an immediate workspace project",
+            )
+        marker = immediate_root / ".git"
+        try:
+            marker_stat = marker.lstat()
+        except OSError as marker_error:
+            raise ControlError(
+                "ENVIRONMENT_WORKSPACE_ESCAPE",
+                "client worktree path must be under a Git project",
+            ) from marker_error
+        if not (stat.S_ISDIR(marker_stat.st_mode) or stat.S_ISREG(marker_stat.st_mode)):
+            raise ControlError(
+                "ENVIRONMENT_WORKSPACE_ESCAPE",
+                "client worktree project marker is invalid",
+            )
+        cursor = workspace_root
+        for part in relative.parts:
+            cursor = cursor / part
+            if cursor.is_symlink():
                 raise ControlError(
                     "ENVIRONMENT_WORKSPACE_ESCAPE",
-                    "client worktree path must remain under an immediate workspace project",
+                    "client worktree path traverses a symbolic link",
                 )
-            marker = immediate_root / ".git"
-            try:
-                marker_stat = marker.lstat()
-            except OSError as marker_error:
-                raise ControlError(
-                    "ENVIRONMENT_WORKSPACE_ESCAPE",
-                    "client worktree path must be under a Git project",
-                ) from marker_error
-            if not (stat.S_ISDIR(marker_stat.st_mode) or stat.S_ISREG(marker_stat.st_mode)):
-                raise ControlError(
-                    "ENVIRONMENT_WORKSPACE_ESCAPE",
-                    "client worktree project marker is invalid",
-                )
-            cursor = workspace_root
-            for part in relative.parts:
-                cursor = cursor / part
-                if cursor.is_symlink():
-                    raise ControlError(
-                        "ENVIRONMENT_WORKSPACE_ESCAPE",
-                        "client worktree path traverses a symbolic link",
-                    )
-            host_path = (workspace_root / relative).resolve(strict=False)
-            if host_path != workspace_root and workspace_root not in host_path.parents:
-                raise ControlError(
-                    "ENVIRONMENT_WORKSPACE_ESCAPE",
-                    "client worktree path resolves outside the configured workspace",
-                )
-            return host_path
-        host_path = (record.host_root / relative).resolve(strict=False)
-        if host_path != record.host_root and record.host_root not in host_path.parents:
-            raise ControlError("ENVIRONMENT_WORKSPACE_ESCAPE", "client path resolves outside its granted root")
+        host_path = (workspace_root / relative).resolve(strict=False)
+        if host_path != workspace_root and workspace_root not in host_path.parents:
+            raise ControlError(
+                "ENVIRONMENT_WORKSPACE_ESCAPE",
+                "client worktree path resolves outside the configured workspace",
+            )
         return host_path
 
     def _map_retirement_repository(self, value: str) -> Path:
