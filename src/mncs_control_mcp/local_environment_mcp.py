@@ -858,8 +858,6 @@ class LocalEnvironmentMCP:
     ) -> dict[str, Any] | None:
         campaign_id = values.get("campaign_id")
         task_identity = values.get("task_identity")
-        if campaign_id is not None and task_identity is not None:
-            raise ValueError("supply campaign_id or task_identity, not both")
         if (context.selected_session_id
                 and SESSION_RE.fullmatch(context.selected_session_id)
                 and campaign_id is None and task_identity is None):
@@ -1033,8 +1031,9 @@ def main() -> None:
             "session. Verify runs one already-bound project verification capability "
             "with its descriptor's fixed arguments and selected project authority. "
             "The project and optional project-relative cwd "
-            "select one project directory. Session operations may include campaign_id "
-            "or task_identity to reselect safely after an MCP process restart. Invoke is "
+            "select one project directory. Session operations may include campaign_id and "
+            "task_identity together; Control checks that binding before reselecting after an "
+            "MCP process restart. Invoke is "
             "limited to the typed Compiler application-build and Forge application-execution "
             "contracts; Environment enforces the selected session's repository authority. "
             "Owner-approved scope_grant may select a repository checkout or a registered "

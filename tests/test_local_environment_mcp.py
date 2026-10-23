@@ -883,6 +883,55 @@ def test_campaign_selection_refreshes_a_stale_local_grant(
     assert requests[3]["argv"] == ["resume", "ses_selected", "--revalidate"]
 
 
+def test_campaign_and_task_identity_jointly_reselect_exact_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bridge = object.__new__(LocalEnvironmentMCP)
+    bridge.socket_path = Path("unused.sock")
+    context = _ProjectContext(
+        "authenticated-grant", "/workspace/mncs-compiler/.worktrees/selected",
+    )
+    bridge._contexts = {("mncs-compiler", ".worktrees/selected"): context}
+    requests: list[dict[str, object]] = []
+
+    def fake_rpc(_socket_path: Path, request: dict[str, object]) -> dict[str, object]:
+        requests.append(dict(request))
+        argv = request.get("argv")
+        if argv == [
+            "continuation", "--campaign-id", "cmp_compiler",
+            "--task-identity", "int_compiler_task",
+        ]:
+            return {"ok": True, "result": {
+                "stdout": json.dumps({
+                    "status": "ready", "selected_session_id": "ses_exact",
+                }),
+                "stderr": "", "exit_code": 0,
+            }}
+        if argv == ["resume", "ses_exact", "--revalidate"]:
+            return {"ok": True, "result": {
+                "stdout": json.dumps({
+                    "session_id": "ses_exact", "lifecycle": "active",
+                }),
+                "stderr": "", "exit_code": 0,
+            }}
+        raise AssertionError(f"unexpected Environment RPC request: {request}")
+
+    monkeypatch.setattr(local_environment_mcp, "_rpc", fake_rpc)
+    response = bridge.invoke(
+        "mncs-compiler", "resume",
+        {"campaign_id": "cmp_compiler", "task_identity": "int_compiler_task"},
+        cwd=".worktrees/selected",
+    )
+
+    assert response["ok"] is True
+    assert response["result"]["session_id"] == "ses_exact"
+    assert [request["argv"] for request in requests] == [
+        ["continuation", "--campaign-id", "cmp_compiler",
+         "--task-identity", "int_compiler_task"],
+        ["resume", "ses_exact", "--revalidate"],
+    ]
+
+
 def test_selection_error_is_bounded_and_keeps_campaign_choices() -> None:
     bridge = object.__new__(LocalEnvironmentMCP)
     campaigns = [
