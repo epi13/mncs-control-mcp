@@ -90,11 +90,9 @@ def test_scope_grant_maps_only_the_owner_checked_scope_admission_contract() -> N
         context,
         "mncs-compiler",
     )
-    assert checkout_argv[-2] == "--owner-authorized-checkout-json"
-    assert json.loads(checkout_argv[-1]) == {
-        "path": "/workspace/mncs-environment/.worktrees/compiler/mncs-environment",
-        "repository_root": "/workspace/mncs-environment",
-    }
+    assert checkout_argv[-2:] == [
+        "--checkout", ".worktrees/compiler/mncs-environment",
+    ]
 
     workspace_checkout_argv, _selected = _build_argv(
         "scope_grant",
@@ -110,11 +108,10 @@ def test_scope_grant_maps_only_the_owner_checked_scope_admission_contract() -> N
         context,
         "mncs-compiler",
     )
-    assert workspace_checkout_argv[-2] == "--owner-authorized-checkout-json"
-    assert json.loads(workspace_checkout_argv[-1]) == {
-        "path": "/workspace/mncs-compiler/.worktrees/native-app-readiness/mncs-vm",
-        "repository_root": "/workspace/mncs-vm",
-    }
+    assert workspace_checkout_argv[-2:] == [
+        "--workspace-checkout",
+        "mncs-compiler/.worktrees/native-app-readiness/mncs-vm",
+    ]
 
     with pytest.raises(ValueError, match="only one"):
         _build_argv(
@@ -208,11 +205,9 @@ def test_scope_grant_bridge_preserves_the_campaign_selector(
 
     assert response["ok"] is True
     assert captured[0]["argv"][2:4] == ["--campaign-id", "cmp_selected"]
-    assert captured[0]["argv"][-2] == "--owner-authorized-checkout-json"
-    assert json.loads(captured[0]["argv"][-1]) == {
-        "path": "/workspace/mncs-environment/.worktrees/compiler/mncs-environment",
-        "repository_root": "/workspace/mncs-environment",
-    }
+    assert captured[0]["argv"][-2:] == [
+        "--checkout", ".worktrees/compiler/mncs-environment",
+    ]
 
     workspace_response = bridge.invoke(
         "mncs-compiler",
@@ -226,11 +221,9 @@ def test_scope_grant_bridge_preserves_the_campaign_selector(
         },
     )
     assert workspace_response["ok"] is True
-    assert captured[1]["argv"][-2] == "--owner-authorized-checkout-json"
-    assert json.loads(captured[1]["argv"][-1]) == {
-        "path": "/workspace/mncs-compiler/.worktrees/native-app/vm",
-        "repository_root": "/workspace/mncs-vm",
-    }
+    assert captured[1]["argv"][-2:] == [
+        "--workspace-checkout", "mncs-compiler/.worktrees/native-app/vm",
+    ]
 
 
 def test_resume_revalidates_the_selected_session() -> None:

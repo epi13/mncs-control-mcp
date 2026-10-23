@@ -324,17 +324,7 @@ def _build_argv(
                 raise ValueError(
                     "checkout_path must stay inside the configured repository"
                 )
-            owner_checkout = {
-                "repository_root": (PurePosixPath("/workspace") / repository).as_posix(),
-                "path": (
-                    PurePosixPath("/workspace") / repository / checkout_path
-                ).as_posix(),
-            }
-            argv.extend([
-                "--owner-authorized-checkout-json",
-                json.dumps(owner_checkout, ensure_ascii=False, sort_keys=True,
-                           separators=(",", ":")),
-            ])
+            argv.extend(["--checkout", checkout_path])
         if "workspace_checkout" in values:
             workspace_checkout = _string(
                 values["workspace_checkout"], "workspace_checkout", max_length=1024,
@@ -347,15 +337,7 @@ def _build_argv(
                 raise ValueError(
                     "workspace_checkout must stay inside the configured workspace"
                 )
-            owner_checkout = {
-                "repository_root": (PurePosixPath("/workspace") / repository).as_posix(),
-                "path": (PurePosixPath("/workspace") / workspace_checkout).as_posix(),
-            }
-            argv.extend([
-                "--owner-authorized-checkout-json",
-                json.dumps(owner_checkout, ensure_ascii=False, sort_keys=True,
-                           separators=(",", ":")),
-            ])
+            argv.extend(["--workspace-checkout", workspace_checkout])
         return argv, True
     if operation == "health":
         argv = ["health", session_id]
