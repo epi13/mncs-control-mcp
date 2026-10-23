@@ -5379,6 +5379,18 @@ class EnvironmentRPCServer:
                 selector = self._project_environment_identity(
                     record, repository, working_checkout=project_checkout,
                 )
+        linked_checkout = (
+            project_checkout is not None
+            and project_checkout.get("path") != project_checkout.get("repository_root")
+        )
+        if task_selector_session_id is None and linked_checkout:
+            # A project-level Environment definition can be shared by the
+            # repository root and several linked worktrees. Once Control has
+            # verified the exact cwd checkout, use that stronger identity to
+            # search all contexts; otherwise a root session can hide the
+            # active campaign session attached to this same worktree.
+            selector = None
+            selection_basis = "authenticated-registered-checkout"
         if selector is None and project_checkout is None:
             return capsule
         if project_checkout is not None and selector is None:
@@ -5406,14 +5418,12 @@ class EnvironmentRPCServer:
             }
             return capsule
 
-        # A project can enter through a campaign-level Environment definition
-        # whose identity and workspace differ from the local project default.
-        # Once the authenticated campaign capsule proves that the local
-        # definition is not one of its contexts, let the verified checkout
-        # select the canonical campaign context below. Keep resolved task
-        # selectors bound to their own exact definition and workspace.
+        # Preserve the repository-root fallback for campaign-level sessions
+        # whose Environment definition differs from the local project default.
+        # A linked checkout is handled above by its stronger exact identity.
         if (
             task_selector_session_id is None
+            and not linked_checkout
             and selector is not None
             and project_context == selector
             and project_checkout is not None

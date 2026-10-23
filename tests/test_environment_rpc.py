@@ -6990,6 +6990,29 @@ def test_registered_checkout_selects_one_campaign_and_scoped_claims(
     assert result["selected_session_id"] == "ses_one"
     assert result["selected_checkout"]["checkout_identity"] == "checkout-one"
 
+    # A checkout-specific campaign context takes precedence over a session
+    # matched only through the repository-root Environment definition.
+    root_context = row("ses_repository_root", other_checkout)
+    campaign_context = row("ses_campaign_worktree", selected_checkout)
+    campaign_context["definition_id"] = "env_campaign_worktree"
+    campaign_context["workspace_root"] = str(project / ".workspaces" / "campaign")
+    cross_context_capsule = {
+        "campaign_id": "cmp_cross_context",
+        "repository": "mncs-environment",
+        "status": "ambiguous",
+        "continuations_count": 2,
+        "continuations_truncated": False,
+        "continuations": [root_context, campaign_context],
+    }
+    selected_campaign_context = server._select_project_campaign_context(
+        cross_context_capsule, record, "mncs-environment",
+        project_context=("env_same", str(workspace)),
+        project_checkout=selected_checkout,
+    )
+    assert selected_campaign_context["status"] == "ready"
+    assert selected_campaign_context["selected_session_id"] == "ses_campaign_worktree"
+    assert selected_campaign_context["selection_basis"] == "authenticated-registered-checkout"
+
     # Older sessions have only a campaign repository reference. The matcher
     # receives that canonical record and the authenticated workspace, then
     # requires an exact branch and HEAD match with the registered checkout.
