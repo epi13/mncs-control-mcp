@@ -83,6 +83,83 @@ def test_environment_package_loader_reloads_changed_sibling_sources(tmp_path: Pa
         _PACKAGE_SOURCE_IDENTITIES.pop(package_name, None)
 
 
+def _environment_source_repo(tmp_path: Path) -> tuple[Path, Path, Path]:
+    workspace = tmp_path / "projects"
+    root = workspace / "mncs-environment"
+    root.mkdir(parents=True)
+    subprocess.run(
+        ["git", "init", "--quiet", "--initial-branch", "main", str(root)],
+        check=True,
+    )
+    subprocess.run(["git", "-C", str(root), "config", "user.name", "Test"], check=True)
+    subprocess.run(
+        ["git", "-C", str(root), "config", "user.email", "test@example.invalid"],
+        check=True,
+    )
+    package = root / "mncs_env"
+    package.mkdir()
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    source = package / "sessions.py"
+    source.write_text("REVISION = 'main'\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(root), "add", "mncs_env"], check=True)
+    subprocess.run(
+        ["git", "-C", str(root), "commit", "--quiet", "-m", "Environment main"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(root), "checkout", "--quiet", "-b", "campaign/stale"],
+        check=True,
+    )
+    source.write_text("REVISION = 'stale'\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(root), "add", "mncs_env/sessions.py"], check=True)
+    subprocess.run(
+        ["git", "-C", str(root), "commit", "--quiet", "-m", "Stale Environment"],
+        check=True,
+    )
+    nested_main = workspace / ".campaigns" / "compiler" / "environment-main"
+    nested_main.parent.mkdir(parents=True)
+    subprocess.run(
+        ["git", "-C", str(root), "worktree", "add", "--quiet", str(nested_main), "main"],
+        check=True,
+    )
+    return workspace, root, nested_main
+
+
+def test_environment_source_uses_registered_nested_checkout_at_main(tmp_path: Path) -> None:
+    workspace, configured_root, nested_main = _environment_source_repo(tmp_path)
+
+    selected = EnvironmentService(
+        _config(tmp_path, repositories={"environment": "mncs-environment"}),
+    ).environment_path
+
+    assert configured_root.parent == workspace
+    assert selected == nested_main
+    assert (selected / "mncs_env" / "sessions.py").read_text(encoding="utf-8") == (
+        "REVISION = 'main'\n"
+    )
+
+
+def test_environment_source_rejects_unregistered_main_lookalike(tmp_path: Path) -> None:
+    workspace, configured_root, nested_main = _environment_source_repo(tmp_path)
+    subprocess.run(
+        ["git", "-C", str(configured_root), "worktree", "remove", str(nested_main)],
+        check=True,
+    )
+    lookalike = workspace / "lookalike-environment"
+    subprocess.run(
+        ["git", "clone", "--quiet", "--branch", "main", str(configured_root), str(lookalike)],
+        check=True,
+    )
+
+    service = EnvironmentService(
+        _config(tmp_path, repositories={"environment": "mncs-environment"}),
+    )
+    with pytest.raises(
+        ControlError, match="no clean registered checkout matches local main",
+    ):
+        _ = service.environment_path
+
+
 def _campaign_charter_result(
     tmp_path: Path, *, referenced_digest: str | None = None,
     charter_campaign: str = "campaign-1", evidence_prefix: int = 0,

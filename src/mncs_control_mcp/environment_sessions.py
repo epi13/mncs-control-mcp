@@ -47,6 +47,155 @@ _PACKAGE_LOAD_LOCK = threading.RLock()
 _PACKAGE_SOURCE_IDENTITIES: dict[str, tuple[str, str]] = {}
 
 
+def _resolve_environment_source_checkout(
+    configured_root: Path, authorized_workspace: Path,
+) -> Path:
+    """Select a clean registered checkout at the repository's local main revision.
+
+    Control commonly runs from a stable workspace path while an agent advances
+    Environment in a linked worktree. Loading the stable path unconditionally
+    can keep an older branch in service after the fix is already merged. Use
+    Git's registered worktree inventory and common-directory identity to find
+    the committed ``main`` source without trusting path shape or lookalike
+    repositories.
+    """
+    requested = Path(configured_root).expanduser()
+    if not requested.exists():
+        return requested
+    if requested.is_symlink():
+        raise ControlError(
+            ENVIRONMENT_UNAVAILABLE,
+            "configured mncs-environment checkout must not be a symbolic link",
+            details={"path": str(requested)},
+        )
+
+    try:
+        root = requested.resolve(strict=True)
+        workspace = Path(authorized_workspace).expanduser().resolve(strict=True)
+    except OSError:
+        return requested
+
+    # Some tests and explicitly configured development installs point at a
+    # sibling outside their temporary workspace. Preserve that direct source
+    # when it is not part of this Control workspace; production repository
+    # mappings are direct children and take the verified path below.
+    try:
+        root.relative_to(workspace)
+    except ValueError:
+        return root
+
+    if not ((root / ".git").is_dir() or (root / ".git").is_file()):
+        return root
+    if root.parent != workspace:
+        raise ControlError(
+            ENVIRONMENT_UNAVAILABLE,
+            "configured mncs-environment checkout is not a direct repository in the authorized workspace",
+            details={"path": str(root), "workspace": str(workspace)},
+        )
+
+    def git(path: Path, *arguments: str) -> str:
+        try:
+            completed = subprocess.run(
+                ["git", "-C", str(path), *arguments],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise ControlError(
+                ENVIRONMENT_UNAVAILABLE,
+                f"mncs-environment Git identity could not be verified: {exc}",
+                details={"path": str(path)},
+            ) from exc
+        return completed.stdout.strip()
+
+    top_level = Path(git(root, "rev-parse", "--show-toplevel")).resolve(strict=True)
+    common_directory = Path(
+        git(root, "rev-parse", "--path-format=absolute", "--git-common-dir")
+    ).resolve(strict=True)
+    if top_level != root:
+        raise ControlError(
+            ENVIRONMENT_UNAVAILABLE,
+            "configured mncs-environment path is not its Git repository root",
+            details={"path": str(root), "git_top_level": str(top_level)},
+        )
+    try:
+        main_revision = git(root, "rev-parse", "--verify", "refs/heads/main")
+    except ControlError as exc:
+        raise ControlError(
+            ENVIRONMENT_UNAVAILABLE,
+            "mncs-environment has no verified local main revision",
+            details={"path": str(root)},
+        ) from exc
+
+    worktree_output = git(root, "worktree", "list", "--porcelain")
+    entries: list[dict[str, str]] = []
+    current: dict[str, str] = {}
+    for line in (*worktree_output.splitlines(), ""):
+        if not line:
+            if current:
+                entries.append(current)
+                current = {}
+            continue
+        key, _, value = line.partition(" ")
+        if key in {"worktree", "HEAD", "branch"}:
+            current[key] = value
+
+    valid: list[tuple[bool, str, Path]] = []
+    for entry in entries:
+        raw_path = entry.get("worktree")
+        if not raw_path or entry.get("HEAD") != main_revision:
+            continue
+        candidate = Path(raw_path)
+        try:
+            resolved = candidate.resolve(strict=True)
+            resolved.relative_to(workspace)
+        except (OSError, ValueError):
+            continue
+        if candidate.is_symlink() or resolved != candidate or not resolved.is_dir():
+            continue
+        try:
+            candidate_top = Path(
+                git(resolved, "rev-parse", "--show-toplevel")
+            ).resolve(strict=True)
+            candidate_common = Path(
+                git(resolved, "rev-parse", "--path-format=absolute", "--git-common-dir")
+            ).resolve(strict=True)
+            dirty = git(resolved, "status", "--porcelain=v1", "--untracked-files=all")
+        except ControlError:
+            continue
+        if (
+            candidate_top != resolved
+            or candidate_common != common_directory
+            or dirty
+            or any(
+                package.is_symlink()
+                for package in (resolved / "mncs_env", resolved / "src" / "mncs_env")
+                if package.exists()
+            )
+            or not any(
+                (resolved / suffix / "__init__.py").is_file()
+                for suffix in ("mncs_env", "src/mncs_env")
+            )
+        ):
+            continue
+        valid.append((entry.get("branch") == "refs/heads/main", str(resolved), resolved))
+
+    if not valid:
+        raise ControlError(
+            ENVIRONMENT_UNAVAILABLE,
+            "mncs-environment's configured checkout is stale and no clean registered checkout matches local main",
+            details={
+                "configured_path": str(root),
+                "configured_head": git(root, "rev-parse", "HEAD"),
+                "main_revision": main_revision,
+            },
+        )
+    valid.sort(key=lambda item: (not item[0], item[1]))
+    return valid[0][2]
+
+
 def _claim_matches_working_checkout(
     claim: dict[str, Any], working_checkout: dict[str, Any], repository: str,
     *, session_id: str | None = None,
@@ -193,10 +342,15 @@ class EnvironmentService:
     def __init__(self, config: ControlConfig) -> None:
         self._config = config
         self.authenticated_principal_id: str | None = None
+        self._environment_path_cache: Path | None = None
 
     @property
     def environment_path(self) -> Path:
-        return self._config.environment_path
+        if self._environment_path_cache is None:
+            self._environment_path_cache = _resolve_environment_source_checkout(
+                self._config.environment_path, self._config.workspace_root,
+            )
+        return self._environment_path_cache
 
     @property
     def rights_provenance_path(self) -> Path:
@@ -245,11 +399,15 @@ class EnvironmentService:
         try:
             pkg = self._pkg()
         except ControlError as exc:
+            try:
+                path = self.environment_path
+            except ControlError:
+                path = self._config.environment_path
             return {
                 "available": False,
                 "error": exc.code,
                 "message": exc.message,
-                "path": str(self.environment_path),
+                "path": str(path),
             }
         try:
             store_pkg = importlib.import_module("mncs_store")
