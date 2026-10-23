@@ -324,7 +324,17 @@ def _build_argv(
                 raise ValueError(
                     "checkout_path must stay inside the configured repository"
                 )
-            argv.extend(["--checkout", checkout_path])
+            owner_checkout = {
+                "repository_root": (PurePosixPath("/workspace") / repository).as_posix(),
+                "path": (
+                    PurePosixPath("/workspace") / repository / checkout_path
+                ).as_posix(),
+            }
+            argv.extend([
+                "--owner-authorized-checkout-json",
+                json.dumps(owner_checkout, ensure_ascii=False, sort_keys=True,
+                           separators=(",", ":")),
+            ])
         if "workspace_checkout" in values:
             workspace_checkout = _string(
                 values["workspace_checkout"], "workspace_checkout", max_length=1024,
@@ -337,7 +347,15 @@ def _build_argv(
                 raise ValueError(
                     "workspace_checkout must stay inside the configured workspace"
                 )
-            argv.extend(["--workspace-checkout", workspace_checkout])
+            owner_checkout = {
+                "repository_root": (PurePosixPath("/workspace") / repository).as_posix(),
+                "path": (PurePosixPath("/workspace") / workspace_checkout).as_posix(),
+            }
+            argv.extend([
+                "--owner-authorized-checkout-json",
+                json.dumps(owner_checkout, ensure_ascii=False, sort_keys=True,
+                           separators=(",", ":")),
+            ])
         return argv, True
     if operation == "health":
         argv = ["health", session_id]
@@ -767,6 +785,36 @@ class LocalEnvironmentMCP:
                 {key: item[key] for key in ("repository", "path", "branch", "dirty") if key in item}
                 for item in projects[:16] if isinstance(item, dict)
             ]
+        revalidation = payload.get("revalidation")
+        if isinstance(revalidation, dict):
+            composition = revalidation.get("scope_composition")
+            if isinstance(composition, dict):
+                scope_summary: dict[str, Any] = {}
+                status = composition.get("status")
+                if isinstance(status, str):
+                    scope_summary["status"] = status[:64]
+                for field in ("composed", "retained", "removed"):
+                    items = composition.get(field)
+                    if isinstance(items, list):
+                        scope_summary[field] = [
+                            item[:128] for item in items[:16]
+                            if isinstance(item, str)
+                        ]
+                for field in ("skipped", "base_intent_skipped"):
+                    items = composition.get(field)
+                    if isinstance(items, list):
+                        scope_summary[field] = [
+                            {
+                                key: item[key][:160]
+                                for key in ("repository", "reason")
+                                if isinstance(item.get(key), str)
+                            }
+                            for item in items[:16]
+                            if isinstance(item, dict)
+                        ]
+                compact["revalidation"] = {
+                    "scope_composition": scope_summary,
+                }
         capabilities = payload.get("capabilities")
         if isinstance(capabilities, dict):
             available = capabilities.get("available")
