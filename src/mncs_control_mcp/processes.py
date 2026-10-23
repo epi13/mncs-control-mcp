@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import atexit
+import errno
+import hashlib
 import json
 import multiprocessing
 import os
 import secrets
 import signal
+import stat
 import subprocess
 import tempfile
 import threading
@@ -94,6 +97,7 @@ class TerminalJob:
     upstream_id: str | None = None
     result_summary: dict[str, object] | None = None
     artifacts: list[dict[str, object]] = field(default_factory=list)
+    state_persistence: str = "persistent"
 
     def public(self) -> dict[str, object]:
         return {
@@ -116,6 +120,7 @@ class TerminalJob:
             "upstream_id": self.upstream_id,
             "result_summary": self.result_summary,
             "artifacts": self.artifacts,
+            "state_persistence": self.state_persistence,
         }
 
 
@@ -136,15 +141,51 @@ class ProcessManager:
         self._external_executor = ThreadPoolExecutor(max_workers=config.max_concurrent_jobs, thread_name_prefix="mncs-control")
         self._lock = threading.RLock()
         self._persist_lock = threading.Lock()
+        primary_identity = str(config.job_state_path.expanduser().absolute())
+        primary_digest = hashlib.sha256(primary_identity.encode("utf-8")).hexdigest()[:20]
+        self._fallback_job_state_path = (
+            Path(tempfile.gettempdir())
+            / f"mncs-control-mcp-{getattr(os, 'getuid', lambda: 0)()}"
+            / f"jobs-{primary_digest}.json"
+        )
         self._load_metadata()
         self.sandbox.process_manager = self
         atexit.register(self.cleanup)
 
     def _load_metadata(self) -> None:
+        raw: object = None
+        source_is_fallback = False
         try:
             raw = json.loads(self.config.job_state_path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
-            return
+            raw = None
+        try:
+            parent_stat = self._fallback_job_state_path.parent.lstat()
+            fallback_stat = self._fallback_job_state_path.lstat()
+            if (not stat.S_ISDIR(parent_stat.st_mode)
+                    or parent_stat.st_uid != getattr(os, "getuid", lambda: 0)()
+                    or parent_stat.st_mode & 0o077
+                    or not stat.S_ISREG(fallback_stat.st_mode)
+                    or fallback_stat.st_uid != getattr(os, "getuid", lambda: 0)()
+                    or fallback_stat.st_mode & 0o077):
+                raise OSError(errno.EACCES, "job-state fallback is not private")
+            fallback_document = json.loads(
+                self._fallback_job_state_path.read_text(encoding="utf-8")
+            )
+            primary_mtime_ns = (
+                self.config.job_state_path.stat().st_mtime_ns
+                if self.config.job_state_path.is_file() else 0
+            )
+            if (isinstance(fallback_document, dict)
+                    and fallback_document.get("schema_version")
+                    == "mncs.control.terminal-job-state-fallback/1"
+                    and isinstance(fallback_document.get("jobs"), list)
+                    and isinstance(fallback_document.get("persisted_at_ns"), int)
+                    and fallback_document["persisted_at_ns"] > primary_mtime_ns):
+                raw = fallback_document["jobs"]
+                source_is_fallback = True
+        except (OSError, ValueError):
+            pass
         if not isinstance(raw, list):
             return
         changed = False
@@ -160,6 +201,14 @@ class ProcessManager:
             )
             if reconciled_status != persisted_status:
                 changed = True
+            persisted_mode = item.get("state_persistence")
+            state_persistence = (
+                "temporary-fallback" if source_is_fallback
+                else persisted_mode if persisted_mode in {
+                    "persistent", "temporary-fallback",
+                }
+                else "persistent"
+            )
             job = TerminalJob(
                 job_id=item["job_id"],
                 command=str(item.get("command", "[unavailable]")),
@@ -180,6 +229,7 @@ class ProcessManager:
                 upstream_id=item.get("upstream_id") if isinstance(item.get("upstream_id"), str) else None,
                 result_summary=item.get("result_summary") if isinstance(item.get("result_summary"), dict) else None,
                 artifacts=item.get("artifacts") if isinstance(item.get("artifacts"), list) else [],
+                state_persistence=state_persistence,
             )
             if job.status == "upstream_detached" and job.result_summary is None:
                 job.result_summary = {"ownership": "upstream", "reconciliation": "local process manager restarted before completion"}
@@ -190,27 +240,70 @@ class ProcessManager:
 
     def _persist(self) -> None:
         with self._persist_lock:
-            self.config.job_state_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
             try:
-                os.chmod(self.config.job_state_path.parent, 0o700)
+                for job in self._jobs.values():
+                    job.state_persistence = "persistent"
+                rows = [
+                    {**job.public(), "timeout_seconds": job.timeout_seconds}
+                    for job in self._jobs.values()
+                ][-100:]
+                self._atomic_job_state_write(self.config.job_state_path, rows)
+            except OSError as error:
+                if error.errno not in {errno.ENOSPC, getattr(errno, "EDQUOT", -1)}:
+                    raise
+                for job in self._jobs.values():
+                    job.state_persistence = "temporary-fallback"
+                rows = [
+                    {**job.public(), "timeout_seconds": job.timeout_seconds}
+                    for job in self._jobs.values()
+                ][-100:]
+                self._write_job_state_fallback(rows)
+                return
+
+            try:
+                self._fallback_job_state_path.unlink()
             except OSError:
+                # The primary record is already durable; a stale fallback is
+                # ignored by mtime on the next process start.
                 pass
-            rows = [{**job.public(), "timeout_seconds": job.timeout_seconds} for job in self._jobs.values()]
-            descriptor, temporary_name = tempfile.mkstemp(
-                prefix=f".{self.config.job_state_path.name}.", suffix=".tmp", dir=self.config.job_state_path.parent
-            )
+
+    @staticmethod
+    def _atomic_job_state_write(path: Path, document: object) -> None:
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        try:
+            os.chmod(path.parent, 0o700)
+        except OSError:
+            pass
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{path.name}.", suffix=".tmp", dir=path.parent,
+        )
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as temporary:
+                temporary.write(json.dumps(document, indent=2, sort_keys=True))
+                temporary.flush()
+                os.fsync(temporary.fileno())
+            os.chmod(temporary_name, 0o600)
+            os.replace(temporary_name, path)
+        finally:
             try:
-                with os.fdopen(descriptor, "w", encoding="utf-8") as temporary:
-                    temporary.write(json.dumps(rows[-100:], indent=2, sort_keys=True))
-                    temporary.flush()
-                    os.fsync(temporary.fileno())
-                os.chmod(temporary_name, 0o600)
-                os.replace(temporary_name, self.config.job_state_path)
-            finally:
-                try:
-                    os.unlink(temporary_name)
-                except FileNotFoundError:
-                    pass
+                os.unlink(temporary_name)
+            except FileNotFoundError:
+                pass
+
+    def _write_job_state_fallback(self, rows: list[dict[str, object]]) -> None:
+        parent = self._fallback_job_state_path.parent
+        parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        parent_stat = parent.lstat()
+        if (not stat.S_ISDIR(parent_stat.st_mode)
+                or parent_stat.st_uid != getattr(os, "getuid", lambda: 0)()
+                or parent_stat.st_mode & 0o077):
+            raise OSError(errno.EACCES, "job-state fallback directory is not private")
+        document = {
+            "schema_version": "mncs.control.terminal-job-state-fallback/1",
+            "persisted_at_ns": time.time_ns(),
+            "jobs": rows,
+        }
+        self._atomic_job_state_write(self._fallback_job_state_path, document)
 
     def start(
         self,
@@ -314,7 +407,27 @@ class ProcessManager:
                 self._request_processes.setdefault(rpc_grant.grant_id, {})[
                     process.pid
                 ] = self._process_start_ticks(process.pid)
-            self._persist()
+            try:
+                self._persist()
+            except Exception:
+                self._jobs.pop(job.job_id, None)
+                grant = self._environment_grants.pop(job.job_id, None)
+                if grant is not None:
+                    self._request_processes.get(grant.grant_id, {}).pop(
+                        process.pid, None,
+                    )
+                self._signal(job, signal.SIGTERM)
+                try:
+                    process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    self._signal(job, signal.SIGKILL)
+                    process.wait()
+                if grant is not None and rpc is not None:
+                    self.unregister_claim_recovery_request_process(
+                        grant.grant_id, process.pid,
+                    )
+                    rpc.revoke_grant(grant)
+                raise
         assert process.stdout is not None and process.stderr is not None
         threading.Thread(target=self._drain, args=(process.stdout, job.stdout), daemon=True).start()
         threading.Thread(target=self._drain, args=(process.stderr, job.stderr), daemon=True).start()
