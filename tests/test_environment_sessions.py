@@ -1507,6 +1507,150 @@ def test_campaign_continuation_resolves_only_an_authenticated_task_selector(
     assert conflict.value.code == "ENVIRONMENT_TASK_SELECTOR_CONFLICT"
 
 
+
+def test_task_selector_uses_unique_authoritative_session_across_contexts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = EnvironmentService(_config(tmp_path))
+    service.authenticated_principal_id = "principal-context-selection"
+    repository = "mncs-control-mcp"
+    checkout = service._config.workspace_root / repository / ".worktrees" / "selected"
+    checkout.mkdir(parents=True)
+    campaign_id = "cmp_task_context_selection"
+    task_identity = "same-task-after-environment-definition-change"
+    contexts = [
+        ("ses_checkpointed", "env_prior", str(checkout.parent)),
+        ("ses_uncheckpointed", "env_current", str(service._config.workspace_root)),
+    ]
+    snapshots = {}
+    for session_id, definition_id, workspace_root in contexts:
+        snapshots[session_id] = {
+            "session_id": session_id,
+            "snapshot_sequence": 3,
+            "lifecycle": "active",
+            "authenticated_principal_id": service.authenticated_principal_id,
+            "provenance": {"definition_id": definition_id},
+            "workspace": {"root": workspace_root},
+            "selected_checkouts": {
+                repository: {
+                    "repository": repository,
+                    "path": str(checkout),
+                    "branch": "campaign/current",
+                    "head": "a" * 40,
+                    "checkout_identity": "checkout-selected",
+                    "git_common_directory_identity": "common-selected",
+                }
+            },
+            "campaign": {
+                "identity": campaign_id,
+                "work_intent": {
+                    "goal": "continue the compiler-language task",
+                    "repositories": [repository],
+                },
+                "repository_refs": [{
+                    "repository": repository,
+                    "observed_path": str(checkout),
+                    "branch": "campaign/current",
+                    "head": "a" * 40,
+                }],
+                "delivery": {"status": "pending"},
+            },
+        }
+
+    class Store:
+        def __init__(self) -> None:
+            self.evidence: dict[str, dict[str, object]] = {}
+
+        def list_sessions(self):
+            return list(snapshots)
+
+        def load_snapshot(self, session_id: str):
+            return snapshots.get(session_id)
+
+        def read_claims(self):
+            return []
+
+        def read_evidence(self, evidence_id: str):
+            return self.evidence.get(evidence_id)
+
+        def write_evidence(self, evidence_id: str, record: dict[str, object]):
+            self.evidence[evidence_id] = record
+            return record
+
+        def close(self):
+            pass
+
+    store = Store()
+    package = service._pkg()
+    for session_id, definition_id, workspace_root in contexts:
+        selector = package.campaign_selector.selector_identity(
+            task_identity,
+            authenticated_principal_id=service.authenticated_principal_id,
+            definition_id=definition_id,
+            workspace_root=workspace_root,
+        )
+        package.campaign_selector.bind(
+            store,
+            selector=selector,
+            authenticated_principal_id=service.authenticated_principal_id,
+            definition_id=definition_id,
+            workspace_root=workspace_root,
+            campaign_id=campaign_id,
+            session_id=session_id,
+            request_id=f"req_{session_id}",
+        )
+
+    class Session:
+        @staticmethod
+        def open(**_kwargs):
+            return SimpleNamespace(context=lambda: {"continuation": {}})
+
+    selected_owner = {"session_id": "ses_checkpointed"}
+
+    def authoritative_session(_store, session_ids, _working_checkout):
+        assert set(session_ids) == {"ses_checkpointed", "ses_uncheckpointed"}
+        return selected_owner["session_id"], {"basis": "unique_session_checkpoint"}
+
+    monkeypatch.setattr(package.sessions, "Session", Session)
+    monkeypatch.setattr(
+        package.entry, "_authoritative_duplicate_session", authoritative_session,
+    )
+    monkeypatch.setattr(package.claims, "active_claims", lambda _claims: {})
+    service._pkg = lambda: package
+    service._store = lambda _package: store
+    working_checkout = {
+        "repository": repository,
+        "path": str(checkout),
+        "branch": "campaign/current",
+        "head": "a" * 40,
+        "checkout_identity": "checkout-selected",
+        "git_common_directory_identity": "common-selected",
+    }
+
+    selected = service.campaign_continuation(
+        repository,
+        campaign_id,
+        task_identity,
+        working_checkout=working_checkout,
+    )
+    assert selected["status"] == "ready"
+    assert selected["continuations"][0]["session_id"] == "ses_checkpointed"
+    assert selected["task_selector"]["session_id"] == "ses_checkpointed"
+
+    selected_owner["session_id"] = None
+    ambiguous = service.campaign_continuation(
+        repository,
+        campaign_id,
+        task_identity,
+        working_checkout=working_checkout,
+    )
+    assert ambiguous["status"] == "ambiguous-task-selector-contexts"
+    assert ambiguous["task_selector"]["status"] == "ambiguous"
+    assert {item["session_id"] for item in ambiguous["task_selector"]["contexts"]} == {
+        "ses_checkpointed", "ses_uncheckpointed",
+    }
+
+
 def test_projection_evidence_reads_authenticated_session_without_mutating_it(
     tmp_path: Path,
 ) -> None:

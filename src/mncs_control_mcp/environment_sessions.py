@@ -216,18 +216,29 @@ def _claim_matches_working_checkout(
         or scope.get("repository", repository) != repository
         or not isinstance(checkout_path, str)
         or not isinstance(scope_path, str)
-        or scope.get("branch") != branch
     ):
         return False
-    current_identity = working_checkout.get("checkout_identity")
-    scope_identity = scope.get("checkout_identity")
-    if (isinstance(current_identity, str) and isinstance(scope_identity, str)
-            and current_identity != scope_identity):
+
+    identity_fields = (
+        "checkout_identity", "git_common_directory_identity", "manifest_identity",
+    )
+    current_identities = {field: working_checkout.get(field) for field in identity_fields}
+    recorded_identities = {field: scope.get(field) for field in identity_fields}
+    if any(
+        isinstance(current_identities[field], str)
+        and isinstance(recorded_identities[field], str)
+        and current_identities[field] != recorded_identities[field]
+        for field in identity_fields
+    ):
         return False
-    current_common = working_checkout.get("git_common_directory_identity")
-    scope_common = scope.get("git_common_directory_identity")
-    if (isinstance(current_common, str) and isinstance(scope_common, str)
-            and current_common != scope_common):
+    branch_matches = scope.get("branch") == branch
+    same_stable_checkout = all(
+        isinstance(current_identities[field], str)
+        and isinstance(recorded_identities[field], str)
+        and current_identities[field] == recorded_identities[field]
+        for field in identity_fields
+    )
+    if not branch_matches and not same_stable_checkout:
         return False
     try:
         current_path = Path(checkout_path)
@@ -1142,6 +1153,39 @@ class EnvironmentService:
                     if item["campaign_id"] in project_campaigns
                     or item["references_repository"]
                 ]
+                if len(project_bindings) > 1:
+                    duplicate_selector = getattr(
+                        getattr(pkg, "entry", None),
+                        "_authoritative_duplicate_session",
+                        None,
+                    )
+                    authoritative_session = None
+                    if callable(duplicate_selector):
+                        candidate_session_ids = sorted({
+                            item["session_id"] for item in project_bindings
+                            if isinstance(item.get("session_id"), str)
+                        })
+                        authoritative_session, _selection_evidence = duplicate_selector(
+                            store, candidate_session_ids, working_checkout,
+                        )
+                        if (authoritative_session is None
+                                and working_checkout is not None):
+                            # A task selector can legitimately retain bindings
+                            # from two Environment definitions after a worktree
+                            # moves. If current checkout evidence is insufficient,
+                            # a unique canonical checkpoint can still identify the
+                            # prior continuation; duplicate checkpoints stay
+                            # ambiguous in Environment's selector.
+                            authoritative_session, _selection_evidence = (
+                                duplicate_selector(store, candidate_session_ids, None)
+                            )
+                    if isinstance(authoritative_session, str):
+                        selected_rows = [
+                            item for item in project_bindings
+                            if item.get("session_id") == authoritative_session
+                        ]
+                        if len(selected_rows) == 1:
+                            project_bindings = selected_rows
                 if len(project_bindings) > 1:
                     contexts_out = [{
                         "campaign_id": item["campaign_id"],
