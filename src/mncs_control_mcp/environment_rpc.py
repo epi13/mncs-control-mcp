@@ -980,6 +980,9 @@ class EnvironmentRPCServer:
             environment_project = self.config.repositories.get(
                 "environment", "mncs-environment"
             )
+            compiler_project = self.config.repositories.get(
+                "compiler", "mncs-compiler"
+            )
             if record.scope != "project":
                 raise ControlError(
                     "ENVIRONMENT_AUTHORITY_DENIED",
@@ -988,9 +991,17 @@ class EnvironmentRPCServer:
             project_repository = self._project_repository(record)
             own_project_capability = argv[2].startswith(project_repository + ":")
             canonical_artifact = (argv[2], argv[4]) in allowed_artifacts
+            compiler_integration_artifact = (argv[2], argv[4]) in {
+                ("mncs-forge:native-application-execution",
+                 "native-application-execution.json"),
+                ("mncs-forge:native-application-execution",
+                 "forge-execution-receipt.json"),
+            }
             if (not own_project_capability
                     and not (project_repository == environment_project
-                             and canonical_artifact)):
+                             and canonical_artifact)
+                    and not (project_repository == compiler_project
+                             and compiler_integration_artifact)):
                 raise ControlError(
                     "ENVIRONMENT_AUTHORITY_DENIED",
                     "project artifact reads require the project's own capability or an established Environment integration artifact",
@@ -1018,6 +1029,9 @@ class EnvironmentRPCServer:
             native_application_build = (
                 argv[2] == "mncs-compiler:native-application-build"
             )
+            native_application_execution = (
+                argv[2] == "mncs-forge:native-application-execution"
+            )
             if (argv[2] not in ALLOWED_INVOKE_CAPABILITIES
                     and not project_verification):
                 raise ControlError(
@@ -1036,7 +1050,7 @@ class EnvironmentRPCServer:
                 self._authorize_resource_headroom_invocation(argv, record)
             elif native_application_build:
                 self._authorize_native_application_build_invocation(argv, record)
-            elif argv[2] == "mncs-forge:native-application-execution":
+            elif native_application_execution:
                 self._authorize_native_application_execution_invocation(argv, record)
             elif argv[2] in {
                 "mncs-forge:provider-artifact-execution",
@@ -1060,7 +1074,8 @@ class EnvironmentRPCServer:
                     "System Monitor observability requires the session selected by this grant's authenticated continuation",
                     details={"next": "run project continuation and use its selected session"},
                 )
-            if not project_verification and not native_application_build:
+            if (not project_verification and not native_application_build
+                    and not native_application_execution):
                 environment_project = self.config.repositories.get(
                     "environment", "mncs-environment"
                 )
@@ -1825,6 +1840,9 @@ class EnvironmentRPCServer:
         environment_project = self.config.repositories.get(
             "environment", "mncs-environment"
         )
+        compiler_project = self.config.repositories.get(
+            "compiler", "mncs-compiler"
+        )
         prefix = [
             "invoke", argv[1] if len(argv) > 1 else "",
             "mncs-forge:native-application-execution",
@@ -1842,7 +1860,9 @@ class EnvironmentRPCServer:
                 canonical_call = False
         allowed = (
             record.scope == "project"
-            and self._project_repository(record) == environment_project
+            and self._project_repository(record) in {
+                environment_project, compiler_project,
+            }
             and record.bound_session_id == argv[1]
             and len(argv) == 11
             and argv[:6] == prefix

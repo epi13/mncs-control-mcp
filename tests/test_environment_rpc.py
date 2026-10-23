@@ -2568,6 +2568,8 @@ def test_artifact_read_is_bound_to_environment_selected_project_session(
     workspace = tmp_path / "projects"
     project = workspace / "mncs-environment"
     project.mkdir(parents=True)
+    compiler_project = workspace / "mncs-compiler"
+    compiler_project.mkdir(parents=True)
     authorized_sessions: list[tuple[str, str]] = []
 
     class Environment:
@@ -2583,7 +2585,10 @@ def test_artifact_read_is_bound_to_environment_selected_project_session(
     server = EnvironmentRPCServer(
         ControlConfig(
             workspace_root=workspace,
-            repositories={"environment": "mncs-environment"},
+            repositories={
+                "environment": "mncs-environment",
+                "compiler": "mncs-compiler",
+            },
             sandbox_home=tmp_path / "home",
             environment_rpc_socket=tmp_path / "rpc" / "environment.sock",
         ),
@@ -2602,6 +2607,19 @@ def test_artifact_read_is_bound_to_environment_selected_project_session(
         token_file=tmp_path / "grant",
     )
     server._grants[hashlib.sha256(token.encode()).hexdigest()] = record
+    compiler_token = "artifact-read-compiler-native-application-grant"
+    compiler_record = _GrantRecord(
+        grant_id="artifact-read-compiler-native-application-grant",
+        principal_id="principal-agent",
+        host_root=compiler_project,
+        sandbox_root="/workspace/mncs-compiler",
+        scope="project",
+        uid=0,
+        expires_at=time.monotonic() + 60,
+        token_file=tmp_path / "compiler-grant",
+        bound_session_id="ses_compiler",
+    )
+    server._grants[hashlib.sha256(compiler_token.encode()).hexdigest()] = compiler_record
     selected_session = ["ses_selected"]
     monkeypatch.setattr(
         server, "_select_project_campaign_context",
@@ -2817,6 +2835,43 @@ def test_artifact_read_is_bound_to_environment_selected_project_session(
         native_execution_binding_id, "forge-execution-receipt.json",
     ]
 
+    compiler_execution_base = {
+        "grant": compiler_token,
+        "cwd": "/workspace/mncs-compiler",
+    }
+    compiler_execution_read = server.dispatch({
+        **compiler_execution_base,
+        "request_id": "req_artifact_read_compiler_native_application_execution",
+        "argv": ["artifact-read", "ses_compiler", native_execution_capability,
+                 native_execution_binding_id, "native-application-execution.json"],
+    }, peer_uid=0)
+    assert compiler_execution_read["ok"] is True
+    assert calls[10][0][-5:] == [
+        "artifact-read", "ses_compiler", native_execution_capability,
+        native_execution_binding_id, "native-application-execution.json",
+    ]
+    compiler_receipt_read = server.dispatch({
+        **compiler_execution_base,
+        "request_id": "req_artifact_read_compiler_native_application_receipt",
+        "argv": ["artifact-read", "ses_compiler", native_execution_capability,
+                 native_execution_binding_id, "forge-execution-receipt.json"],
+    }, peer_uid=0)
+    assert compiler_receipt_read["ok"] is True
+    assert calls[11][0][-5:] == [
+        "artifact-read", "ses_compiler", native_execution_capability,
+        native_execution_binding_id, "forge-execution-receipt.json",
+    ]
+    unrelated_compiler_artifact_read = server.dispatch({
+        **compiler_execution_base,
+        "request_id": "req_artifact_read_compiler_unrelated_resource_sample",
+        "argv": ["artifact-read", "ses_compiler",
+                 "mncs-system-monitor:system-resource-sample",
+                 "cap_" + "2" * 16, "system-resource-sample.json"],
+    }, peer_uid=0)
+    assert unrelated_compiler_artifact_read["ok"] is False
+    assert unrelated_compiler_artifact_read["error"]["code"] == "ENVIRONMENT_AUTHORITY_DENIED"
+    assert len(calls) == 12
+
     selected_session[0] = "ses_other"
     server.dispatch({
         **base,
@@ -2853,7 +2908,7 @@ def test_artifact_read_is_bound_to_environment_selected_project_session(
             "argv": argv,
         }, peer_uid=0)
         assert rejected["error"]["code"] == "ENVIRONMENT_AUTHORITY_DENIED"
-    assert len(calls) == 10
+    assert len(calls) == 12
 
 
 def test_project_grant_can_read_only_its_own_bounded_artifact_namespace(
@@ -4676,7 +4731,13 @@ def test_environment_project_rpc_admits_typed_native_application_flow(
     workspace = tmp_path / "projects"
     project = workspace / "mncs-environment"
     (project / ".worktrees" / "gatec").mkdir(parents=True)
+    compiler_project = workspace / "mncs-compiler"
+    (compiler_project / ".worktrees" / "gatec").mkdir(parents=True)
+    unrelated_project = workspace / "mncs-test"
+    (unrelated_project / ".worktrees" / "gatec").mkdir(parents=True)
     token = "environment-native-application-gatec-grant"
+    compiler_token = "compiler-native-application-gatec-grant"
+    unrelated_token = "unrelated-native-application-gatec-grant"
 
     class Store:
         def load_snapshot(self, _session_id: str) -> dict[str, str]:
@@ -4715,6 +4776,28 @@ def test_environment_project_rpc_admits_typed_native_application_flow(
         uid=0,
         expires_at=time.monotonic() + 60,
         token_file=tmp_path / "grant",
+        bound_session_id="ses_gatec",
+    )
+    server._grants[hashlib.sha256(compiler_token.encode()).hexdigest()] = _GrantRecord(
+        grant_id="compiler-native-application-gatec-grant",
+        principal_id="principal-agent",
+        host_root=compiler_project,
+        sandbox_root="/workspace/mncs-compiler",
+        scope="project",
+        uid=0,
+        expires_at=time.monotonic() + 60,
+        token_file=tmp_path / "compiler-grant",
+        bound_session_id="ses_compiler",
+    )
+    server._grants[hashlib.sha256(unrelated_token.encode()).hexdigest()] = _GrantRecord(
+        grant_id="unrelated-native-application-gatec-grant",
+        principal_id="principal-agent",
+        host_root=unrelated_project,
+        sandbox_root="/workspace/mncs-test",
+        scope="project",
+        uid=0,
+        expires_at=time.monotonic() + 60,
+        token_file=tmp_path / "unrelated-grant",
         bound_session_id="ses_gatec",
     )
     calls: list[tuple[list[str], dict[str, object]]] = []
@@ -4788,6 +4871,36 @@ def test_environment_project_rpc_admits_typed_native_application_flow(
     assert executed_with_provider["ok"] is True
     assert calls[2][0][-len(execution_with_provider_argv):] == execution_with_provider_argv
 
+    compiler_execution_argv = [
+        "invoke", "ses_compiler", *execution_with_provider_argv[2:],
+    ]
+    compiler_execution = server.dispatch({
+        "grant": compiler_token,
+        "cwd": "/workspace/mncs-compiler/.worktrees/gatec",
+        "request_id": "req_compiler_application_execution_with_capability",
+        "argv": compiler_execution_argv,
+    }, peer_uid=0)
+    assert compiler_execution["ok"] is True, compiler_execution
+    assert calls[3][0][-len(compiler_execution_argv):] == compiler_execution_argv
+
+    compiler_wrong_session = server.dispatch({
+        "grant": compiler_token,
+        "cwd": "/workspace/mncs-compiler/.worktrees/gatec",
+        "request_id": "req_compiler_application_execution_wrong_session",
+        "argv": ["invoke", "ses_other", *compiler_execution_argv[2:]],
+    }, peer_uid=0)
+    assert compiler_wrong_session["ok"] is False
+    assert compiler_wrong_session["error"]["code"] == "ENVIRONMENT_AUTHORITY_DENIED"
+
+    unrelated_execution = server.dispatch({
+        "grant": unrelated_token,
+        "cwd": "/workspace/mncs-test/.worktrees/gatec",
+        "request_id": "req_unrelated_application_execution",
+        "argv": execution_argv,
+    }, peer_uid=0)
+    assert unrelated_execution["ok"] is False
+    assert unrelated_execution["error"]["code"] == "ENVIRONMENT_AUTHORITY_DENIED"
+
     for index, invalid_argv in enumerate((
         [*build_argv, "--timeout-seconds", "900"],
         [*execution_argv[:-2], "--call-json", '{"callable":"arbitrary"}'],
@@ -4819,7 +4932,7 @@ def test_environment_project_rpc_admits_typed_native_application_flow(
             "argv": invalid_argv,
         }, peer_uid=0)
         assert rejected["ok"] is False
-    assert len(calls) == 3
+    assert len(calls) == 4
 
 
 def test_compiler_project_rpc_admits_only_its_typed_native_application_build(
