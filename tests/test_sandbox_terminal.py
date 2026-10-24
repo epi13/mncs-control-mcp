@@ -219,6 +219,27 @@ def test_project_bwrap_reconciles_checkpoint_after_control_rpc_restart(config) -
     shutil.copyfile(
         fixture_source, project / ".mncs" / "project-environment.json",
     )
+    subprocess.run(
+        ["git", "-C", str(project), "config", "user.name", "MNCS Test"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(project), "config", "user.email", "mncs-test@example.invalid"],
+        check=True,
+    )
+    subprocess.run(
+        [
+            "git", "-C", str(project), "add",
+            ".mncs/project.json",
+            ".mncs/project-environment.json",
+            "tests/fixtures/control-rpc-entry.json",
+        ],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(project), "commit", "-q", "-m", "Registered restart fixture"],
+        check=True,
+    )
 
     private_root = Path(tempfile.mkdtemp(prefix="mce-rpc-restart-", dir="/tmp"))
     endpoint_config = replace(
