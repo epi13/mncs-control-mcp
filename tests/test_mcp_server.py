@@ -169,6 +169,10 @@ environment_rpc_socket = {str(environment_rpc_socket)!r}
             "env_projection_evidence",
         } <= names
         assert "commons_publish" not in names
+        storage_inventory = next(
+            item for item in tools if item["name"] == "workspace_storage_inventory"
+        )
+        assert "Btrfs allocation and device counters" in storage_inventory["description"]
         binding_tool = next(item for item in tools if item["name"] == "env_campaign_task_bind")
         assert binding_tool["inputSchema"]["required"] == [
             "repository", "campaign_id", "session_id", "task_identity",

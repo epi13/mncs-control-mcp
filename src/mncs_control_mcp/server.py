@@ -222,7 +222,7 @@ def build_server(config: ControlConfig | None = None) -> Any:
     def workspace_info() -> dict[str, object]:
         return invoke("workspace_info", projects.workspace_info)  # type: ignore[return-value]
 
-    @server.tool(name="workspace_storage_inventory", description="Measure workspace disk use and classify common generated-data roots without changing files.", annotations=ro, structured_output=True)
+    @server.tool(name="workspace_storage_inventory", description="Measure workspace disk use, Btrfs allocation and device counters, and classify common generated-data roots without changing files.", annotations=ro, structured_output=True)
     def workspace_storage_inventory() -> dict[str, object]:
         return invoke("workspace_storage_inventory", storage.inventory)  # type: ignore[return-value]
 
