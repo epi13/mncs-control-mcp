@@ -357,10 +357,15 @@ class EnvironmentService:
 
     @property
     def environment_path(self) -> Path:
-        if self._environment_path_cache is None:
-            self._environment_path_cache = _resolve_environment_source_checkout(
-                self._config.environment_path, self._config.workspace_root,
-            )
+        # Environment normally advances in a linked worktree while this
+        # Control process stays alive. A one-time path choice can therefore
+        # keep old authorization logic active after main has been updated.
+        # Resolve against the current local main revision for each operation;
+        # the resolver verifies the registered, clean checkout before it is
+        # used and this field remains only the last resolved path.
+        self._environment_path_cache = _resolve_environment_source_checkout(
+            self._config.environment_path, self._config.workspace_root,
+        )
         return self._environment_path_cache
 
     @property

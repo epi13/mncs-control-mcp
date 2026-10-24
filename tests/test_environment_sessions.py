@@ -237,6 +237,43 @@ def test_environment_source_uses_registered_nested_checkout_at_main(tmp_path: Pa
     )
 
 
+def test_environment_source_reselects_main_after_main_advances(
+    tmp_path: Path,
+) -> None:
+    _workspace, configured_root, nested_main = _environment_source_repo(tmp_path)
+    service = EnvironmentService(
+        _config(tmp_path, repositories={"environment": "mncs-environment"}),
+    )
+
+    assert service.environment_path == nested_main
+
+    # Leave the old source checkout registered but pinned to the previous
+    # revision, then advance main in the configured checkout. The same
+    # long-lived service must stop using the stale Environment implementation.
+    subprocess.run(
+        ["git", "-C", str(nested_main), "checkout", "--quiet", "--detach"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(configured_root), "checkout", "--quiet", "main"],
+        check=True,
+    )
+    source = configured_root / "mncs_env" / "sessions.py"
+    source.write_text("REVISION = 'advanced-main'\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "-C", str(configured_root), "add", "mncs_env/sessions.py"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(configured_root), "commit", "--quiet", "-m",
+         "Advance Environment main"],
+        check=True,
+    )
+
+    assert service.environment_path == configured_root
+    assert source.read_text(encoding="utf-8") == "REVISION = 'advanced-main'\n"
+
+
 def test_environment_source_rejects_unregistered_main_lookalike(tmp_path: Path) -> None:
     workspace, configured_root, nested_main = _environment_source_repo(tmp_path)
     subprocess.run(
