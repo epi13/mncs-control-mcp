@@ -13,7 +13,8 @@ operation.
 Use these tools in order:
 
 1. `workspace_storage_inventory` reports filesystem capacity, workspace size,
-   largest immediate projects, and categorized generated-data roots.
+   largest immediate projects, categorized generated-data roots, and (when the
+   workspace is on Btrfs) current pool allocation and device error counters.
 2. `workspace_storage_plan` classifies Cargo target roots against repository,
    worktree, filesystem, and live-process evidence. A plan never removes data.
 3. Review the candidate paths and reasons. Only entries with state
@@ -66,6 +67,63 @@ The workspace size and candidate sizes use GNU `du` allocated-block
 measurements. Btrfs compression and shared extents mean allocated directory
 bytes can differ from physical free space after deletion; the reclaim result
 reports both allocated bytes removed and the measured available-space delta.
+
+## Btrfs observation
+
+The inventory resolves the workspace mount from Linux `mountinfo`. For a
+Btrfs mount it makes two read-only, five-second-bounded calls to
+`btrfs filesystem usage -b` and `btrfs device stats`. The optional `btrfs`
+object reports the pool's device size, allocated and unallocated bytes, total
+used bytes, estimated free space and its minimum estimate, statfs free space,
+data and metadata allocation profiles, global reserve, and per-profile block
+group sizes and usage. These are values reported directly by Btrfs; the
+existing `filesystem.available_fraction` is a separate value derived from
+`statvfs`.
+
+The metadata profile ratio describes the allocation profile (for example,
+DUP), not metadata fullness. Metadata fullness is represented by the
+`used_bytes` and `size_bytes` of the metadata block-group rows. Estimated free
+space, its minimum, statfs free space, and device unallocated space have
+different meanings and should remain separate when diagnosing headroom.
+Device error counters are cumulative since device registration. The object
+reports `observed`, `partial`, `unavailable`, or `not_applicable`; command
+failures and missing mount data are visible in `errors`. An unprivileged
+observer can read pool totals and counters while detailed per-device chunk
+usage or subvolume and quota state may remain unavailable.
+
+This is a point-in-time observation, not a history store. It cannot attribute
+a past ENOSPC event or identify whether metadata, data, a quota, or another
+constraint caused it. It does not set arbitrary pressure thresholds, schedule
+work, propose deletion, or authorize remediation. An inventory observation
+never changes the existing plan/explicit-confirmation boundary for reclamation.
+
+## ENOSPC incident assessment (2026-10-23/24)
+
+The previous boot's journal contains 374 application-level `ENOSPC`/“No space
+left” records from approximately 19:46–20:35 AKDT on 2026-10-23. Most came
+from writes to rsyslog state and ChatGPT global state; a smaller number came
+from ABRT, Chrony, and Crashpad. The inspected window contains no Btrfs kernel
+ENOSPC report. This confirms that multiple applications could not write, but
+does not establish whether the failing constraint was Btrfs metadata, data,
+quota/reservation state, or another layer at that time.
+
+At the 2026-10-24 inspection, Btrfs reported about 29.0 GB unallocated at the
+device level, 37.4 GB estimated free, a data block group about 96% used, and a
+metadata DUP block group about 64% used. The global reserve was unused;
+device read/write/flush/corruption/generation counters were all zero, and scrub
+reported no errors. These are current observations after the incident, not a
+reconstruction of its peak pressure. The workspace inventory also hit its
+500-root classification bound, leaving many build-output directories
+unclassified; those findings do not identify the incident cause. No build
+output, cache, worktree, snapshot, or other project state was removed during
+this assessment.
+
+The unprivileged account could not enumerate Btrfs subvolumes or quota groups,
+and noninteractive administrative access was unavailable. Snapshot growth,
+quota constraints, and historical allocation pressure therefore remain
+unverified. The new inventory records the data and metadata pools and current
+device counters on future observations; it does not backfill history that was
+not recorded before this incident.
 
 ## Initial workspace investigation (2026-09-26)
 

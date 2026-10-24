@@ -191,12 +191,162 @@ def test_inventory_reports_workspace_and_preserved_runtime_state(tmp_path: Path)
     result = service(workspace).inventory()
 
     assert result["schema_version"] == "mncs.workspace-storage-inventory/1"
+    assert result["btrfs"]["status"] in {"observed", "partial", "unavailable", "not_applicable"}
     assert result["workspace"]["allocated_bytes"] > 0
     categories = {item["kind"]: item for item in result["categories"]}
     assert categories["cargo-target"]["root_count"] == 1
     assert categories["cargo-target"]["reconstructability"] == "known"
     assert categories["cargo-target"]["reclamation_supported"] is True
     assert categories["mncs-runtime-state"]["root_count"] == 1
+
+
+def test_non_btrfs_inventory_skips_btrfs_commands(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    workspace = tmp_path / "projects"
+    workspace.mkdir()
+    storage = service(workspace)
+    monkeypatch.setattr(storage, "_mount_for_path", lambda _root: {
+        "status": "observed",
+        "mount": {"target": "/", "filesystem_type": "ext4", "source": "/dev/test"},
+        "errors": [],
+    })
+
+    def unexpected_command(_args: list[str], _timeout: int) -> dict[str, object]:
+        raise AssertionError("Btrfs commands must not run for a non-Btrfs workspace")
+
+    monkeypatch.setattr(storage, "_run_btrfs_command", unexpected_command)
+
+    result = storage._btrfs_observation()
+
+    assert result["status"] == "not_applicable"
+    assert result["device_stats"] == {"status": "not_applicable", "devices": []}
+
+
+def test_mountinfo_selects_the_most_specific_mount_and_decodes_escaped_paths(tmp_path: Path) -> None:
+    mountpoint = tmp_path / "projects and data"
+    root = mountpoint / "mncs"
+    root.mkdir(parents=True)
+    escaped_mountpoint = str(mountpoint).replace(" ", r"\040")
+    mountinfo = tmp_path / "mountinfo"
+    mountinfo.write_text(
+        "24 1 0:1 / / rw - ext4 /dev/root rw\n"
+        f"36 24 8:3 /home {escaped_mountpoint} rw,relatime - btrfs /dev/sda3 rw,compress=zstd\n"
+    )
+
+    result = StorageService._mount_for_path(root, mountinfo)
+
+    assert result["status"] == "observed"
+    assert result["mount"] == {
+        "target": str(mountpoint),
+        "filesystem_type": "btrfs",
+        "source": "/dev/sda3",
+    }
+
+
+def test_btrfs_inventory_exposes_pool_metadata_and_device_error_counters(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = tmp_path / "projects"
+    workspace.mkdir()
+    storage = service(workspace)
+    monkeypatch.setattr(
+        storage,
+        "_mount_for_path",
+        lambda _root: {
+            "status": "observed",
+            "mount": {"target": "/home", "filesystem_type": "btrfs", "source": "/dev/sda3"},
+            "errors": [],
+        },
+    )
+    outputs = {
+        "filesystem": """Overall:
+    Device size: 10000
+    Device allocated: 9000
+    Device unallocated: 1000
+    Device missing: 0
+    Device slack: 0
+    Used: 7000
+    Free (estimated): 3000 (min: 2000)
+    Free (statfs, df): 2500
+    Data ratio: 1.00
+    Metadata ratio: 2.00
+    Global reserve: 500 (used: 20)
+Data,single: Size:7000, Used:6000 (85.71%)
+Metadata,DUP: Size:2000, Used:1000 (50.00%)
+System,DUP: Size:1000, Used:0 (0.00%)
+""",
+        "device": """[/dev/sda3].write_io_errs 0
+[/dev/sda3].read_io_errs 0
+[/dev/sda3].flush_io_errs 0
+[/dev/sda3].corruption_errs 0
+[/dev/sda3].generation_errs 0
+""",
+    }
+
+    def run(args: list[str], _timeout: int) -> dict[str, object]:
+        return {"status": "observed", "stdout": outputs[args[0]]}
+
+    monkeypatch.setattr(storage, "_run_btrfs_command", run)
+
+    result = storage._btrfs_observation()
+
+    assert result["status"] == "observed"
+    usage = result["usage"]
+    assert isinstance(usage, dict)
+    assert usage["device_unallocated_bytes"] == 1000
+    assert usage["free_estimated_min_bytes"] == 2000
+    assert usage["metadata_ratio"] == 2.0
+    assert usage["global_reserve_used_bytes"] == 20
+    assert usage["block_groups"] == [
+        {"kind": "data", "profile": "single", "size_bytes": 7000, "used_bytes": 6000},
+        {"kind": "metadata", "profile": "DUP", "size_bytes": 2000, "used_bytes": 1000},
+        {"kind": "system", "profile": "DUP", "size_bytes": 1000, "used_bytes": 0},
+    ]
+    stats = result["device_stats"]
+    assert isinstance(stats, dict)
+    assert stats["devices"] == [{
+        "device": "/dev/sda3",
+        "counters": {
+            "write_io_errs": 0,
+            "read_io_errs": 0,
+            "flush_io_errs": 0,
+            "corruption_errs": 0,
+            "generation_errs": 0,
+        },
+    }]
+
+
+def test_btrfs_observation_keeps_partial_results_when_a_command_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = tmp_path / "projects"
+    workspace.mkdir()
+    storage = service(workspace)
+    monkeypatch.setattr(
+        storage,
+        "_mount_for_path",
+        lambda _root: {
+            "status": "observed",
+            "mount": {"target": "/", "filesystem_type": "btrfs", "source": "/dev/sda3"},
+            "errors": [],
+        },
+    )
+    usage = """Device size: 10000
+Device allocated: 9000
+Device unallocated: 1000
+Used: 7000
+Data,single: Size:7000, Used:6000
+"""
+    monkeypatch.setattr(storage, "_run_btrfs_command", lambda args, _timeout: {
+        "status": "timed_out" if args[0] == "device" else "observed",
+        "stdout": usage,
+    })
+
+    result = storage._btrfs_observation()
+
+    assert result["status"] == "partial"
+    assert result["usage"]["device_unallocated_bytes"] == 1000
+    assert result["device_stats"] == {"status": "timed_out", "devices": []}
+    assert result["errors"] == ["device_stats_timed_out"]
 
 
 def test_manifest_allows_hardlinks_contained_in_target_but_rejects_escaping_links(tmp_path: Path) -> None:

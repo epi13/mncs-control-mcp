@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import secrets
 import stat
 import subprocess
@@ -56,6 +57,28 @@ _BUILD_TOOLS = {
     "make", "cmake", "ninja", "gcc", "g++", "clang", "clang++", "node", "npm",
     "pnpm", "yarn", "tsc", "gradle", "mvn",
 }
+_BTRFS_USAGE_TIMEOUT_SECONDS = 5
+_BTRFS_DEVICE_STATS_TIMEOUT_SECONDS = 5
+_BTRFS_BLOCK_GROUP_RE = re.compile(
+    r"^(Data|Metadata|System),([^:]+):\s+Size:(\d+),\s+Used:(\d+)"
+)
+_BTRFS_DEVICE_STAT_RE = re.compile(
+    r"^\[(.*)\]\.(write_io_errs|read_io_errs|flush_io_errs|corruption_errs|generation_errs)\s+(\d+)\s*$"
+)
+_BTRFS_USAGE_FIELDS = {
+    "Device size": "device_size_bytes",
+    "Device allocated": "device_allocated_bytes",
+    "Device unallocated": "device_unallocated_bytes",
+    "Device missing": "device_missing_count",
+    "Device slack": "device_slack_bytes",
+    "Used": "used_bytes",
+    "Free (estimated)": "free_estimated_bytes",
+    "Free (statfs, df)": "free_statfs_bytes",
+}
+
+
+def _decode_mountinfo_field(value: str) -> str:
+    return re.sub(r"\\([0-7]{3})", lambda match: chr(int(match.group(1), 8)), value)
 
 
 @dataclass(frozen=True)
@@ -154,6 +177,7 @@ class StorageService:
                 "available_bytes": available_bytes,
                 "available_fraction": round(available_bytes / total_bytes, 6) if total_bytes else None,
             },
+            "btrfs": self._btrfs_observation(),
             "workspace": {
                 "allocated_bytes": workspace_bytes,
                 "complete": workspace_complete,
@@ -164,6 +188,200 @@ class StorageService:
             "largest_projects": largest,
             "cargo_targets": cargo[:100],
         }
+
+    def _btrfs_observation(self) -> dict[str, object]:
+        """Read bounded Btrfs pool and device-error counters when the workspace uses Btrfs."""
+        mount = self._mount_for_path(self.root)
+        if mount["status"] != "observed":
+            return {
+                "status": str(mount["status"]),
+                "mount": mount.get("mount"),
+                "usage": None,
+                "device_stats": {"status": "unavailable", "devices": []},
+                "errors": list(mount.get("errors", [])),
+                "limitations": [],
+            }
+        mount_info = mount["mount"]
+        assert isinstance(mount_info, dict)
+        if mount_info["filesystem_type"] != "btrfs":
+            return {
+                "status": "not_applicable",
+                "mount": mount_info,
+                "usage": None,
+                "device_stats": {"status": "not_applicable", "devices": []},
+                "errors": [],
+                "limitations": [],
+            }
+
+        errors: list[str] = []
+        usage_result = self._run_btrfs_command(
+            ["filesystem", "usage", "-b", str(self.root)], _BTRFS_USAGE_TIMEOUT_SECONDS
+        )
+        usage: dict[str, object] | None = None
+        if usage_result["status"] == "observed":
+            usage, parse_errors = self._parse_btrfs_usage(str(usage_result["stdout"]))
+            errors.extend(parse_errors)
+        else:
+            errors.append(f"filesystem_usage_{usage_result['status']}")
+
+        stats_result = self._run_btrfs_command(
+            ["device", "stats", str(self.root)], _BTRFS_DEVICE_STATS_TIMEOUT_SECONDS
+        )
+        devices: list[dict[str, object]] = []
+        stats_status = str(stats_result["status"])
+        if stats_status == "observed":
+            devices, parse_errors = self._parse_btrfs_device_stats(str(stats_result["stdout"]))
+            errors.extend(parse_errors)
+            if not devices and not parse_errors:
+                stats_status = "unavailable"
+                errors.append("device_stats_no_counters")
+        else:
+            errors.append(f"device_stats_{stats_status}")
+
+        if usage is not None and stats_status == "observed" and not errors:
+            status = "observed"
+        elif usage is not None or devices:
+            status = "partial"
+        else:
+            status = "unavailable"
+        return {
+            "status": status,
+            "mount": mount_info,
+            "usage": usage,
+            "device_stats": {"status": stats_status, "devices": devices},
+            "errors": errors,
+            "limitations": [
+                "Btrfs usage totals are pool-wide; detailed per-device chunk usage may require elevated privilege.",
+                "Device error counters are cumulative since device registration and do not identify when an error occurred.",
+                "This is a point-in-time observation; it does not attribute historical ENOSPC failures or authorize cleanup.",
+            ],
+        }
+
+    @staticmethod
+    def _mount_for_path(root: Path, mountinfo_path: Path = Path("/proc/self/mountinfo")) -> dict[str, object]:
+        """Resolve the longest matching mount from Linux mountinfo without external tools."""
+        try:
+            lines = mountinfo_path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            return {"status": "unavailable", "errors": ["mountinfo_unavailable"]}
+
+        target = root.resolve()
+        matches: list[tuple[int, dict[str, str]]] = []
+        for line in lines:
+            try:
+                before, after = line.split(" - ", 1)
+                left = before.split()
+                right = after.split()
+                if len(left) < 6 or len(right) < 2:
+                    continue
+                mountpoint = Path(_decode_mountinfo_field(left[4]))
+                if target == mountpoint or mountpoint in target.parents:
+                    matches.append((len(mountpoint.parts), {
+                        "target": str(mountpoint),
+                        "filesystem_type": right[0],
+                        "source": _decode_mountinfo_field(right[1]),
+                    }))
+            except (ValueError, IndexError):
+                continue
+        if not matches:
+            return {"status": "unavailable", "errors": ["mount_for_workspace_not_found"]}
+        _specificity, mount = max(matches, key=lambda item: item[0])
+        return {"status": "observed", "mount": mount, "errors": []}
+
+    @staticmethod
+    def _run_btrfs_command(args: list[str], timeout: int) -> dict[str, object]:
+        try:
+            completed = subprocess.run(
+                ["btrfs", *args],
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                check=False,
+                env={"LC_ALL": "C", "PATH": os.environ.get("PATH", "/usr/bin:/bin")},
+            )
+        except FileNotFoundError:
+            return {"status": "command_not_found"}
+        except subprocess.TimeoutExpired:
+            return {"status": "timed_out"}
+        except OSError:
+            return {"status": "command_error"}
+        if completed.returncode != 0:
+            return {"status": f"command_failed_{completed.returncode}"}
+        return {"status": "observed", "stdout": completed.stdout}
+
+    @staticmethod
+    def _parse_btrfs_usage(output: str) -> tuple[dict[str, object], list[str]]:
+        fields: dict[str, object] = {}
+        groups: list[dict[str, object]] = []
+        errors: list[str] = []
+        for line in output.splitlines():
+            stripped = line.strip()
+            for label, key in _BTRFS_USAGE_FIELDS.items():
+                if stripped.startswith(label + ":"):
+                    value = stripped.split(":", 1)[1].strip()
+                    number = value.split()[0] if value else ""
+                    if number.isdigit():
+                        fields[key] = int(number)
+                    else:
+                        errors.append(f"usage_field_unparsed:{key}")
+            if stripped.startswith("Free (estimated):"):
+                match = re.search(r"\(min:\s*(\d+)\)", stripped)
+                if match:
+                    fields["free_estimated_min_bytes"] = int(match.group(1))
+            if stripped.startswith("Data ratio:") or stripped.startswith("Metadata ratio:"):
+                label, value = stripped.split(":", 1)
+                try:
+                    fields[label.lower().replace(" ", "_")] = float(value.strip())
+                except ValueError:
+                    errors.append(f"usage_field_unparsed:{label.lower().replace(' ', '_')}")
+            if stripped.startswith("Global reserve:"):
+                match = re.search(r"Global reserve:\s*(\d+)\s+\(used:\s*(\d+)\)", stripped)
+                if match:
+                    fields["global_reserve_total_bytes"] = int(match.group(1))
+                    fields["global_reserve_used_bytes"] = int(match.group(2))
+                else:
+                    errors.append("usage_field_unparsed:global_reserve")
+            group = _BTRFS_BLOCK_GROUP_RE.match(stripped)
+            if group:
+                groups.append({
+                    "kind": group.group(1).lower(),
+                    "profile": group.group(2),
+                    "size_bytes": int(group.group(3)),
+                    "used_bytes": int(group.group(4)),
+                })
+
+        for required in ("device_size_bytes", "device_allocated_bytes", "device_unallocated_bytes", "used_bytes"):
+            if required not in fields:
+                errors.append(f"usage_field_missing:{required}")
+        if not groups:
+            errors.append("usage_block_groups_missing")
+        fields["block_groups"] = groups
+        return fields, errors
+
+    @staticmethod
+    def _parse_btrfs_device_stats(output: str) -> tuple[list[dict[str, object]], list[str]]:
+        devices: dict[str, dict[str, object]] = {}
+        errors: list[str] = []
+        for line in output.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            match = _BTRFS_DEVICE_STAT_RE.match(stripped)
+            if not match:
+                errors.append("device_stat_line_unparsed")
+                continue
+            device = devices.setdefault(match.group(1), {"device": match.group(1), "counters": {}})
+            counters = device["counters"]
+            assert isinstance(counters, dict)
+            counters[match.group(2)] = int(match.group(3))
+        expected = {"write_io_errs", "read_io_errs", "flush_io_errs", "corruption_errs", "generation_errs"}
+        for device in devices.values():
+            counters = device["counters"]
+            assert isinstance(counters, dict)
+            missing = sorted(expected.difference(counters))
+            if missing:
+                errors.append("device_stat_counters_missing:" + str(device["device"]))
+        return list(devices.values()), errors
 
     def plan(self) -> dict[str, object]:
         """Create a short-lived plan; only idle, clean, sole-main-worktree Cargo outputs qualify."""
