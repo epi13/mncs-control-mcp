@@ -139,6 +139,88 @@ def test_path_options_are_mapped_in_split_and_equals_forms(tmp_path: Path) -> No
     assert equals == ["enter", "--workspace=" + str(host_root / "nested")]
 
 
+def test_dispatch_records_only_redacted_read_only_operation_outcomes(
+    tmp_path: Path,
+) -> None:
+    recorded: list[dict[str, Any]] = []
+    service = SimpleNamespace(
+        state_dir=tmp_path / "state",
+        record_read_operation_activity=lambda **values: recorded.append(values),
+    )
+    server = EnvironmentRPCServer(
+        ControlConfig(
+            workspace_root=tmp_path,
+            sandbox_home=tmp_path / "home",
+            environment_rpc_socket=tmp_path / "rpc" / "environment.sock",
+        ),
+        environment_service=service,
+        policy=object(),
+    )
+    project = tmp_path / "mncs-control-mcp"
+    project.mkdir()
+    grant_token = "read-operation-grant-token"
+    grant = _GrantRecord(
+        grant_id="a" * 32,
+        principal_id="principal-test",
+        host_root=project,
+        sandbox_root="/workspace/mncs-control-mcp",
+        scope="project",
+        uid=0,
+        expires_at=time.monotonic() + 60,
+        token_file=tmp_path / "grant",
+    )
+    server._grants[hashlib.sha256(grant_token.encode()).hexdigest()] = grant
+    response = {
+        "ok": True,
+        "result": {
+            "exit_code": 2,
+            "stdout": "private response body",
+            "stderr": json.dumps({"diagnostics": {"code": "campaign-state-missing"}}),
+        },
+    }
+    server._dispatch_once = lambda *_args, **_kwargs: response  # type: ignore[method-assign]
+    request = {
+        "grant": grant_token,
+        "request_id": "req_authenticated_read_operation",
+        "argv": ["campaign-state", "ses_activity_control", "--evidence-limit", "8"],
+        "cwd": "/workspace/mncs-control-mcp",
+    }
+
+    result = server.dispatch(request, peer_uid=0)
+    replay = server.dispatch(request, peer_uid=0)
+
+    assert result == response
+    assert replay == result
+    assert len(recorded) == 1
+    assert recorded[0]["session_id"] == "ses_activity_control"
+    assert recorded[0]["operation"] == "campaign.state"
+    assert recorded[0]["outcome_status"] == "failed"
+    assert recorded[0]["failure_code"] == "campaign-state-missing"
+    assert recorded[0]["control_grant_id"] == "a" * 32
+    assert "private response body" not in json.dumps(recorded)
+    assert "stderr" not in recorded[0]
+    assert EnvironmentRPCServer._read_only_operation_identity(
+        ["claims", "ses_activity_control", "--acquire", "mncs-control-mcp"],
+    ) is None
+    assert EnvironmentRPCServer._read_only_operation_identity(
+        ["invoke", "ses_activity_control", "mncs-compiler:build"],
+    ) is None
+    assert EnvironmentRPCServer._read_only_operation_identity(
+        ["health", "ses_activity_control", "--live"],
+    ) is None
+
+    server._dispatch_once = lambda *_args, **_kwargs: {
+        "ok": False,
+        "error": {"code": "ENVIRONMENT_AUTHORITY_DENIED"},
+    }  # type: ignore[method-assign]
+    denied = server.dispatch({
+        **request,
+        "request_id": "req_denied_read_operation",
+    }, peer_uid=0)
+    assert denied["ok"] is False
+    assert len(recorded) == 1
+
+
 def test_claim_worktree_path_can_name_an_exact_checkout_in_the_workspace(
     tmp_path: Path,
 ) -> None:

@@ -15,6 +15,7 @@ import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -58,6 +59,103 @@ def _config(tmp_path: Path, **overrides) -> ControlConfig:
         environment_state_dir=tmp_path / "env-state",
         **overrides,
     )
+
+
+def test_control_read_activity_binds_to_authenticated_session_context(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    principal = "ctrl_" + "a" * 32
+    captured: dict[str, Any] = {}
+
+    class SessionRecorder:
+        def record_rpc_read_activity(self, payload, *, request_id, operation_digest):
+            captured.update({
+                "payload": payload,
+                "request_id": request_id,
+                "operation_digest": operation_digest,
+            })
+            return {"status": "recorded"}
+
+    session = SessionRecorder()
+    package = SimpleNamespace(sessions=SimpleNamespace(
+        Session=SimpleNamespace(open=lambda **_kwargs: session),
+    ))
+    snapshot = {
+        "authenticated_principal_id": principal,
+        "selected_checkouts": {
+            "mncs-control-mcp": {
+                "branch": "campaign/environment-rpc-operation-activity-20261024",
+                "head": "b" * 40,
+            },
+        },
+        "environment_id": "renv_control_activity",
+        "campaign": {"identity": "cmp_control_activity"},
+        "intent": {
+            "identity": "int_control_activity",
+            "goal": "observe authenticated read operations",
+        },
+    }
+    store = SimpleNamespace(
+        load_snapshot=lambda session_id: snapshot if session_id == "ses_activity_control" else None,
+        close=lambda: None,
+    )
+    service = EnvironmentService(_config(tmp_path))
+    service.authenticated_principal_id = principal
+    monkeypatch.setattr(service, "_pkg", lambda: package)
+    monkeypatch.setattr(service, "_store", lambda _package: store)
+
+    result = service.record_read_operation_activity(
+        session_id="ses_activity_control",
+        repository="mncs-control-mcp",
+        operation="campaign.state",
+        outcome_status="failed",
+        exit_code=2,
+        failure_code="campaign-state-missing",
+        operation_elapsed_ms=42.5,
+        request_id="req_control_activity",
+        operation_digest="c" * 64,
+        control_grant_id="d" * 32,
+        process_identity="proc_" + "e" * 32,
+    )
+
+    assert result == {"status": "recorded"}
+    payload = captured["payload"]
+    assert payload["caller"]["authenticated_principal_id"] == principal
+    assert payload["context"] == {
+        "repository": "mncs-control-mcp",
+        "repository_branch": "campaign/environment-rpc-operation-activity-20261024",
+        "repository_head": "b" * 40,
+        "environment_id": "renv_control_activity",
+        "campaign_id": "cmp_control_activity",
+        "work_intent_id": "int_control_activity",
+    }
+    assert payload["measurement_availability"] == {
+        "model_identity": "unavailable",
+        "token_usage": "unavailable",
+        "control_dispatch_elapsed_ms": "measured",
+        "resource_consumption": "unavailable",
+        "cache_accounting": "unavailable",
+    }
+    assert payload["measurements"] == {"control_dispatch_elapsed_ms": 42.5}
+    assert "arguments" not in payload
+    assert "response" not in payload
+
+    snapshot["authenticated_principal_id"] = "ctrl_" + "f" * 32
+    with pytest.raises(ControlError, match="Control-authenticated continuation provenance"):
+        service.record_read_operation_activity(
+            session_id="ses_activity_control",
+            repository="mncs-control-mcp",
+            operation="campaign.state",
+            outcome_status="failed",
+            exit_code=2,
+            failure_code="campaign-state-missing",
+            operation_elapsed_ms=42.5,
+            request_id="req_control_activity_denied",
+            operation_digest="0" * 64,
+            control_grant_id="d" * 32,
+            process_identity=None,
+        )
+    assert captured["request_id"] == "req_control_activity"
 
 
 def test_environment_package_loader_reloads_changed_sibling_sources(tmp_path: Path) -> None:

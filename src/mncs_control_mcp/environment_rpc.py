@@ -508,6 +508,125 @@ class EnvironmentRPCServer:
         return next((item for item in argv[1:]
                      if isinstance(item, str) and not item.startswith("-")), None)
 
+    @staticmethod
+    def _read_only_operation_identity(argv: Any) -> str | None:
+        """Return a stable label only for Control's read-only RPC forms."""
+        if not isinstance(argv, list) or not argv or not all(
+            isinstance(item, str) for item in argv
+        ):
+            return None
+        command = argv[0]
+        if command == "health" and _has_option(argv, "--live"):
+            return None
+        simple = {
+            "inspect": "session.inspect",
+            "context": "session.context",
+            "health": "session.health",
+            "capabilities": "session.capabilities",
+            "continuation": "campaign.continuation",
+            "campaign-state": "campaign.state",
+            "artifact-read": "session.artifact-read",
+        }
+        if command in simple:
+            return simple[command]
+        if command == "store":
+            if "--generation" in argv:
+                return "store.generation"
+            if "--verify" in argv:
+                return "store.verify"
+            return None
+        if command == "claims":
+            if any(_has_option(argv, option) for option in (
+                "--acquire", "--release", "--transfer-to",
+            )):
+                return None
+            return (
+                "workspace-claim.explain" if _has_option(argv, "--explain")
+                else "workspace-claims.list"
+            )
+        return None
+
+    @staticmethod
+    def _read_operation_failure_code(result: dict[str, Any]) -> str:
+        stderr = result.get("stderr")
+        if isinstance(stderr, str) and len(stderr.encode("utf-8")) <= 16 * 1024:
+            try:
+                parsed = json.loads(stderr)
+            except (TypeError, json.JSONDecodeError):
+                parsed = None
+            if isinstance(parsed, dict):
+                diagnostics = parsed.get("diagnostics")
+                error = parsed.get("error")
+                candidates = [
+                    diagnostics.get("code") if isinstance(diagnostics, dict) else None,
+                    error.get("code") if isinstance(error, dict) else None,
+                ]
+                for candidate in candidates:
+                    if (isinstance(candidate, str)
+                            and re.fullmatch(r"[A-Za-z0-9._-]{1,96}", candidate)):
+                        return candidate
+        return "environment-operation-failed"
+
+    def _record_read_operation_activity(
+        self,
+        *,
+        grant: _GrantRecord,
+        session_id: str | None,
+        operation: str | None,
+        operation_elapsed_ms: float,
+        request_id: str,
+        operation_digest: str,
+        peer_pid: int | None,
+        response: dict[str, Any],
+    ) -> None:
+        """Persist a redacted read result without changing the RPC response."""
+        recorder = getattr(
+            self.environment_service, "record_read_operation_activity", None,
+        )
+        if (not callable(recorder) or session_id is None or operation is None
+                or response.get("ok") is not True):
+            return
+        result = response.get("result")
+        if not isinstance(result, dict):
+            return
+        exit_code = result.get("exit_code")
+        if type(exit_code) is not int:
+            exit_code = None
+        succeeded = exit_code == 0
+        process_identity = None
+        if peer_pid is not None:
+            with self._request_condition:
+                process = self._active_request_peer_ids.get(request_id)
+            if isinstance(process, dict):
+                material = {
+                    "process": process,
+                    "host_boot_id": self._host_boot_id(),
+                }
+                process_identity = "proc_" + hashlib.sha256(json.dumps(
+                    material, sort_keys=True, separators=(",", ":"),
+                ).encode()).hexdigest()[:32]
+        try:
+            recorder(
+                session_id=session_id,
+                repository=grant.host_root.name,
+                operation=operation,
+                outcome_status="succeeded" if succeeded else "failed",
+                exit_code=exit_code,
+                failure_code=(None if succeeded
+                              else self._read_operation_failure_code(result)),
+                operation_elapsed_ms=operation_elapsed_ms,
+                request_id=request_id,
+                operation_digest=operation_digest,
+                control_grant_id=grant.grant_id,
+                process_identity=process_identity,
+            )
+        except Exception as error:  # telemetry must not change a read result
+            LOGGER.warning(
+                "could not persist Environment read-operation observation "
+                "operation=%s request_id=%s error_type=%s",
+                operation, request_id, type(error).__name__,
+            )
+
     def _serve(self) -> None:
         assert self._socket is not None
         while not self._closed:
@@ -3916,6 +4035,7 @@ class EnvironmentRPCServer:
                     )
                 if request_session_id is not None:
                     self._active_request_sessions[request_id] = request_session_id
+            operation_started_at = time.monotonic()
             session_id = request_session_id
             lock = None
             if session_id:
@@ -3999,6 +4119,18 @@ class EnvironmentRPCServer:
                     "code": error_code,
                     "message": f"{type(error).__name__}: {error}",
                 }}
+            self._record_read_operation_activity(
+                grant=grant,
+                session_id=request_session_id,
+                operation=self._read_only_operation_identity(argv),
+                operation_elapsed_ms=max(
+                    0.0, (time.monotonic() - operation_started_at) * 1000.0,
+                ),
+                request_id=request_id,
+                operation_digest=content_digest,
+                peer_pid=peer_pid,
+                response=response,
+            )
             with self._request_condition:
                 self._request_records[request_id] = (
                     grant.principal_id, content_digest, response

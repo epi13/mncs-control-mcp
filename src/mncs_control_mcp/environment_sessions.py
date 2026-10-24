@@ -2272,6 +2272,131 @@ class EnvironmentService:
                                         "next": "request an explicit handoff from the recorded owner"})
         return snapshot
 
+    def record_read_operation_activity(
+        self,
+        *,
+        session_id: str,
+        repository: str,
+        operation: str,
+        outcome_status: str,
+        exit_code: int | None,
+        failure_code: str | None,
+        operation_elapsed_ms: float,
+        request_id: str,
+        operation_digest: str,
+        control_grant_id: str,
+        process_identity: str | None,
+    ) -> dict[str, Any]:
+        """Persist a bounded read-only RPC outcome in its authenticated session."""
+        if self.authenticated_principal_id is None:
+            raise ControlError(
+                "ENVIRONMENT_AUTHORITY_DENIED",
+                "read-operation activity requires a Control-authenticated principal",
+            )
+        if (not isinstance(session_id, str)
+                or not re.fullmatch(r"ses_[A-Za-z0-9_-]{1,120}", session_id)
+                or not isinstance(repository, str)
+                or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", repository)
+                or not isinstance(operation, str)
+                or not re.fullmatch(r"[a-z][a-z0-9.-]{0,95}", operation)
+                or outcome_status not in {"succeeded", "failed"}
+                or (exit_code is not None and type(exit_code) is not int)
+                or (failure_code is not None and (
+                    not isinstance(failure_code, str)
+                    or not re.fullmatch(r"[A-Za-z0-9._-]{1,96}", failure_code)
+                ))
+                or type(operation_elapsed_ms) not in {int, float}
+                or not 0 <= operation_elapsed_ms <= 600_000
+                or not isinstance(request_id, str)
+                or not re.fullmatch(r"req_[A-Za-z0-9_-]{1,76}", request_id)
+                or not isinstance(operation_digest, str)
+                or not re.fullmatch(r"[0-9a-f]{64}", operation_digest)
+                or not isinstance(control_grant_id, str)
+                or not re.fullmatch(r"[0-9a-f]{32}", control_grant_id)
+                or (process_identity is not None and (
+                    not isinstance(process_identity, str)
+                    or not re.fullmatch(r"proc_[0-9a-f]{16,64}", process_identity)
+                ))):
+            raise ControlError(
+                "ENVIRONMENT_RPC_INVALID_REQUEST",
+                "read-operation activity fields are malformed",
+            )
+
+        pkg = self._pkg()
+        store = self._store(pkg)
+        try:
+            snapshot = self._authorize_session(store, session_id)
+            selected = (snapshot.get("selected_checkouts") or {}).get(repository)
+            selected = selected if isinstance(selected, dict) else {}
+            if not selected:
+                for repo in (snapshot.get("workspace") or {}).get("repositories", []):
+                    if (isinstance(repo, dict)
+                            and repo.get("name") == repository):
+                        selected = repo
+                        break
+            intent = snapshot.get("intent")
+            intent = intent if isinstance(intent, dict) else {}
+            campaign = snapshot.get("campaign")
+            campaign = campaign if isinstance(campaign, dict) else {}
+            caller = {
+                "authenticated_principal_id": self.authenticated_principal_id,
+                "control_grant_id": control_grant_id,
+                "process_identity": process_identity,
+            }
+            context = {
+                "repository": repository,
+                "repository_branch": selected.get("branch"),
+                "repository_head": selected.get("head"),
+                "environment_id": snapshot.get("environment_id"),
+                "campaign_id": campaign.get("identity"),
+                "work_intent_id": intent.get("identity"),
+            }
+            payload = {
+                "schema_version": "mncs.environment.rpc-read-activity/1",
+                "operation": operation,
+                "outcome_status": outcome_status,
+                "exit_code": exit_code,
+                "failure_code": failure_code,
+                "request_digest": operation_digest,
+                "caller": caller,
+                "context": context,
+                "measurement_availability": {
+                    "model_identity": "unavailable",
+                    "token_usage": "unavailable",
+                    "control_dispatch_elapsed_ms": "measured",
+                    "resource_consumption": "unavailable",
+                    "cache_accounting": "unavailable",
+                },
+                "measurements": {
+                    "control_dispatch_elapsed_ms": operation_elapsed_ms,
+                },
+            }
+            session = pkg.sessions.Session.open(
+                state_dir=self.state_dir, session_id=session_id,
+                backend="store", store=store,
+            )
+            recorder = getattr(session, "record_rpc_read_activity", None)
+            if not callable(recorder):
+                raise ControlError(
+                    "ENVIRONMENT_OPERATION_UNAVAILABLE",
+                    "Environment session does not support bounded RPC activity records",
+                )
+            return recorder(
+                payload,
+                request_id=request_id,
+                operation_digest=operation_digest,
+            )
+        except ControlError:
+            raise
+        except Exception as exc:
+            raise ControlError(
+                "ENVIRONMENT_RPC_ACTIVITY_RECORD_FAILED", str(exc),
+            ) from exc
+        finally:
+            close = getattr(store, "close", None)
+            if callable(close):
+                close()
+
     def inspect(self, session_id: str) -> dict[str, Any]:
         sessions = self._sessions()
         store = self._store(self._pkg())
