@@ -38,9 +38,12 @@ MAX_ARGUMENT_BYTES = 48 * 1024
 ALLOWED_COMMANDS = frozenset({
     "enter", "inspect", "context", "resume", "health", "capabilities", "checkpoint", "handoff", "accept", "claims",
     "complete", "store", "invoke", "artifact-read", "campaign-state",
-    "retire", "continuation", "campaign-bind", "scope-grant", "claim-recover",
+    "projections", "retire", "continuation", "campaign-bind", "scope-grant",
+    "claim-recover",
 })
 MAX_CAMPAIGN_EVIDENCE_PAGE = 128
+MAX_ENVIRONMENTAL_PROJECTION_HISTORY_PAGES = 4
+MAX_ENVIRONMENTAL_PROJECTION_EVIDENCE_PAGE = 32
 ALLOWED_INVOKE_CAPABILITIES = frozenset({
     "mncs-environment:ambient-projection-coherence",
     "mncs-environment:projection-evidence-inspection",
@@ -482,7 +485,7 @@ class EnvironmentRPCServer:
             "inspect", "context", "resume", "health", "capabilities", "continuation",
             "checkpoint", "handoff", "accept", "claims", "claim-recover",
             "invoke", "retire", "store", "scope-grant", "complete",
-            "campaign-bind", "campaign-state", "artifact-read",
+            "campaign-bind", "campaign-state", "projections", "artifact-read",
         }:
             return None
         if command == "accept":
@@ -525,6 +528,7 @@ class EnvironmentRPCServer:
             "capabilities": "session.capabilities",
             "continuation": "campaign.continuation",
             "campaign-state": "campaign.state",
+            "projections": "environmental-capability.projection",
             "artifact-read": "session.artifact-read",
         }
         if command in simple:
@@ -1091,6 +1095,8 @@ class EnvironmentRPCServer:
                 )
         if command == "campaign-state":
             self._authorize_campaign_state_argv(argv, record)
+        if command == "projections":
+            self._authorize_environmental_capability_projection_argv(argv, record)
         if command == "artifact-read":
             allowed_artifacts = {
                 ("mncs-compiler:native-application-build",
@@ -2171,6 +2177,92 @@ class EnvironmentRPCServer:
                 )
             seen.add(key)
             index += 2
+
+    def _authorize_environmental_capability_projection_argv(
+        self, argv: list[str], record: _GrantRecord,
+    ) -> None:
+        """Expose only the bounded read-only environmental-capability view."""
+        if (len(argv) < 2
+                or not re.fullmatch(r"ses_[A-Za-z0-9_-]{1,120}", argv[1])):
+            raise ControlError(
+                "ENVIRONMENT_RPC_INVALID_REQUEST",
+                "environmental-capability projection requires one Environment session identity",
+            )
+        if record.scope != "project":
+            raise ControlError(
+                "ENVIRONMENT_AUTHORITY_DENIED",
+                "environmental-capability projection requires an authenticated project grant",
+            )
+        if record.bound_session_id != argv[1]:
+            raise ControlError(
+                "ENVIRONMENT_AUTHORITY_DENIED",
+                "environmental-capability projection requires this project's selected session",
+                details={
+                    "session_id": argv[1],
+                    "selected_session_id": record.bound_session_id,
+                    "next": "run project continuation and query only its selected session",
+                },
+            )
+
+        allowed = {
+            "--interpret", "--history-pages", "--evidence-offset", "--evidence-limit",
+        }
+        seen: set[str] = set()
+        interpretation = None
+        index = 2
+        while index < len(argv):
+            option = argv[index]
+            if option not in allowed:
+                raise ControlError(
+                    "ENVIRONMENT_AUTHORITY_DENIED",
+                    "environmental-capability projection exposes only its bounded read arguments",
+                    details={"allowed": sorted(allowed)},
+                )
+            if option in seen or index + 1 >= len(argv):
+                raise ControlError(
+                    "ENVIRONMENT_RPC_INVALID_REQUEST",
+                    f"{option} must be supplied once with a value",
+                )
+            raw_value = argv[index + 1]
+            if option == "--interpret":
+                if raw_value != "environmental-capability":
+                    raise ControlError(
+                        "ENVIRONMENT_AUTHORITY_DENIED",
+                        "Control exposes only the environmental-capability interpretation",
+                    )
+                interpretation = raw_value
+            else:
+                if not re.fullmatch(r"[0-9]{1,10}", raw_value):
+                    raise ControlError(
+                        "ENVIRONMENT_RPC_INVALID_REQUEST",
+                        f"{option} must be a nonnegative integer",
+                    )
+                value = int(raw_value)
+                if (option == "--history-pages"
+                        and not 1 <= value <= MAX_ENVIRONMENTAL_PROJECTION_HISTORY_PAGES):
+                    raise ControlError(
+                        "ENVIRONMENT_RPC_INVALID_REQUEST",
+                        f"--history-pages must be between 1 and {MAX_ENVIRONMENTAL_PROJECTION_HISTORY_PAGES}",
+                    )
+                if (option == "--evidence-offset"
+                        and value > 2**31 - 1):
+                    raise ControlError(
+                        "ENVIRONMENT_RPC_INVALID_REQUEST",
+                        "--evidence-offset exceeds the supported range",
+                    )
+                if (option == "--evidence-limit"
+                        and not 1 <= value <= MAX_ENVIRONMENTAL_PROJECTION_EVIDENCE_PAGE):
+                    raise ControlError(
+                        "ENVIRONMENT_RPC_INVALID_REQUEST",
+                        f"--evidence-limit must be between 1 and {MAX_ENVIRONMENTAL_PROJECTION_EVIDENCE_PAGE}",
+                    )
+            seen.add(option)
+            index += 2
+        if interpretation != "environmental-capability":
+            raise ControlError(
+                "ENVIRONMENT_AUTHORITY_DENIED",
+                "Control exposes only the environmental-capability interpretation",
+            )
 
     def _perform_claim_recovery(
         self,

@@ -25,12 +25,13 @@ TOKEN_RE = re.compile(r"[A-Za-z0-9_-]{32,128}")
 OPERATIONS = frozenset({
     "enter", "continuation", "inspect", "context", "health", "capabilities",
     "resume", "verify", "invoke", "checkpoint", "handoff", "complete", "claims",
-    "campaign_state", "artifact_read", "store_generation", "scope_grant",
+    "campaign_state", "environmental_capability", "artifact_read",
+    "store_generation", "scope_grant",
 })
 SESSION_OPERATIONS = frozenset({
     "inspect", "context", "health", "capabilities", "resume", "verify", "invoke",
     "checkpoint", "handoff", "complete", "claims", "campaign_state",
-    "artifact_read", "store_generation", "scope_grant",
+    "environmental_capability", "artifact_read", "store_generation", "scope_grant",
 })
 SESSION_SELECTOR_FIELDS = frozenset({"campaign_id", "task_identity"})
 
@@ -192,6 +193,9 @@ def _build_argv(
             "expected_store_generation",
         },
         "campaign_state": {"session_id", "evidence_offset", "evidence_limit"},
+        "environmental_capability": {
+            "session_id", "history_pages", "evidence_offset", "evidence_limit",
+        },
         "artifact_read": {"session_id", "capability", "binding_id", "path"},
         "store_generation": {"session_id"},
     }
@@ -470,6 +474,25 @@ def _build_argv(
             if type(number) is not int or not low <= number <= high:
                 raise ValueError(f"{field} is outside its supported range")
             argv.extend([flag, str(number)])
+        return argv, True
+    if operation == "environmental_capability":
+        argv = [
+            "projections", session_id,
+            "--interpret", "environmental-capability",
+        ]
+        for field, flag, default, low, high in (
+            ("history_pages", "--history-pages", 1, 1, 4),
+            ("evidence_limit", "--evidence-limit", 32, 1, 32),
+        ):
+            number = values.get(field, default)
+            if type(number) is not int or not low <= number <= high:
+                raise ValueError(f"{field} is outside its supported range")
+            argv.extend([flag, str(number)])
+        if "evidence_offset" in values:
+            number = values["evidence_offset"]
+            if type(number) is not int or not 0 <= number <= 2**31 - 1:
+                raise ValueError("evidence_offset is outside its supported range")
+            argv.extend(["--evidence-offset", str(number)])
         return argv, True
     if operation == "artifact_read":
         capability = _string(values.get("capability"), "capability", max_length=256)
@@ -1026,7 +1049,9 @@ def main() -> None:
             "strictly validated Environment lifecycle operation. Supported operations "
             "include enter, continuation, inspect, context, health, capabilities, "
             "resume, verify, checkpoint, handoff, complete, claims, campaign_state, "
-            "artifact_read, store_generation, and owner-approved scope_grant. "
+            "environmental_capability, artifact_read, store_generation, and owner-approved "
+            "scope_grant. environmental_capability is a bounded, read-only interpretation "
+            "of authenticated campaign evidence. "
             "Resume revalidates the selected "
             "session. Verify runs one already-bound project verification capability "
             "with its descriptor's fixed arguments and selected project authority. "

@@ -52,6 +52,61 @@ def test_stable_tool_maps_only_named_environment_operations() -> None:
         )
 
 
+def test_environmental_capability_maps_to_one_bounded_read_projection() -> None:
+    context = _ProjectContext("secret", "/workspace/mncs-environment")
+    context.selected_session_id = "ses_selected"
+
+    argv, selected = _build_argv(
+        "environmental_capability",
+        {
+            "session_id": "ses_selected",
+            "history_pages": 4,
+            "evidence_offset": 16,
+            "evidence_limit": 8,
+        },
+        context,
+        "mncs-environment",
+    )
+
+    assert selected is True
+    assert argv == [
+        "projections", "ses_selected", "--interpret", "environmental-capability",
+        "--history-pages", "4", "--evidence-limit", "8",
+        "--evidence-offset", "16",
+    ]
+
+    default_argv, _selected = _build_argv(
+        "environmental_capability", {"session_id": "ses_selected"},
+        context, "mncs-environment",
+    )
+    assert default_argv == [
+        "projections", "ses_selected", "--interpret", "environmental-capability",
+        "--history-pages", "1", "--evidence-limit", "32",
+    ]
+
+    with pytest.raises(ValueError, match="history_pages"):
+        _build_argv(
+            "environmental_capability",
+            {"session_id": "ses_selected", "history_pages": 5},
+            context,
+            "mncs-environment",
+        )
+    with pytest.raises(ValueError, match="evidence_limit"):
+        _build_argv(
+            "environmental_capability",
+            {"session_id": "ses_selected", "evidence_limit": 33},
+            context,
+            "mncs-environment",
+        )
+    with pytest.raises(ValueError, match="unsupported arguments"):
+        _build_argv(
+            "environmental_capability",
+            {"session_id": "ses_selected", "apply": "unbounded"},
+            context,
+            "mncs-environment",
+        )
+
+
 def test_scope_grant_maps_only_the_owner_checked_scope_admission_contract() -> None:
     context = _ProjectContext("secret", "/workspace/mncs-compiler")
     context.selected_session_id = "ses_selected"

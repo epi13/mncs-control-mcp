@@ -4761,6 +4761,129 @@ def test_campaign_state_read_uses_the_bound_compiler_project_session(
     assert len(calls) == 1
 
 
+def test_environmental_capability_projection_is_bounded_session_read_and_observed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "projects"
+    project = workspace / "mncs-environment"
+    project.mkdir(parents=True)
+    token = "environmental-capability-projection-grant"
+    observations: list[dict[str, object]] = []
+
+    class Store:
+        def load_snapshot(self, session_id: str) -> dict[str, str]:
+            assert session_id == "ses_environment"
+            return {"authenticated_principal_id": "principal-agent"}
+
+        def close(self) -> None:
+            pass
+
+    class Environment:
+        state_dir = tmp_path / "state"
+        environment_path = tmp_path / "environment"
+        rights_provenance_path = tmp_path / "rights-provenance"
+
+        def _pkg(self) -> object:
+            return object()
+
+        def _store(self, _pkg: object) -> Store:
+            return Store()
+
+        def record_read_operation_activity(self, **values: object) -> None:
+            observations.append(values)
+
+    server = EnvironmentRPCServer(
+        ControlConfig(
+            workspace_root=workspace,
+            repositories={"environment": "mncs-environment"},
+            sandbox_home=tmp_path / "home",
+            environment_rpc_socket=tmp_path / "rpc" / "environment.sock",
+        ),
+        environment_service=Environment(),
+        policy=object(),
+    )
+    grant = _GrantRecord(
+        grant_id="environmental-capability-projection-grant",
+        principal_id="principal-agent",
+        host_root=project,
+        sandbox_root="/workspace/mncs-environment",
+        scope="project",
+        uid=0,
+        expires_at=time.monotonic() + 60,
+        token_file=tmp_path / "grant",
+        bound_session_id="ses_environment",
+    )
+    server._grants[hashlib.sha256(token.encode()).hexdigest()] = grant
+    calls: list[list[str]] = []
+
+    def run(argv: list[str], **_kwargs: object) -> SimpleNamespace:
+        calls.append(argv)
+        return SimpleNamespace(
+            returncode=0,
+            stdout='{"status":"ready","observation_count":1}\n',
+            stderr="",
+        )
+
+    monkeypatch.setattr("mncs_control_mcp.environment_rpc.subprocess.run", run)
+    argv = [
+        "projections", "ses_environment", "--interpret", "environmental-capability",
+        "--history-pages", "4", "--evidence-limit", "8",
+        "--evidence-offset", "16",
+    ]
+    request = {
+        "grant": token,
+        "request_id": "req_environmental_capability_projection",
+        "argv": argv,
+        "cwd": "/workspace/mncs-environment",
+    }
+
+    response = server.dispatch(request, peer_uid=0)
+
+    assert response["ok"] is True
+    assert json.loads(response["result"]["stdout"]) == {
+        "status": "ready", "observation_count": 1,
+    }
+    assert calls[0][-10:] == argv
+    assert EnvironmentRPCServer._request_session(argv) == "ses_environment"
+    assert EnvironmentRPCServer._read_only_operation_identity(argv) == (
+        "environmental-capability.projection"
+    )
+    assert observations[0]["session_id"] == "ses_environment"
+    assert observations[0]["repository"] == "mncs-environment"
+    assert observations[0]["operation"] == "environmental-capability.projection"
+    assert observations[0]["outcome_status"] == "succeeded"
+
+    invalid_argvs = (
+        ["projections", "ses_environment", "--interpret", "capabilities"],
+        ["projections", "ses_environment", "--interpret", "environmental-capability",
+         "--history-pages", "5"],
+        ["projections", "ses_environment", "--interpret", "environmental-capability",
+         "--evidence-limit", "33"],
+        ["projections", "ses_environment", "--interpret", "environmental-capability",
+         "--apply", "write-projection"],
+        ["projections", "ses_other", "--interpret", "environmental-capability"],
+    )
+    for invalid_argv in invalid_argvs:
+        with pytest.raises(ControlError):
+            server._translate_argv(invalid_argv, project, grant)
+
+    workspace_grant = _GrantRecord(
+        grant_id="workspace-projection-grant",
+        principal_id="principal-agent",
+        host_root=workspace,
+        sandbox_root="/workspace",
+        scope="workspace",
+        uid=0,
+        expires_at=time.monotonic() + 60,
+        token_file=tmp_path / "workspace-grant",
+        bound_session_id="ses_environment",
+    )
+    with pytest.raises(ControlError):
+        server._translate_argv(argv, project, workspace_grant)
+    assert len(calls) == 1
+    assert len(observations) == 1
+
+
 def test_project_rpc_invokes_only_its_fixed_verification_capabilities(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

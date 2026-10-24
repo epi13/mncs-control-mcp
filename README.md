@@ -91,6 +91,8 @@ journalctl --user -u mncs-control-tunnel.service -f
 
 If typed `env_*` tools are absent from a caller's MCP snapshot, Environment work still uses the stable project-scoped terminal tools: run `python3 -B -m mncs_env.cli --help` or a supported lifecycle command from the selected Environment project. Control routes these CLI operations through the authenticated Environment RPC and its fixed allowlist; the CLI does not receive canonical Store paths or a general Store write interface. This path does not depend on adding one MCP tool for each Environment capability.
 
+The stable `mncs_environment` tool also exposes `environmental_capability` for the selected session. It runs only the existing `projections --interpret environmental-capability` view, with at most four evidence pages and 32 references per page; Control requires the authenticated project grant to select the exact queried session.
+
 For local Codex CLI sessions, the same owner service also supports one stable
 stdio MCP tool. Register it once with the Control checkout's editable Python
 environment:
