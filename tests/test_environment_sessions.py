@@ -2034,6 +2034,201 @@ print(json.dumps({
         inventory.close()
 
 
+@pytest.mark.parametrize(
+    ("claim_owners", "expected_status", "expected_session"),
+    [
+        (["ses_prior_campaign"], "ready", "ses_prior_campaign"),
+        (["ses_prior_campaign", "ses_current_branch"], "ambiguous", None),
+    ],
+)
+def test_campaign_continuation_prefers_unique_active_checkout_claim_across_branch_change(
+    tmp_path: Path, claim_owners: list[str], expected_status: str,
+    expected_session: str | None,
+) -> None:
+    repository = "mncs-compiler"
+    workspace = tmp_path / "projects"
+    checkout_root = workspace / repository
+    checkout = checkout_root / ".worktrees" / "continuation"
+    checkout.mkdir(parents=True)
+    checkout_identity = "checkout:stable"
+    common_identity = "git-common:stable"
+    manifest_identity = "manifest:stable"
+    previous_branch = "campaign/previous"
+    current_branch = "campaign/current"
+    current_checkout = {
+        "repository": repository,
+        "path": str(checkout),
+        "workspace_root": str(workspace),
+        "repository_root": str(checkout_root),
+        "git_common_directory": str(checkout_root / ".git"),
+        "git_common_directory_identity": common_identity,
+        "checkout_identity": checkout_identity,
+        "manifest_identity": manifest_identity,
+        "branch": current_branch,
+        "head": "c" * 40,
+        "clean": False,
+    }
+    session_ids = ["ses_prior_campaign", "ses_current_branch"]
+
+    def snapshot(session_id: str) -> dict:
+        prior = session_id == "ses_prior_campaign"
+        branch = previous_branch if prior else current_branch
+        head = "a" * 40 if prior else "c" * 40
+        selected = {**current_checkout, "branch": branch, "head": head}
+        return {
+            "session_id": session_id,
+            "snapshot_sequence": 10 if prior else 2,
+            "lifecycle": "active",
+            "consumer_id": "local-agent",
+            "consumer_kind": "agent",
+            "authenticated_principal_id": "principal-test",
+            "provenance": {"definition_id": "env-campaign"},
+            "workspace": {"root": str(workspace)},
+            "intent": {"identity": f"intent-{session_id}"},
+            "selected_checkouts": {repository: selected},
+            "campaign": {
+                "identity": "cmp_branch_change",
+                "session_ids": session_ids,
+                "authorized_consumers": ["local-agent"],
+                "work_intent": {
+                    "goal": "continue the existing compiler campaign",
+                    "repositories": [repository],
+                },
+                "repository_refs": [{
+                    "repository": repository,
+                    "observed_path": str(checkout),
+                    "checkout_identity": checkout_identity,
+                    "git_common_directory_identity": common_identity,
+                    "branch": branch,
+                    "head": head,
+                    "clean": False,
+                    "observation": "current",
+                }],
+                "delivery": {"status": "pending"},
+            },
+        }
+
+    snapshots = {session_id: snapshot(session_id) for session_id in session_ids}
+    claims = []
+    for owner in claim_owners:
+        branch = previous_branch if owner == "ses_prior_campaign" else current_branch
+        claims.append({
+            "claim_id": f"claim-{owner}",
+            "version": 1,
+            "repository": repository,
+            "session_id": owner,
+            "status": "held",
+            "expires_at": "2099-01-01T00:00:00+00:00",
+            "scope": {
+                "kind": "worktree",
+                "repository": repository,
+                "checkout": str(checkout),
+                "branch": branch,
+                "checkout_identity": checkout_identity,
+                "git_common_directory_identity": common_identity,
+                "manifest_identity": manifest_identity,
+                "paths": None,
+                "exclusive": False,
+            },
+        })
+
+    class Store:
+        def list_sessions(self):
+            return list(snapshots)
+
+        def load_snapshot(self, session_id: str):
+            return snapshots.get(session_id)
+
+        def read_claims(self):
+            return claims
+
+        def close(self):
+            return None
+
+    class Session:
+        @staticmethod
+        def open(*, session_id: str, **_kwargs):
+            selected = snapshots[session_id]["selected_checkouts"][repository]
+            reference = {
+                key: selected[key] for key in (
+                    "repository", "path", "checkout_identity",
+                    "git_common_directory_identity", "branch", "head", "clean",
+                )
+            }
+            continuation = {
+                "repositories": [{**reference, "observed_path": str(checkout)}],
+                "checkpoint_ids": ["chk_prior"] if session_id == "ses_prior_campaign" else [],
+            }
+            if session_id == "ses_prior_campaign":
+                continuation["latest_checkpoint"] = {
+                    "identity": "chk_prior", "sequence": 649,
+                }
+            return SimpleNamespace(context=lambda: {
+                "authority": {"writable": [repository], "scope_grants": []},
+                "continuation": continuation,
+            })
+
+    def active_claims(records):
+        return {
+            str(record["claim_id"]): record for record in records
+            if record.get("status") == "held"
+        }
+
+    duplicate_selector_calls = []
+
+    def snapshot_matches(snapshot_value, working_checkout):
+        selected = snapshot_value.get("selected_checkouts", {}).get(repository, {})
+        return (
+            selected.get("path") == working_checkout.get("path")
+            and selected.get("checkout_identity") == working_checkout.get("checkout_identity")
+            and selected.get("branch") == working_checkout.get("branch")
+        )
+
+    def snapshot_duplicate_selector(_store, candidate_ids, _working_checkout):
+        duplicate_selector_calls.append(list(candidate_ids))
+        return "ses_current_branch", {"basis": "unique_registered_checkout"}
+
+    service = EnvironmentService(_config(tmp_path))
+    service.authenticated_principal_id = "principal-test"
+    service._pkg = lambda: SimpleNamespace(
+        claims=SimpleNamespace(active_claims=active_claims),
+        sessions=SimpleNamespace(Session=Session, CAMPAIGN_EVIDENCE_MAX=32),
+        entry=SimpleNamespace(
+            _working_checkout_matches_snapshot=snapshot_matches,
+            _authoritative_duplicate_session=snapshot_duplicate_selector,
+        ),
+    )
+    service._store = lambda _pkg: Store()
+    service._observe_project_checkout = lambda _repository: {
+        "status": "current",
+        "repository": repository,
+        "workspace_root": str(workspace),
+        "checkout": current_checkout,
+        "worktree_registrations": [{
+            "registered_path": str(checkout),
+            "branch": current_branch,
+            "head": "c" * 40,
+        }],
+    }
+
+    result = service.campaign_continuation(
+        repository, "cmp_branch_change", working_checkout=current_checkout,
+    )
+
+    if expected_status == "ready":
+        assert result["status"] == "ready"
+        assert result["selected_session_id"] == expected_session
+        assert result["selection_basis"] == (
+            "authenticated-project-checkout-live-claim-owner"
+        )
+        assert [row["session_id"] for row in result["continuations"]] == [expected_session]
+    else:
+        assert result["status"] == "ambiguous"
+        assert result.get("selected_session_id") is None
+        assert {row["session_id"] for row in result["continuations"]} == set(session_ids)
+    assert duplicate_selector_calls == []
+
+
 def test_task_binding_uses_authenticated_project_link_and_stable_request(tmp_path: Path) -> None:
     workspace = tmp_path / "projects"
     workspace.mkdir()

@@ -1298,31 +1298,77 @@ class EnvironmentService:
                 authoritative_session = None
                 authoritative_selection_basis = None
                 if len(matching) > 1 and working_checkout is not None:
-                    package_entry = getattr(pkg, "entry", None)
-                    duplicate_selector = getattr(
-                        package_entry, "_authoritative_duplicate_session", None,
+                    candidate_session_ids = [
+                        session_id for session_id, _snapshot in matching
+                    ]
+                    live_claims_by_owner = {
+                        session_id: [
+                            claim for claim in claims_by_session.get(session_id, [])
+                            if _claim_matches_working_checkout(
+                                claim, working_checkout, repository,
+                                session_id=session_id,
+                            )
+                        ]
+                        for session_id in candidate_session_ids
+                    }
+                    live_claim_owners = sorted(
+                        session_id for session_id, claims in live_claims_by_owner.items()
+                        if claims
                     )
-                    if callable(duplicate_selector):
-                        authoritative_session, selection_evidence = duplicate_selector(
-                            store,
-                            [session_id for session_id, _snapshot in matching],
-                            working_checkout,
+                    selection_evidence: dict[str, Any] = {}
+                    if len(live_claim_owners) == 1:
+                        # A verified active claim can preserve the owner of a
+                        # registered checkout across a branch rename. Snapshot
+                        # branch/HEAD projections may be older, so prefer the
+                        # unique same-principal live owner before a snapshot-
+                        # only unique-checkout result selects a fresh session.
+                        authoritative_session = live_claim_owners[0]
+                        selection_evidence = {
+                            "basis": "unique_active_checkout_claim",
+                            "claim_ids": sorted({
+                                str(claim.get("claim_id"))
+                                for claim in live_claims_by_owner[authoritative_session]
+                                if isinstance(claim.get("claim_id"), str)
+                            }),
+                        }
+                    elif len(live_claim_owners) > 1:
+                        # Multiple active owners of this exact checkout remain
+                        # ambiguous, even if only one snapshot has the current
+                        # branch projection.
+                        selection_evidence = {
+                            "basis": "overlapping_active_checkout_claims",
+                            "candidate_sessions": live_claim_owners,
+                            "claim_ids": sorted({
+                                str(claim.get("claim_id"))
+                                for owner in live_claim_owners
+                                for claim in live_claims_by_owner[owner]
+                                if isinstance(claim.get("claim_id"), str)
+                            }),
+                        }
+                    else:
+                        package_entry = getattr(pkg, "entry", None)
+                        duplicate_selector = getattr(
+                            package_entry, "_authoritative_duplicate_session", None,
                         )
-                        if authoritative_session is not None:
-                            matching = [
-                                (session_id, snapshot)
-                                for session_id, snapshot in matching
-                                if session_id == authoritative_session
-                            ]
-                            evidence_basis = selection_evidence.get("basis")
-                            authoritative_selection_basis = {
-                                "unique_active_checkout_claim":
-                                    "authenticated-project-checkout-live-claim-owner",
-                                "unique_session_checkpoint":
-                                    "authenticated-project-checkout-unique-checkpoint",
-                                "unique_registered_checkout":
-                                    "authenticated-registered-checkout",
-                            }.get(evidence_basis, "authenticated-project-checkout")
+                        if callable(duplicate_selector):
+                            authoritative_session, selection_evidence = duplicate_selector(
+                                store, candidate_session_ids, working_checkout,
+                            )
+                    if authoritative_session is not None:
+                        matching = [
+                            (session_id, snapshot)
+                            for session_id, snapshot in matching
+                            if session_id == authoritative_session
+                        ]
+                        evidence_basis = selection_evidence.get("basis")
+                        authoritative_selection_basis = {
+                            "unique_active_checkout_claim":
+                                "authenticated-project-checkout-live-claim-owner",
+                            "unique_session_checkpoint":
+                                "authenticated-project-checkout-unique-checkpoint",
+                            "unique_registered_checkout":
+                                "authenticated-registered-checkout",
+                        }.get(evidence_basis, "authenticated-project-checkout")
                 contexts = {
                     (str((snapshot.get("provenance") or {}).get("definition_id", "")),
                      str((snapshot.get("workspace") or {}).get("root", "")))

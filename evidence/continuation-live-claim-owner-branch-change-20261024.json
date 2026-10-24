@@ -1,0 +1,67 @@
+{
+  "authorization": {
+    "basis": "Read-only use of canonical same-principal Store claims; no claim transfer, recovery, or expansion.",
+    "scope": "mncs-control-mcp"
+  },
+  "campaign_id": "cmp_mncs_native_application_readiness_compiler_20261013",
+  "evidence_id": "continuation-live-claim-owner-branch-change-20261024",
+  "implementation": {
+    "base_main": "baa2f31447066a6fec4969aa27f67578de27505b",
+    "behavior": [
+      "One unique same-principal active claim matching the exact registered checkout and stable Git identities selects its owner before a snapshot-only branch match.",
+      "Two active owners that match the same checkout remain ambiguous.",
+      "When no matching live claim exists, the existing exact-checkout and checkpoint selector remains in force.",
+      "No claim is acquired, released, transferred, or recovered by continuation selection."
+    ],
+    "branch": "campaign/continuation-live-claim-owner-20261024",
+    "checkout": "/dev/shm/mncs-control-continuity",
+    "files": {
+      "src/mncs_control_mcp/environment_sessions.py": "6ef6930f69f2beb5c2b3f499a2c511bf7dfae9278efa212fb7979261a691c647",
+      "tests/test_environment_sessions.py": "0b95849786581ab9a169d380f3174271fdc87089ef201e8b74e9d0ae231e4f0d"
+    }
+  },
+  "limitations": [
+    "This test verifies Control continuation selection; it does not write a checkpoint or publish through the canonical Store.",
+    "The live Environment gateway must still be read back after the merged Control source is active."
+  ],
+  "owner_repository": "mncs-control-mcp",
+  "purpose": "Keep authenticated continuation on the unique prior campaign session when a registered checkout branch changes and its live claim still proves the same stable worktree identity.",
+  "readiness": {
+    "canonical_checkpoint": "pending; Store publication is currently failing at host Btrfs metadata allocation",
+    "live_gateway_readback": "pending after merge",
+    "multiple_active_owners": "ambiguous with both session identities retained",
+    "unique_active_claim_owner_across_branch_change": "verified by the new regression"
+  },
+  "recorded_at": "2026-10-24T03:52:30Z",
+  "schema_version": "mncs.control.evidence/1",
+  "session_id": "ses_164edc158d9b1637",
+  "verification": {
+    "dependencies": {
+      "mncs-environment": "0f246be8839ef638db070eff49d878da6f3a0340",
+      "mncs-store": "d0d8f1c1ab8a575490d6c858517a623d0839ab0c"
+    },
+    "result": "PASS",
+    "tests": [
+      {
+        "command": "pytest -q tests/test_environment_sessions.py::test_campaign_continuation_returns_project_scoped_duplicate_capsules tests/test_environment_sessions.py::test_campaign_continuation_recovers_one_authenticated_nested_checkout tests/test_environment_sessions.py::test_campaign_continuation_preserves_distinct_worktree_conflict tests/test_environment_sessions.py::test_campaign_continuation_reads_real_isolated_store tests/test_environment_sessions.py::test_campaign_continuation_prefers_unique_active_checkout_claim_across_branch_change tests/test_environment_rpc.py::test_project_continuation_refuses_selection_when_other_context_holds_claim tests/test_environment_rpc.py::test_registered_checkout_continuation_binds_mutations_in_same_execution",
+        "result": "8 passed; 1 skipped"
+      },
+      {
+        "command": "ruff check src/mncs_control_mcp/environment_sessions.py tests/test_environment_sessions.py",
+        "result": "passed"
+      },
+      {
+        "command": "python3 -m py_compile src/mncs_control_mcp/environment_sessions.py tests/test_environment_sessions.py",
+        "result": "passed"
+      },
+      {
+        "command": "git diff --check",
+        "result": "passed"
+      },
+      {
+        "command": "TMPDIR=/dev/shm pytest -q tests/test_environment_sessions.py",
+        "result": "37 passed; Environment and Store dependencies pinned below"
+      }
+    ]
+  }
+}
