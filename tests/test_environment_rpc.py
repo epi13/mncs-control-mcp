@@ -1652,6 +1652,129 @@ def test_recovery_inventory_matches_codex_node_shim_to_launcher_command(
             launcher.wait(timeout=3)
 
 
+def test_approved_claim_recovery_excludes_only_its_exact_shell_launcher(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from mncs_control_mcp.processes import ProcessManager
+
+    repository = "mncs-compiler"
+    checkout = tmp_path / repository / ".worktrees" / "selected"
+    checkout.mkdir(parents=True)
+    launcher = subprocess.Popen(
+        [
+            "bash", "-c",
+            "python3 -c 'import time; time.sleep(30)' & "
+            "python3 -c 'import time; time.sleep(30)' & wait",
+        ],
+        cwd=checkout,
+        start_new_session=True,
+    )
+    try:
+        deadline = time.monotonic() + 3
+        children: list[int] = []
+        while time.monotonic() < deadline:
+            children = []
+            for entry in Path("/proc").iterdir():
+                if not entry.name.isdigit():
+                    continue
+                try:
+                    parent = int(next(
+                        line.split()[1]
+                        for line in (entry / "status").read_text(
+                            encoding="utf-8",
+                        ).splitlines()
+                        if line.startswith("PPid:")
+                    ))
+                except (OSError, StopIteration, ValueError, IndexError):
+                    continue
+                if parent == launcher.pid:
+                    children.append(int(entry.name))
+            if len(children) >= 2:
+                break
+            time.sleep(0.02)
+        assert len(children) == 2
+        peer_pid, unrelated_sibling_pid = sorted(children)
+
+        manager = ProcessManager.__new__(ProcessManager)
+        manager._lock = threading.RLock()
+        manager._request_processes = {}
+        server = EnvironmentRPCServer(
+            ControlConfig(
+                workspace_root=tmp_path,
+                sandbox_home=tmp_path / "home",
+                environment_rpc_socket=tmp_path / "rpc" / "environment.sock",
+            ),
+            environment_service=SimpleNamespace(state_dir=tmp_path / "state"),
+            policy=object(),
+            process_manager=manager,
+        )
+        markers = (
+            "claim-recover",
+            "ses_requester",
+            "cmp_environmental_capability",
+            "claim:mncs-compiler:paths:012345abcdef",
+            "ses_former_owner",
+            "63",
+        )
+        shell_command = (
+            "continuation --campaign-id cmp_environmental_capability && "
+            "./scripts/mncs-env claim-recover ses_requester "
+            "--campaign-id cmp_environmental_capability "
+            "--claim-id claim:mncs-compiler:paths:012345abcdef "
+            "--owner-session-id ses_former_owner --expected-version 63"
+        )
+        original_read_bytes = Path.read_bytes
+
+        def request_cmdlines(path: Path) -> bytes:
+            if path == Path(f"/proc/{launcher.pid}/cmdline"):
+                return f"bash\0-lc\0{shell_command}\0".encode()
+            if path == Path(f"/proc/{peer_pid}/cmdline"):
+                peer_argv = [
+                    "python3", "scripts/mncs-env", *markers,
+                    "--campaign-id", "cmp_environmental_capability",
+                    "--claim-id", "claim:mncs-compiler:paths:012345abcdef",
+                    "--owner-session-id", "ses_former_owner",
+                    "--expected-version", "63",
+                ]
+                return ("\0".join(peer_argv) + "\0").encode()
+            return original_read_bytes(path)
+
+        monkeypatch.setattr(Path, "read_bytes", request_cmdlines)
+        peer_identity = {
+            "pid": peer_pid,
+            "start_ticks": ProcessManager._process_start_ticks(peer_pid),
+        }
+        entries = [Path(f"/proc/{pid}") for pid in (launcher.pid, *children)]
+        assert server._current_request_shell_launcher(
+            peer_identity, entries,
+        ) is None
+
+        inventory = server._host_process_inventory(
+            owner_session_id="ses_former_owner",
+            repository=repository,
+            checkout=str(checkout),
+            current_grant_id="grant-requester",
+            current_peer_identity=peer_identity,
+            approved_recovery_shell_markers=markers,
+        )
+        matches, _services, excluded, _count, _same_uid, _boot, complete, _diagnostics = inventory
+        excluded_ids = {item["pid"] for item in excluded}
+        assert complete is True
+        assert {launcher.pid, peer_pid} <= excluded_ids
+        assert unrelated_sibling_pid not in excluded_ids
+        assert {item["pid"] for item in matches} == {unrelated_sibling_pid}
+    finally:
+        try:
+            os.killpg(launcher.pid, 15)
+        except ProcessLookupError:
+            pass
+        try:
+            launcher.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            launcher.kill()
+            launcher.wait(timeout=3)
+
+
 def test_claim_recovery_uses_persisted_audit_process_identity_when_cwd_is_hidden(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

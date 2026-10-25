@@ -2601,6 +2601,17 @@ class EnvironmentRPCServer:
             and isinstance(approval_reference, str)
             and bool(approval_reference.strip())
         )
+        approved_recovery_shell_markers = (
+            (
+                "claim-recover",
+                session_id,
+                campaign_id,
+                claim_id,
+                owner_session_id,
+                str(expected_version),
+            )
+            if allow_persistent_codex_daemon else None
+        )
         owner_consumer_id = str(recovery_request["owner_consumer_id"])
         liveness_request_id = current_request_id or request_id
 
@@ -2698,6 +2709,7 @@ class EnvironmentRPCServer:
                 current_grant_id=record.grant_id,
                 checkout=source_checkout,
                 allow_persistent_codex_daemon=allow_persistent_codex_daemon,
+                approved_recovery_shell_markers=approved_recovery_shell_markers,
             )
             if not before["process_complete"] or not before["services_complete"]:
                 raise ControlError(
@@ -2734,6 +2746,7 @@ class EnvironmentRPCServer:
                 current_grant_id=record.grant_id,
                 checkout=source_checkout,
                 allow_persistent_codex_daemon=allow_persistent_codex_daemon,
+                approved_recovery_shell_markers=approved_recovery_shell_markers,
             )
             if (not after["process_complete"] or not after["services_complete"]
                     or after["jobs"] or after["grants"] or after["active_requests"]
@@ -3467,6 +3480,7 @@ class EnvironmentRPCServer:
         tracked_job_roots: list[dict[str, object]] | None = None,
         current_peer_identity: dict[str, object] | None = None,
         allow_persistent_codex_daemon: bool = False,
+        approved_recovery_shell_markers: tuple[str, ...] | None = None,
     ) -> tuple[list[dict[str, object]], list[dict[str, object]],
                list[dict[str, object]], int, int, str | None, bool,
                dict[str, object]]:
@@ -3484,12 +3498,17 @@ class EnvironmentRPCServer:
                 "tracked_job_processes_excluded": [],
                 "incomplete_reasons": [{"reason": "host_procfs_unavailable", "count": 1}],
             }
-        (excluded_pids, excluded_processes, exclusion_complete,
-         exclusion_reasons) = (
-            self._current_request_process_inventory(
+        if approved_recovery_shell_markers:
+            request_inventory = self._current_request_process_inventory(
+                current_grant_id, entries, current_peer_identity,
+                approved_recovery_shell_markers,
+            )
+        else:
+            request_inventory = self._current_request_process_inventory(
                 current_grant_id, entries, current_peer_identity,
             )
-        )
+        (excluded_pids, excluded_processes, exclusion_complete,
+         exclusion_reasons) = request_inventory
         (tracked_excluded_pids, tracked_excluded_processes,
          tracked_exclusion_complete, tracked_exclusion_reasons) = (
             self._process_tree_exclusions(
@@ -3781,6 +3800,7 @@ class EnvironmentRPCServer:
     def _current_request_process_inventory(
         self, current_grant_id: str, entries: list[Path],
         peer_identity: dict[str, object] | None = None,
+        approved_recovery_shell_markers: tuple[str, ...] | None = None,
     ) -> tuple[set[int], list[dict[str, object]], bool, list[str]]:
         """Identify the exact active terminal request tree by its host grant."""
         identities_method = getattr(
@@ -3806,7 +3826,10 @@ class EnvironmentRPCServer:
         excluded, processes, complete, reasons = self._process_tree_exclusions(
             identities, entries, reason_prefix="request_process",
         )
-        launcher = self._current_request_shell_launcher(peer_identity, entries)
+        launcher = self._current_request_shell_launcher(
+            peer_identity, entries,
+            approved_recovery_shell_markers=approved_recovery_shell_markers,
+        )
         if launcher is not None:
             launcher_pid = int(launcher["pid"])
             excluded.add(launcher_pid)
@@ -3818,16 +3841,18 @@ class EnvironmentRPCServer:
     def _current_request_shell_launcher(
         self, peer_identity: dict[str, object] | None,
         entries: list[Path],
+        *, approved_recovery_shell_markers: tuple[str, ...] | None = None,
     ) -> dict[str, object] | None:
         """Identify a one-shot shell that directly launched the active MCP peer.
 
         Local Codex CLI requests can reach the Environment socket through a
-        child process of ``bash -c codex ...``. The shell is the caller for
+        child process of ``bash -c codex ...``. An explicitly approved claim
+        recovery can also arrive through a one-shot shell that invokes the
+        exact ``mncs-env claim-recover`` request. The shell is a launcher for
         this request, but its command line may mention a repository path and
-        its environment may be unreadable to Control. Excluding this exact
-        parent process avoids treating the request launcher as a competing
-        repository writer; its other children remain visible to liveness
-        checks.
+        its environment may be unreadable to Control. Excluding only this
+        exact parent process avoids treating it as a competing repository
+        writer; its other children remain visible to liveness checks.
         """
         if (not isinstance(peer_identity, dict)
                 or type(peer_identity.get("pid")) is not int
@@ -3908,6 +3933,21 @@ class EnvironmentRPCServer:
                             if (not same_invocation and codex_wrapper
                                     and command_name in {"codex", "codex.js"}):
                                 same_invocation = True
+                            if (not same_invocation
+                                    and approved_recovery_shell_markers):
+                                approved_command = (
+                                    "claim-recover" in command_argv
+                                    and any(
+                                        Path(item).name.casefold() == "mncs-env"
+                                        for item in command_argv
+                                    )
+                                    and all(
+                                        marker in command_argv
+                                        and marker in child_argv
+                                        for marker in approved_recovery_shell_markers
+                                    )
+                                )
+                                same_invocation = approved_command
                             if same_invocation:
                                 start_ticks = self._proc_start_ticks(parent_pid)
                                 if start_ticks is not None:
@@ -4378,6 +4418,7 @@ class EnvironmentRPCServer:
         self, *, owner_session_id: str, repository: str, current_request_id: str,
         current_grant_id: str, checkout: str | None = None,
         allow_persistent_codex_daemon: bool = False,
+        approved_recovery_shell_markers: tuple[str, ...] | None = None,
     ) -> dict[str, Any]:
         if self.process_manager is None:
             raise ControlError(
@@ -4423,6 +4464,7 @@ class EnvironmentRPCServer:
                 tracked_job_roots=tracked_job_roots,
                 current_peer_identity=current_peer_identity,
                 allow_persistent_codex_daemon=allow_persistent_codex_daemon,
+                approved_recovery_shell_markers=approved_recovery_shell_markers,
             )
         )
         services, service_count, services_complete = self._matching_user_services(
