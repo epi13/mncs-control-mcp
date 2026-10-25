@@ -3378,8 +3378,6 @@ class EnvironmentRPCServer:
                 for part in (entry / "cmdline").read_bytes().split(b"\x00")
                 if part
             ]
-            executable = Path(os.readlink(entry / "exe")).resolve(strict=False)
-            cwd = Path(os.readlink(entry / "cwd")).resolve(strict=False)
             status = (entry / "status").read_text(encoding="utf-8")
             parent_pid = int(next(
                 line.split()[1] for line in status.splitlines()
@@ -3397,9 +3395,9 @@ class EnvironmentRPCServer:
         if (parent_pid <= 1
                 or parent_uid != os.getuid()
                 or parent_comm.casefold() != "systemd"
-                or executable.name.casefold() != "codex"
-                or len(argv) < 4
+                or not argv
                 or Path(argv[0]).name.casefold() != "codex"
+                or len(argv) < 4
                 or argv[1] != "app-server"
                 or "--managed-daemon" not in argv
                 or "--listen" not in argv
@@ -3408,11 +3406,36 @@ class EnvironmentRPCServer:
                     or parent_comm.casefold() != "systemd"):
                 return "parent_not_same_uid_systemd"
             return "codex_app_server_signature_mismatch"
+
+        # ProtectHome=read-only in the Control service can make the kernel's
+        # /proc/<pid>/cwd and /proc/<pid>/exe links unreadable for a user-owned
+        # Codex app-server whose files are under the home directory. The
+        # authenticated audit already supplies its PID and start identity;
+        # use the absolute argv[0] as the executable path only when the exe
+        # link cannot be read. Keep a readable cwd as an exclusion check, but
+        # do not misclassify this protected daemon as unknown solely because
+        # either optional link is hidden in the service mount namespace.
+        try:
+            executable = Path(os.readlink(entry / "exe")).resolve(strict=False)
+        except OSError:
+            executable_arg = Path(argv[0])
+            if not executable_arg.is_absolute():
+                return "process_metadata_unavailable"
+            executable = executable_arg.resolve(strict=False)
+        try:
+            cwd = Path(os.readlink(entry / "cwd")).resolve(strict=False)
+        except OSError:
+            cwd = None
+
+        if executable.name.casefold() != "codex":
+            return "codex_app_server_signature_mismatch"
+
         protected_roots = [repository_root]
         if selected_checkout is not None:
             protected_roots.append(selected_checkout)
         for protected_root in protected_roots:
-            if (cwd == protected_root or protected_root in cwd.parents
+            if ((cwd is not None
+                 and (cwd == protected_root or protected_root in cwd.parents))
                     or executable == protected_root
                     or protected_root in executable.parents):
                 return "codex_app_server_inside_repository_scope"

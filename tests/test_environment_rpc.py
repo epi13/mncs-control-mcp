@@ -2032,6 +2032,38 @@ def test_operator_approved_liveness_only_excludes_managed_codex_daemon(
     assert server._is_managed_codex_app_server(
         codex_pid, "25111", repository_root=root, selected_checkout=checkout,
     )
+
+    def hidden_codex_links(path: str | os.PathLike[str], *args: object) -> str:
+        selected = os.fspath(path)
+        if selected in {
+            f"/proc/{codex_pid}/exe", f"/proc/{codex_pid}/cwd",
+        }:
+            raise PermissionError("Codex links are hidden by ProtectHome")
+        return readlink(path, *args)
+
+    monkeypatch.setattr(os, "readlink", hidden_codex_links)
+    assert server._is_managed_codex_app_server(
+        codex_pid, "25111", repository_root=root, selected_checkout=checkout,
+    )
+    data[str(proc_root / str(codex_pid) / "cmdline")] = (
+        b"codex\x00app-server\x00--listen\x00unix://\x00--managed-daemon\x00"
+    )
+    assert not server._is_managed_codex_app_server(
+        codex_pid, "25111", repository_root=root, selected_checkout=checkout,
+    )
+    data[str(proc_root / str(codex_pid) / "cmdline")] = (
+        f"{checkout / 'codex'}\x00app-server\x00--listen\x00unix://\x00"
+        "--managed-daemon\x00"
+    ).encode()
+    assert not server._is_managed_codex_app_server(
+        codex_pid, "25111", repository_root=root, selected_checkout=checkout,
+    )
+    data[str(proc_root / str(codex_pid) / "cmdline")] = (
+        b"/opt/codex/codex\x00app-server\x00--listen\x00unix://\x00"
+        b"--managed-daemon\x00"
+    )
+    monkeypatch.setattr(os, "readlink", readlink)
+
     assert not server._is_managed_codex_app_server(
         codex_pid, "stale-start", repository_root=root,
         selected_checkout=checkout,
