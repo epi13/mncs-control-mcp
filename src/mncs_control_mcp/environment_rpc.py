@@ -2735,6 +2735,15 @@ class EnvironmentRPCServer:
                         "active_owner_requests": before["active_requests"],
                         "matching_processes": before["processes"],
                         "matching_user_services": before["services"],
+                        "recovery_basis": recovery_basis,
+                        "persistent_agent_exemption_enabled": (
+                            allow_persistent_codex_daemon
+                        ),
+                        "approved_persistent_agent_hosts": len(
+                            before.get("process_diagnostics", {}).get(
+                                "operator_approved_resident_agent_hosts", [],
+                            )
+                        ),
                     },
                 )
 

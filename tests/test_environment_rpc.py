@@ -3091,6 +3091,41 @@ def test_same_operator_recovery_uses_host_liveness_and_narrows_scope(
     assert process_manager.begin_claim_recovery.call_count == 2
     assert process_manager.end_claim_recovery.call_count == 2
 
+    observation["processes"] = [{
+        "pid": 77103,
+        "ppid": 1466,
+        "start_ticks": "25112",
+        "comm": "codex",
+        "reason": "former-session-authenticated-client",
+    }]
+    observation["process_diagnostics"][
+        "operator_approved_resident_agent_hosts"
+    ] = [{"pid": 77103, "start_ticks": "25112"}]
+    with pytest.raises(ControlError) as active_error:
+        server._perform_claim_recovery(
+            {
+                "session_id": "ses_new_owner",
+                "campaign_id": "cmp_new_compiler",
+                "claim_id": claim["claim_id"],
+                "repository": repository,
+                "owner_session_id": claim["session_id"],
+                "owner_consumer_id": claim["consumer_id"],
+                "expected_version": claim["version"],
+                "owner_scope": owner_scope,
+                "target_scope": target_scope,
+                "recovery_basis": "operator-approved-config",
+                "approval_reference": "user-approval:exact-fixture-recovery",
+                "reason": "operator approved this exact claim transition",
+            },
+            record=record,
+            request_id="req_operator_recover_active_scope",
+            current_request_id="req_outer_environment_rpc",
+        )
+    assert active_error.value.code == "ENVIRONMENT_OWNER_EXECUTION_ACTIVE"
+    assert active_error.value.details["recovery_basis"] == "operator-approved-config"
+    assert active_error.value.details["persistent_agent_exemption_enabled"] is True
+    assert active_error.value.details["approved_persistent_agent_hosts"] == 1
+
 
 def test_rpc_accepts_bounded_campaign_metadata_and_rejects_oversized_arguments(
     tmp_path: Path,
