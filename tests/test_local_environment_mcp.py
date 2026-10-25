@@ -45,6 +45,13 @@ def test_stable_tool_maps_only_named_environment_operations() -> None:
     assert selected is True
     assert argv == ["complete", "ses_selected", "--retry-pending"]
 
+    argv, selected = _build_argv(
+        "continuation", {"session_id": "ses_selected"}, context,
+        "mncs-compiler",
+    )
+    assert selected is False
+    assert argv == ["continuation", "--session-id", "ses_selected"]
+
     with pytest.raises(ValueError, match="unsupported arguments"):
         _build_argv(
             "enter", {"argv": ["terminal_exec", "rm -rf"]}, context,

@@ -170,7 +170,7 @@ def _build_argv(
     """Map one named operation to its fixed CLI grammar and return session use."""
     values_by_operation: dict[str, set[str]] = {
         "enter": {"definition", "workspace", "campaign_id", "task_identity", "new_session"},
-        "continuation": {"campaign_id", "task_identity"},
+        "continuation": {"campaign_id", "task_identity", "session_id"},
         "inspect": {"session_id"}, "context": {"session_id"},
         "health": {"session_id", "live"}, "capabilities": {"session_id"},
         "resume": {"session_id"},
@@ -229,9 +229,11 @@ def _build_argv(
     if operation == "continuation":
         argv = ["continuation"]
         for field, flag in (("campaign_id", "--campaign-id"),
-                            ("task_identity", "--task-identity")):
+                            ("task_identity", "--task-identity"),
+                            ("session_id", "--session-id")):
             if field in values:
-                argv.extend([flag, _string(values[field], field, max_length=256)])
+                max_length = 128 if field == "session_id" else 256
+                argv.extend([flag, _string(values[field], field, max_length=max_length)])
         return argv, False
 
     session_id = _session_argument(values, context)
@@ -1046,9 +1048,10 @@ def main() -> None:
             "session. Verify runs one already-bound project verification capability "
             "with its descriptor's fixed arguments and selected project authority. "
             "The project and optional project-relative cwd "
-            "select one project directory. Session operations may include campaign_id and "
-            "task_identity together; Control checks that binding before reselecting after an "
-            "MCP process restart. Invoke is "
+            "select one project directory. Continuation accepts an exact session_id, "
+            "campaign_id, or task_identity. Session operations may include these selectors "
+            "to reselect an authenticated context after an MCP process restart; Control "
+            "checks principal, project, checkout, and claim ownership before binding. Invoke is "
             "limited to the typed Compiler application-build and Forge application-execution "
             "contracts; Environment enforces the selected session's repository authority. "
             "Owner-approved scope_grant may select a repository checkout or a registered "
