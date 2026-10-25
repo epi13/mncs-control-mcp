@@ -873,6 +873,39 @@ def test_session_operation_reselects_through_campaign_on_a_fresh_context(
     assert requests[1]["argv"] == ["context", "ses_selected"]
 
 
+def test_session_operation_can_reselect_an_exact_session_after_context_reset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bridge = object.__new__(LocalEnvironmentMCP)
+    bridge.socket_path = tmp_path / "unused.sock"
+    context = _ProjectContext(
+        "grant", "/workspace/mncs-compiler", selected_session_id="ses_cached",
+    )
+    bridge._contexts = {}
+    monkeypatch.setattr(bridge, "_context", lambda _project, _cwd: context)
+    requests: list[dict[str, object]] = []
+    replies = [
+        {"status": "ready", "selected_session_id": "ses_selected"},
+        {"session_id": "ses_selected", "lifecycle": "active"},
+    ]
+
+    def fake_rpc(_socket_path: Path, request: dict[str, object]) -> dict[str, object]:
+        requests.append(request)
+        return {"ok": True, "result": {
+            "stdout": json.dumps(replies.pop(0)), "stderr": "", "exit_code": 0,
+        }}
+
+    monkeypatch.setattr(local_environment_mcp, "_rpc", fake_rpc)
+    response = bridge.invoke(
+        "mncs-compiler", "resume", {"session_id": "ses_selected"},
+    )
+
+    assert response["ok"] is True
+    assert response["result"]["session_id"] == "ses_selected"
+    assert requests[0]["argv"] == ["continuation", "--session-id", "ses_selected"]
+    assert requests[1]["argv"] == ["resume", "ses_selected", "--revalidate"]
+
+
 def test_campaign_selection_refreshes_a_stale_local_grant(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

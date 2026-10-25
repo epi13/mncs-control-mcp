@@ -673,11 +673,12 @@ def build_server(config: ControlConfig | None = None) -> Any:
             },
         )  # type: ignore[return-value]
 
-    @server.tool(name="env_campaign_continuation", description="Discover authenticated campaign continuations for one project, select one campaign identity, or resolve a previously bound task identity. Task identity lookup is principal, Environment definition, and workspace scoped; unbound selectors never adopt work.", annotations=ro, structured_output=True)
+    @server.tool(name="env_campaign_continuation", description="Discover authenticated campaign continuations for one project, or select an exact authenticated session, campaign, or previously bound task identity. Selectors preserve project and principal checks and never adopt work.", annotations=ro, structured_output=True)
     def env_campaign_continuation(
         repository: str,
         campaign_id: str | None = None,
         task_identity: str | None = None,
+        session_id: str | None = None,
     ) -> dict[str, object]:
         return invoke(
             "env_campaign_continuation",
@@ -685,9 +686,11 @@ def build_server(config: ControlConfig | None = None) -> Any:
             repository,
             campaign_id,
             task_identity,
+            **({"session_id": session_id} if session_id is not None else {}),
             audit_metadata={
                 "campaign_id": campaign_id,
                 "task_identity_present": task_identity is not None,
+                "session_id_present": session_id is not None,
                 "repository": repository,
             },
         )  # type: ignore[return-value]

@@ -656,7 +656,8 @@ class EnvironmentService:
     def campaign_continuation(
         self, repository: str, campaign_id: str | None = None,
         task_identity: str | None = None,
-        *, working_checkout: dict[str, str] | None = None,
+        *, session_id: str | None = None,
+        working_checkout: dict[str, str] | None = None,
         definition_id: str | None = None,
         workspace_root: str | None = None,
     ) -> dict[str, Any]:
@@ -686,11 +687,19 @@ class EnvironmentService:
                 "ENVIRONMENT_TASK_IDENTITY_INVALID",
                 "task identity must be bounded nonempty text when supplied",
             )
+        if (session_id is not None
+                and (not isinstance(session_id, str)
+                     or re.fullmatch(r"ses_[A-Za-z0-9_-]{1,120}", session_id) is None)):
+            raise ControlError(
+                "ENVIRONMENT_SESSION_INVALID",
+                "session identity must be a valid Environment session id",
+            )
         if self.authenticated_principal_id is None:
             raise ControlError("ENVIRONMENT_AUTHORITY_DENIED",
                                "campaign lookup requires a Control-authenticated principal")
         repository = self._validate_repository_selector(repository)
         requested_campaign_id = campaign_id
+        exact_session_id = session_id
         pkg = self._pkg()
         checkout_matcher = getattr(
             getattr(pkg, "entry", None), "_working_checkout_matches_snapshot", None,
@@ -790,6 +799,37 @@ class EnvironmentService:
 
         store = self._store(pkg)
         try:
+            if exact_session_id is not None:
+                selected_snapshot = store.load_snapshot(exact_session_id)
+                if not isinstance(selected_snapshot, dict):
+                    raise ControlError(
+                        "ENVIRONMENT_SESSION_MISSING",
+                        "selected Environment session snapshot is unavailable",
+                    )
+                if selected_snapshot.get("authenticated_principal_id") != self.authenticated_principal_id:
+                    raise ControlError(
+                        "ENVIRONMENT_AUTHORITY_DENIED",
+                        "selected Environment session belongs to a different authenticated principal",
+                    )
+                selected_campaign = selected_snapshot.get("campaign")
+                selected_campaign_id = (
+                    selected_campaign.get("identity")
+                    if isinstance(selected_campaign, dict) else None
+                )
+                if not isinstance(selected_campaign_id, str) or not selected_campaign_id:
+                    raise ControlError(
+                        "ENVIRONMENT_SESSION_MISSING",
+                        "selected Environment session has no durable campaign identity",
+                    )
+                if campaign_id is not None and campaign_id != selected_campaign_id:
+                    raise ControlError(
+                        "ENVIRONMENT_CAMPAIGN_SESSION_CONFLICT",
+                        "selected Environment session does not belong to the requested campaign",
+                        details={"campaign_id": campaign_id},
+                    )
+                campaign_id = selected_campaign_id
+                requested_campaign_id = selected_campaign_id
+
             scope_grants_cache: dict[str, list[dict[str, Any]]] = {}
             scope_grants_lookup_count = 0
 
@@ -930,6 +970,11 @@ class EnvironmentService:
                     "ENVIRONMENT_LOOKUP_LIMIT",
                     "canonical Environment session inventory exceeds the bounded lookup limit",
                     details={"session_count": len(session_ids), "limit": 10000},
+                )
+            if exact_session_id is not None and exact_session_id not in session_ids:
+                raise ControlError(
+                    "ENVIRONMENT_SESSION_MISSING",
+                    "selected Environment session is not present in canonical Store",
                 )
             all_claims = store.read_claims()
             active_claims = pkg.claims.active_claims(all_claims)
@@ -1295,13 +1340,29 @@ class EnvironmentService:
                 ]
                 if not project_sessions:
                     continue
+                authoritative_session = None
+                authoritative_selection_basis = None
+                if exact_session_id is not None:
+                    # An exact session selector narrows only after the normal
+                    # campaign, principal, checkout, and project-link checks.
+                    # It cannot turn a same-campaign session into authority
+                    # for a repository that the selected session does not
+                    # itself reference.
+                    if not any(candidate_id == exact_session_id
+                               for candidate_id, _snapshot in project_sessions):
+                        continue
+                    matching = [
+                        (candidate_id, snapshot)
+                        for candidate_id, snapshot in matching
+                        if candidate_id == exact_session_id
+                    ]
+                    authoritative_session = exact_session_id
+                    authoritative_selection_basis = "authenticated-exact-session-link"
                 # The project link proves this campaign belongs in the
                 # repository capsule. Keep its same-principal duplicates in
                 # the selected checkout/context so claim and checkpoint
                 # provenance can resolve them, even when one projection did
                 # not persist the project reference itself.
-                authoritative_session = None
-                authoritative_selection_basis = None
                 if len(matching) > 1 and working_checkout is not None:
                     candidate_session_ids = [
                         session_id for session_id, _snapshot in matching

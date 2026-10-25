@@ -2663,7 +2663,7 @@ def test_project_grant_returns_authenticated_campaign_capsule(tmp_path: Path) ->
     workspace = tmp_path / "projects"
     project = workspace / "mncs-environment"
     (project / ".worktrees" / "gatec").mkdir(parents=True)
-    calls: list[tuple[str, str | None, str | None]] = []
+    calls: list[tuple[str, str | None, str | None, str | None]] = []
 
     class Environment:
         state_dir = tmp_path / "state"
@@ -2673,8 +2673,30 @@ def test_project_grant_returns_authenticated_campaign_capsule(tmp_path: Path) ->
         def campaign_continuation(
             self, repository: str, campaign_id: str | None = None,
             task_identity: str | None = None,
+            *, session_id: str | None = None,
         ):
-            calls.append((repository, campaign_id, task_identity))
+            calls.append((repository, campaign_id, task_identity, session_id))
+            if session_id is not None:
+                return {
+                    "schema_version": "mncs.control.campaign-continuation/1",
+                    "repository": repository,
+                    "campaign_id": "cmp_test",
+                    "status": "ready",
+                    "selected_session_id": session_id,
+                    "selection_basis": "authenticated-exact-session-link",
+                    "continuations": [{
+                        "session_id": session_id,
+                        "campaign_id": "cmp_test",
+                        "campaign_session_ids": [session_id],
+                        "lifecycle": "active",
+                        "project_reference": {
+                            "status": "linked",
+                            "basis": ["campaign.work_intent.repositories"],
+                        },
+                    }],
+                    "continuations_count": 1,
+                    "continuations_truncated": False,
+                }
             return {
                 "schema_version": "mncs.control.campaign-continuation/1",
                 "repository": repository,
@@ -2730,7 +2752,7 @@ def test_project_grant_returns_authenticated_campaign_capsule(tmp_path: Path) ->
     assert [item["session_id"] for item in capsule["continuations"]] == [
         "ses_one", "ses_two",
     ]
-    assert calls == [("mncs-environment", None, None)]
+    assert calls == [("mncs-environment", None, None, None)]
 
     selected = server.dispatch({
         **request,
@@ -2739,8 +2761,8 @@ def test_project_grant_returns_authenticated_campaign_capsule(tmp_path: Path) ->
     }, peer_uid=0)
     assert json.loads(selected["result"]["stdout"])["campaign_id"] == "cmp_test"
     assert calls == [
-        ("mncs-environment", None, None),
-        ("mncs-environment", "cmp_test", None),
+        ("mncs-environment", None, None, None),
+        ("mncs-environment", "cmp_test", None, None),
     ]
 
     selected_by_task = server.dispatch({
@@ -2757,7 +2779,19 @@ def test_project_grant_returns_authenticated_campaign_capsule(tmp_path: Path) ->
         "campaign_id": "cmp_test",
         "session_id": "ses_one",
     }
-    assert calls[-1] == ("mncs-environment", None, "durable-task-key")
+    assert calls[-1] == ("mncs-environment", None, "durable-task-key", None)
+
+    selected_by_session = server.dispatch({
+        **request,
+        "request_id": "req_project_campaign_exact_session",
+        "argv": ["continuation", "--session-id=ses_one"],
+    }, peer_uid=0)
+    assert selected_by_session["ok"] is True
+    exact_capsule = json.loads(selected_by_session["result"]["stdout"])
+    assert exact_capsule["status"] == "ready"
+    assert exact_capsule["selected_session_id"] == "ses_one"
+    assert exact_capsule["selection_basis"] == "authenticated-exact-session-link"
+    assert calls[-1] == ("mncs-environment", None, None, "ses_one")
 
 
 def test_artifact_read_is_bound_to_environment_selected_project_session(

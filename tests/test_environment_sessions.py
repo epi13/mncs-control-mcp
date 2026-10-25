@@ -796,6 +796,30 @@ def test_campaign_continuation_returns_project_scoped_duplicate_capsules(tmp_pat
     assert discovered["status"] == "ambiguous"
     assert discovered["campaign_id"] == "campaign-1"
 
+    exact = service.campaign_continuation(
+        "mncs-control-mcp", session_id="ses_first",
+    )
+    assert exact["status"] == "ready"
+    assert exact["campaign_id"] == "campaign-1"
+    assert exact["selected_session_id"] == "ses_first"
+    assert exact["selection_basis"] == "authenticated-exact-session-link"
+    assert [item["session_id"] for item in exact["continuations"]] == ["ses_first"]
+
+    with pytest.raises(ControlError) as selector_conflict:
+        service.campaign_continuation(
+            "mncs-control-mcp", "campaign-2", session_id="ses_first",
+        )
+    assert selector_conflict.value.code == "ENVIRONMENT_CAMPAIGN_SESSION_CONFLICT"
+
+    foreign_snapshot = snapshot("ses_foreign_exact", version=1)
+    foreign_snapshot["authenticated_principal_id"] = "principal-foreign"
+    snapshots["ses_foreign_exact"] = foreign_snapshot
+    with pytest.raises(ControlError) as foreign_selector:
+        service.campaign_continuation(
+            "mncs-control-mcp", session_id="ses_foreign_exact",
+        )
+    assert foreign_selector.value.code == "ENVIRONMENT_AUTHORITY_DENIED"
+
 
 def test_owner_scope_grant_links_only_its_exact_campaign_worktree(
     tmp_path: Path,

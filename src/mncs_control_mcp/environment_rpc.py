@@ -5570,6 +5570,7 @@ class EnvironmentRPCServer:
         *, project_context: tuple[str, str] | None = None,
         derive_project_context: bool = True,
         project_checkout: dict[str, str] | None = None,
+        exact_session_id: str | None = None,
     ) -> dict[str, Any]:
         """Select one authenticated project session using its canonical checkout.
 
@@ -5608,6 +5609,7 @@ class EnvironmentRPCServer:
                     project_context=project_context,
                     derive_project_context=derive_project_context,
                     project_checkout=project_checkout,
+                    exact_session_id=exact_session_id,
                 )
                 for item in campaigns
             ]
@@ -5678,7 +5680,21 @@ class EnvironmentRPCServer:
             # active campaign session attached to this same worktree.
             selector = None
             selection_basis = "authenticated-registered-checkout"
-        if selector is None and project_checkout is None:
+        if exact_session_id is not None:
+            if (re.fullmatch(r"ses_[A-Za-z0-9_-]{1,120}", exact_session_id) is None
+                    or (task_selector_session_id is not None
+                        and task_selector_session_id != exact_session_id)):
+                capsule["project_selection"] = {
+                    "status": "blocked",
+                    "reason": "exact-session-selector-conflicts-with-task-selector",
+                }
+                capsule["status"] = "task-selector-session-mismatch"
+                capsule["next"] = (
+                    "use one session identity consistent with the authenticated task binding"
+                )
+                return capsule
+            selection_basis = "authenticated-exact-session-link"
+        if selector is None and project_checkout is None and exact_session_id is None:
             return capsule
         if project_checkout is not None and selector is None:
             selection_basis = "authenticated-registered-checkout"
@@ -5729,6 +5745,11 @@ class EnvironmentRPCServer:
                 row for row in exact_context_rows
                 if row.get("definition_id") == selector[0]
                 and row.get("workspace_root") == selector[1]
+            ]
+        if exact_session_id is not None:
+            exact_context_rows = [
+                row for row in exact_context_rows
+                if row.get("session_id") == exact_session_id
             ]
 
         selectable_lifecycles = {
@@ -5815,6 +5836,15 @@ class EnvironmentRPCServer:
             exact_context_rows = [
                 row for row in exact_context_rows
                 if row.get("session_id") == task_selector_session_id
+            ]
+        if exact_session_id is not None:
+            context_rows = [
+                row for row in context_rows
+                if row.get("session_id") == exact_session_id
+            ]
+            exact_context_rows = [
+                row for row in exact_context_rows
+                if row.get("session_id") == exact_session_id
             ]
         if not exact_context_rows and project_checkout is not None:
             root_path = project_checkout.get("path")
@@ -6194,6 +6224,16 @@ class EnvironmentRPCServer:
             return capsule
         selected = selected_rows[0]
         selected_session = selected["session_id"]
+        if exact_session_id is not None and selected_session != exact_session_id:
+            capsule["project_selection"] = {
+                "status": "blocked",
+                "reason": "exact-session-selector-did-not-match-selected-continuation",
+            }
+            capsule["status"] = "session-selection-conflict"
+            capsule["next"] = (
+                "inspect the exact session capsule and retry with its recorded identity"
+            )
+            return capsule
         selected_checkout = checkout_by_session.get(selected_session, project_checkout)
 
         claims_package = None
@@ -6316,7 +6356,10 @@ class EnvironmentRPCServer:
             "workspace_root": selected.get("workspace_root"),
         }
         capsule["selected_context"] = selected_context
-        capsule["selection_basis"] = selection_basis
+        capsule["selection_basis"] = (
+            "authenticated-exact-session-link"
+            if exact_session_id is not None else selection_basis
+        )
         if project_checkout is not None:
             capsule["selected_checkout"] = selected_checkout
         capsule["unselected_contexts"] = [
@@ -6438,10 +6481,11 @@ class EnvironmentRPCServer:
             )
         campaign_id: str | None = None
         task_identity: str | None = None
+        session_id: str | None = None
         index = 1
         while index < len(argv):
             item = argv[index]
-            if item in {"--campaign-id", "--task-identity"}:
+            if item in {"--campaign-id", "--task-identity", "--session-id"}:
                 option = item
                 if index + 1 >= len(argv):
                     raise ControlError(
@@ -6461,15 +6505,24 @@ class EnvironmentRPCServer:
                             "continuation accepts at most one --campaign-id",
                         )
                     campaign_id = value
-                else:
+                elif option == "--task-identity":
                     if task_identity is not None:
                         raise ControlError(
                             "ENVIRONMENT_RPC_INVALID_REQUEST",
                             "continuation accepts at most one --task-identity",
                         )
                     task_identity = value
+                else:
+                    if session_id is not None:
+                        raise ControlError(
+                            "ENVIRONMENT_RPC_INVALID_REQUEST",
+                            "continuation accepts at most one --session-id",
+                        )
+                    session_id = value
                 index += 2
-            elif item.startswith("--campaign-id=") or item.startswith("--task-identity="):
+            elif (item.startswith("--campaign-id=")
+                  or item.startswith("--task-identity=")
+                  or item.startswith("--session-id=")):
                 option, _, value = item.partition("=")
                 if option == "--campaign-id":
                     if campaign_id is not None:
@@ -6478,18 +6531,25 @@ class EnvironmentRPCServer:
                             "continuation accepts at most one --campaign-id",
                         )
                     campaign_id = value
-                else:
+                elif option == "--task-identity":
                     if task_identity is not None:
                         raise ControlError(
                             "ENVIRONMENT_RPC_INVALID_REQUEST",
                             "continuation accepts at most one --task-identity",
                         )
                     task_identity = value
+                else:
+                    if session_id is not None:
+                        raise ControlError(
+                            "ENVIRONMENT_RPC_INVALID_REQUEST",
+                            "continuation accepts at most one --session-id",
+                        )
+                    session_id = value
                 index += 1
             else:
                 raise ControlError(
                     "ENVIRONMENT_RPC_INVALID_REQUEST",
-                    "continuation accepts optional --campaign-id and --task-identity",
+                    "continuation accepts optional --campaign-id, --task-identity, and --session-id",
                 )
         if campaign_id is not None and (
             not campaign_id.strip() or campaign_id.startswith("--")
@@ -6506,23 +6566,34 @@ class EnvironmentRPCServer:
                 "ENVIRONMENT_TASK_IDENTITY_INVALID",
                 "task identity must be bounded nonempty text when supplied",
             )
+        if (session_id is not None
+                and not re.fullmatch(r"ses_[A-Za-z0-9_-]{1,120}", session_id)):
+            raise ControlError(
+                "ENVIRONMENT_SESSION_INVALID",
+                "session identity must be a valid Environment session id",
+            )
 
         if getattr(self.environment_service, "authenticated_principal_id", None) != record.principal_id:
             raise ControlError(
                 "ENVIRONMENT_AUTHORITY_DENIED",
                 "campaign continuation is not bound to the Control-authenticated principal",
             )
+        selector_kwargs = {"session_id": session_id} if session_id is not None else {}
         if project_checkout is None:
             if task_identity is None:
-                capsule = self.environment_service.campaign_continuation(project, campaign_id)
+                capsule = self.environment_service.campaign_continuation(
+                    project, campaign_id, **selector_kwargs,
+                )
             else:
                 capsule = self.environment_service.campaign_continuation(
                     project, campaign_id, task_identity,
+                    **selector_kwargs,
                 )
         elif task_identity is None:
             capsule = self.environment_service.campaign_continuation(
                 project,
                 campaign_id,
+                **selector_kwargs,
                 working_checkout=project_checkout,
                 definition_id=(project_context[0]
                                if project_context is not None else None),
@@ -6532,6 +6603,7 @@ class EnvironmentRPCServer:
         else:
             capsule = self.environment_service.campaign_continuation(
                 project, campaign_id, task_identity,
+                **selector_kwargs,
                 working_checkout=project_checkout,
                 definition_id=(project_context[0]
                                if project_context is not None else None),
@@ -6540,26 +6612,31 @@ class EnvironmentRPCServer:
             )
         if not isinstance(capsule, dict):
             raise TypeError("Environment returned a non-object continuation capsule")
+        project_selection_kwargs = (
+            {"exact_session_id": session_id} if session_id is not None else {}
+        )
         if project_checkout is None:
             if project_context is None:
                 capsule = self._select_project_campaign_context(
-                    capsule, record, project,
+                    capsule, record, project, **project_selection_kwargs,
                 )
             else:
                 capsule = self._select_project_campaign_context(
                     capsule, record, project, project_context=project_context,
                     derive_project_context=False,
+                    **project_selection_kwargs,
                 )
         else:
             capsule = self._select_project_campaign_context(
                 capsule, record, project, project_context=project_context,
                 derive_project_context=False,
                 project_checkout=project_checkout,
+                **project_selection_kwargs,
             )
         selected_session = capsule.get("selected_session_id")
-        if (selected_session is None and campaign_id is not None
+        if (selected_session is None and (campaign_id is not None or session_id is not None)
                 and capsule.get("status") == "ready"
-                and capsule.get("campaign_id") == campaign_id):
+                and (campaign_id is None or capsule.get("campaign_id") == campaign_id)):
             continuations = capsule.get("continuations")
             continuation_count = capsule.get(
                 "continuations_count",
@@ -6586,6 +6663,7 @@ class EnvironmentRPCServer:
                 if (
                     isinstance(candidate_session_id, str)
                     and re.fullmatch(r"ses_[A-Za-z0-9_-]{1,120}", candidate_session_id)
+                    and (session_id is None or candidate_session_id == session_id)
                     and isinstance(campaign_session_ids, list)
                     and candidate_session_id in campaign_session_ids
                     and isinstance(project_reference, dict)
@@ -6629,6 +6707,7 @@ class EnvironmentRPCServer:
                     "authenticated-project-checkout-live-claim-owner",
                     "authenticated-project-checkout-unique-checkpoint",
                     "authenticated-task-selector",
+                    "authenticated-exact-session-link",
                     "authenticated-explicit-linked-campaign",
                     "authenticated-registered-checkout",
                     "authenticated-project-root-registered-worktree",

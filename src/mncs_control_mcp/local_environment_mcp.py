@@ -33,7 +33,7 @@ SESSION_OPERATIONS = frozenset({
     "checkpoint", "handoff", "complete", "claims", "campaign_state",
     "environmental_capability", "artifact_read", "store_generation", "scope_grant",
 })
-SESSION_SELECTOR_FIELDS = frozenset({"campaign_id", "task_identity"})
+SESSION_SELECTOR_FIELDS = frozenset({"campaign_id", "task_identity", "session_id"})
 
 
 @dataclass
@@ -881,33 +881,23 @@ class LocalEnvironmentMCP:
     ) -> dict[str, Any] | None:
         campaign_id = values.get("campaign_id")
         task_identity = values.get("task_identity")
+        requested_session_id = values.get("session_id")
         if (context.selected_session_id
                 and SESSION_RE.fullmatch(context.selected_session_id)
-                and campaign_id is None and task_identity is None):
-            requested_session_id = values.get("session_id")
-            if requested_session_id not in (None, context.selected_session_id):
-                return {
-                    "ok": False,
-                    "error": {
-                        "code": "ENVIRONMENT_SESSION_SELECTION_REQUIRED",
-                        "message": "requested session differs from this project context's selected session",
-                        "details": {
-                            "selected_session_id": context.selected_session_id,
-                            "session_id": requested_session_id,
-                            "next": "supply the campaign_id or task_identity for the intended session",
-                        },
-                    },
-                }
+                and campaign_id is None and task_identity is None
+                and requested_session_id in (None, context.selected_session_id)):
             return None
         # A fresh MCP process may not retain its in-memory session cache.
         # Rebind through Control's authenticated project continuation whenever
-        # the caller supplies a stable campaign or task selector.
+        # the caller supplies an exact session, campaign, or task selector.
         context.selected_session_id = None
         argv = ["continuation"]
         for field, flag in (("campaign_id", "--campaign-id"),
-                            ("task_identity", "--task-identity")):
+                            ("task_identity", "--task-identity"),
+                            ("session_id", "--session-id")):
             if field in values:
-                argv.extend([flag, _string(values[field], field, max_length=256)])
+                max_length = 128 if field == "session_id" else 256
+                argv.extend([flag, _string(values[field], field, max_length=max_length)])
         request = {
             "grant": context.grant,
             "request_id": "req_" + secrets.token_hex(16),
