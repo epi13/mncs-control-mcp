@@ -1999,6 +1999,8 @@ def test_operator_approved_liveness_only_excludes_managed_codex_daemon(
     codex_cwd = {"path": str(tmp_path)}
 
     def read_bytes(path: Path) -> bytes:
+        if str(path) == str(proc_root / str(user_systemd_pid) / "cmdline"):
+            raise PermissionError("user manager command line is hidden")
         if str(path) in data:
             return data[str(path)]
         return original_read_bytes(path)
