@@ -229,6 +229,44 @@ def test_dispatch_records_only_redacted_read_only_operation_outcomes(
     assert recorded[1]["failure_code"] == "ENVIRONMENT_AUTHORITY_DENIED"
     assert "private denial details" not in json.dumps(recorded)
 
+    context = {
+        "schema_version": "mncs.environment.entry-context/1",
+        "capabilities": {
+            "available": [{
+                "capability": "mncs-test:run",
+                "provider": "mncs-test",
+                "contract_revision": "r1",
+            }],
+            "available_count": 1,
+            "unavailable_count": 2,
+            "unknown_count": 3,
+            "truncated": False,
+        },
+    }
+    context_response = {
+        "ok": True,
+        "result": {"exit_code": 0, "stdout": json.dumps(context), "stderr": ""},
+    }
+    server._dispatch_once = lambda *_args, **_kwargs: context_response  # type: ignore[method-assign]
+    context_request = {
+        **request,
+        "request_id": "req_context_response_summary",
+        "argv": ["context", "ses_activity_control"],
+    }
+    context_result = server.dispatch(context_request, peer_uid=0)
+
+    assert context_result == context_response
+    assert len(recorded) == 3
+    context_record = recorded[2]
+    summary = context_record["context_response_summary"]
+    assert context_record["operation"] == "session.context"
+    assert summary["capture_status"] == "captured"
+    assert summary["available_count"] == 1
+    assert summary["listed_available_count"] == 1
+    assert summary["identity_digest_status"] == "complete"
+    assert "mncs-test:run" not in json.dumps(context_record)
+    assert json.dumps(context["capabilities"]) not in json.dumps(context_record)
+
 
 def test_claim_worktree_path_can_name_an_exact_checkout_in_the_workspace(
     tmp_path: Path,

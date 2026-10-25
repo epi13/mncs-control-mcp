@@ -44,6 +44,9 @@ ALLOWED_COMMANDS = frozenset({
 MAX_CAMPAIGN_EVIDENCE_PAGE = 128
 MAX_ENVIRONMENTAL_PROJECTION_HISTORY_PAGES = 4
 MAX_ENVIRONMENTAL_PROJECTION_EVIDENCE_PAGE = 32
+MAX_CONTEXT_RESPONSE_SUMMARY_BYTES = 128 * 1024
+MAX_CONTEXT_RESPONSE_CAPABILITY_LIST = 20
+CONTEXT_RESPONSE_SUMMARY_SCHEMA = "mncs.environment.context-response-summary/1"
 ALLOWED_INVOKE_CAPABILITIES = frozenset({
     "mncs-environment:ambient-projection-coherence",
     "mncs-environment:projection-evidence-inspection",
@@ -571,6 +574,119 @@ class EnvironmentRPCServer:
                         return candidate
         return "environment-operation-failed"
 
+    @staticmethod
+    def _context_response_summary(
+        result: Any, *, succeeded: bool,
+    ) -> dict[str, Any]:
+        """Capture only bounded capability-list shape from session.context."""
+        empty = {
+            "schema_version": CONTEXT_RESPONSE_SUMMARY_SCHEMA,
+            "capture_status": "unavailable",
+            "capture_reason": None,
+            "context_schema_version": None,
+            "available_count": None,
+            "listed_available_count": None,
+            "unavailable_count": None,
+            "unknown_count": None,
+            "capabilities_truncated": None,
+            "available_identity_digest": None,
+            "identity_digest_status": "unavailable",
+        }
+
+        def unavailable(reason: str) -> dict[str, Any]:
+            return {**empty, "capture_reason": reason}
+
+        def partial(reason: str) -> dict[str, Any]:
+            return {
+                **empty,
+                "capture_status": "partial",
+                "capture_reason": reason,
+                "context_schema_version": "mncs.environment.entry-context/1",
+            }
+
+        if not succeeded:
+            return unavailable("operation-failed")
+        stdout = result.get("stdout") if isinstance(result, dict) else None
+        if not isinstance(stdout, str):
+            return unavailable("stdout-unavailable")
+        try:
+            if len(stdout.encode("utf-8")) > MAX_CONTEXT_RESPONSE_SUMMARY_BYTES:
+                return unavailable("response-too-large")
+            context = json.loads(stdout)
+        except (UnicodeEncodeError, json.JSONDecodeError, TypeError):
+            return unavailable("invalid-json")
+        if (not isinstance(context, dict)
+                or context.get("schema_version") != "mncs.environment.entry-context/1"):
+            return unavailable("invalid-context-schema")
+        capabilities = context.get("capabilities")
+        if not isinstance(capabilities, dict):
+            return partial("capability-summary-unavailable")
+        available = capabilities.get("available")
+        available_count = capabilities.get("available_count")
+        unavailable_count = capabilities.get("unavailable_count")
+        unknown_count = capabilities.get("unknown_count")
+        truncated = capabilities.get("truncated")
+        if (not isinstance(available, list)
+                or len(available) > MAX_CONTEXT_RESPONSE_CAPABILITY_LIST
+                or type(available_count) is not int
+                or not 0 <= available_count <= 1_000_000
+                or type(unavailable_count) is not int
+                or not 0 <= unavailable_count <= 1_000_000
+                or type(unknown_count) is not int
+                or not 0 <= unknown_count <= 1_000_000
+                or type(truncated) is not bool
+                or available_count < len(available)
+                or (not truncated and available_count != len(available))):
+            return partial("capability-summary-invalid")
+
+        identities: list[dict[str, str]] = []
+        identity_complete = True
+        for item in available:
+            if not isinstance(item, dict):
+                identity_complete = False
+                continue
+            capability = item.get("capability")
+            provider = item.get("provider")
+            contract_revision = item.get("contract_revision")
+            values = (capability, provider, contract_revision)
+            if any(
+                not isinstance(value, str) or not value or len(value) > 256
+                or "\x00" in value
+                for value in values
+            ):
+                identity_complete = False
+                continue
+            identities.append({
+                "capability": capability,
+                "provider": provider,
+                "contract_revision": contract_revision,
+            })
+        if identity_complete and not truncated:
+            identities.sort(key=lambda item: (
+                item["capability"], item["provider"], item["contract_revision"],
+            ))
+            identity_digest = hashlib.sha256(json.dumps(
+                identities, ensure_ascii=False, sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")).hexdigest()
+            identity_digest_status = "complete"
+        else:
+            identity_digest = None
+            identity_digest_status = "partial"
+        return {
+            "schema_version": CONTEXT_RESPONSE_SUMMARY_SCHEMA,
+            "capture_status": "captured",
+            "capture_reason": None,
+            "context_schema_version": context["schema_version"],
+            "available_count": available_count,
+            "listed_available_count": len(available),
+            "unavailable_count": unavailable_count,
+            "unknown_count": unknown_count,
+            "capabilities_truncated": truncated,
+            "available_identity_digest": identity_digest,
+            "identity_digest_status": identity_digest_status,
+        }
+
     def _record_read_operation_activity(
         self,
         *,
@@ -627,19 +743,25 @@ class EnvironmentRPCServer:
                     material, sort_keys=True, separators=(",", ":"),
                 ).encode()).hexdigest()[:32]
         try:
-            recorder(
-                session_id=session_id,
-                repository=grant.host_root.name,
-                operation=operation,
-                outcome_status="succeeded" if succeeded else "failed",
-                exit_code=exit_code,
-                failure_code=failure_code,
-                operation_elapsed_ms=operation_elapsed_ms,
-                request_id=request_id,
-                operation_digest=operation_digest,
-                control_grant_id=grant.grant_id,
-                process_identity=process_identity,
-            )
+            record = {
+                "session_id": session_id,
+                "repository": grant.host_root.name,
+                "operation": operation,
+                "outcome_status": "succeeded" if succeeded else "failed",
+                "exit_code": exit_code,
+                "failure_code": failure_code,
+                "operation_elapsed_ms": operation_elapsed_ms,
+                "request_id": request_id,
+                "operation_digest": operation_digest,
+                "control_grant_id": grant.grant_id,
+                "process_identity": process_identity,
+            }
+            if operation == "session.context":
+                record["context_response_summary"] = self._context_response_summary(
+                    result if response.get("ok") is True else None,
+                    succeeded=succeeded,
+                )
+            recorder(**record)
         except Exception as error:  # telemetry must not change a read result
             LOGGER.warning(
                 "could not persist Environment read-operation observation "

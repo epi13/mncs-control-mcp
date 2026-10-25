@@ -159,6 +159,59 @@ def test_control_read_activity_binds_to_authenticated_session_context(
     assert captured["payload"]["failure_code"] == "ENVIRONMENT_AUTHORITY_DENIED"
     assert captured["request_id"] == "req_control_activity_denied_read"
 
+    context_summary = {
+        "schema_version": "mncs.environment.context-response-summary/1",
+        "capture_status": "captured",
+        "capture_reason": None,
+        "context_schema_version": "mncs.environment.entry-context/1",
+        "available_count": 1,
+        "listed_available_count": 1,
+        "unavailable_count": 0,
+        "unknown_count": 0,
+        "capabilities_truncated": False,
+        "available_identity_digest": "f" * 64,
+        "identity_digest_status": "complete",
+    }
+    context_result = service.record_read_operation_activity(
+        session_id="ses_activity_control",
+        repository="mncs-control-mcp",
+        operation="session.context",
+        outcome_status="succeeded",
+        exit_code=0,
+        failure_code=None,
+        operation_elapsed_ms=15.0,
+        request_id="req_control_context_summary",
+        operation_digest="2" * 64,
+        control_grant_id="d" * 32,
+        process_identity=None,
+        context_response_summary=context_summary,
+    )
+    assert context_result == {"status": "recorded"}
+    assert captured["payload"]["schema_version"] == (
+        "mncs.environment.rpc-read-activity/2"
+    )
+    assert captured["payload"]["context_response_summary"] == context_summary
+    assert "mncs-test:run" not in json.dumps(
+        captured["payload"]["context_response_summary"],
+    )
+
+    with pytest.raises(ControlError, match="read-operation activity fields are malformed"):
+        service.record_read_operation_activity(
+            session_id="ses_activity_control",
+            repository="mncs-control-mcp",
+            operation="session.context",
+            outcome_status="succeeded",
+            exit_code=0,
+            failure_code=None,
+            operation_elapsed_ms=15.0,
+            request_id="req_control_context_bad_summary",
+            operation_digest="3" * 64,
+            control_grant_id="d" * 32,
+            process_identity=None,
+            context_response_summary={**context_summary, "available_count": 2},
+        )
+    assert captured["request_id"] == "req_control_context_summary"
+
     snapshot["authenticated_principal_id"] = "ctrl_" + "f" * 32
     with pytest.raises(ControlError, match="Control-authenticated continuation provenance"):
         service.record_read_operation_activity(
@@ -174,7 +227,7 @@ def test_control_read_activity_binds_to_authenticated_session_context(
             control_grant_id="d" * 32,
             process_identity=None,
         )
-    assert captured["request_id"] == "req_control_activity_denied_read"
+    assert captured["request_id"] == "req_control_context_summary"
 
 
 def test_environment_package_loader_reloads_changed_sibling_sources(tmp_path: Path) -> None:

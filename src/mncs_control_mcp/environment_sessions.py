@@ -39,6 +39,15 @@ _CAMPAIGN_CAPSULE_EVIDENCE_MAX = 32
 _CAMPAIGN_CHARTER_EVIDENCE_SEARCH_MAX = 16
 _GIT_OBJECT_ID = re.compile(r"^(?:[a-f0-9]{40}|[a-f0-9]{64})$")
 _SHA256 = re.compile(r"^[a-f0-9]{64}$")
+_CONTEXT_RESPONSE_SUMMARY_SCHEMA = "mncs.environment.context-response-summary/1"
+_CONTEXT_RESPONSE_SCHEMA_VERSION = "mncs.environment.entry-context/1"
+_CONTEXT_RESPONSE_UNAVAILABLE_REASONS = frozenset({
+    "operation-failed", "stdout-unavailable", "response-too-large",
+    "invalid-json", "invalid-context-schema",
+})
+_CONTEXT_RESPONSE_PARTIAL_REASONS = frozenset({
+    "capability-summary-unavailable", "capability-summary-invalid",
+})
 _CONTINUABLE_LIFECYCLES = frozenset({
     "active", "blocked", "waiting", "checkpointed", "abandoned",
 })
@@ -50,6 +59,61 @@ _FOREIGN_CAMPAIGN_NEXT = (
 )
 _PACKAGE_LOAD_LOCK = threading.RLock()
 _PACKAGE_SOURCE_IDENTITIES: dict[str, tuple[str, str]] = {}
+
+
+def _valid_context_response_summary(value: Any) -> bool:
+    """Validate the bounded Control summary before forwarding it to Environment."""
+    expected = {
+        "schema_version", "capture_status", "capture_reason",
+        "context_schema_version", "available_count", "listed_available_count",
+        "unavailable_count", "unknown_count", "capabilities_truncated",
+        "available_identity_digest", "identity_digest_status",
+    }
+    if (not isinstance(value, dict) or set(value) != expected
+            or value.get("schema_version") != _CONTEXT_RESPONSE_SUMMARY_SCHEMA):
+        return False
+    status = value.get("capture_status")
+    reason = value.get("capture_reason")
+    context_version = value.get("context_schema_version")
+    counts = (
+        value.get("available_count"), value.get("listed_available_count"),
+        value.get("unavailable_count"), value.get("unknown_count"),
+    )
+    truncated = value.get("capabilities_truncated")
+    identity_digest = value.get("available_identity_digest")
+    digest_status = value.get("identity_digest_status")
+    if status == "unavailable":
+        return (
+            isinstance(reason, str)
+            and reason in _CONTEXT_RESPONSE_UNAVAILABLE_REASONS
+            and context_version is None and all(item is None for item in counts)
+            and truncated is None and identity_digest is None
+            and digest_status == "unavailable"
+        )
+    if status == "partial":
+        return (
+            isinstance(reason, str)
+            and reason in _CONTEXT_RESPONSE_PARTIAL_REASONS
+            and context_version == _CONTEXT_RESPONSE_SCHEMA_VERSION
+            and all(item is None for item in counts) and truncated is None
+            and identity_digest is None and digest_status == "unavailable"
+        )
+    if (status != "captured" or reason is not None
+            or context_version != _CONTEXT_RESPONSE_SCHEMA_VERSION
+            or any(type(item) is not int or not 0 <= item <= 1_000_000
+                   for item in counts)
+            or type(truncated) is not bool or counts[1] > 20
+            or counts[0] < counts[1]
+            or (not truncated and counts[0] != counts[1])):
+        return False
+    if digest_status == "complete":
+        return (
+            not truncated
+            and counts[0] == counts[1]
+            and isinstance(identity_digest, str)
+            and _SHA256.fullmatch(identity_digest) is not None
+        )
+    return digest_status == "partial" and identity_digest is None
 
 
 def _resolve_environment_source_checkout(
@@ -2358,6 +2422,7 @@ class EnvironmentService:
         operation_digest: str,
         control_grant_id: str,
         process_identity: str | None,
+        context_response_summary: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Persist a bounded read-only RPC outcome in its authenticated session."""
         if self.authenticated_principal_id is None:
@@ -2388,6 +2453,18 @@ class EnvironmentService:
                 or (process_identity is not None and (
                     not isinstance(process_identity, str)
                     or not re.fullmatch(r"proc_[0-9a-f]{16,64}", process_identity)
+                ))
+                or (context_response_summary is not None and (
+                    operation != "session.context"
+                    or not _valid_context_response_summary(context_response_summary)
+                    or (outcome_status == "failed" and (
+                        context_response_summary.get("capture_status") != "unavailable"
+                        or context_response_summary.get("capture_reason")
+                        != "operation-failed"
+                    ))
+                    or (outcome_status == "succeeded"
+                        and context_response_summary.get("capture_reason")
+                        == "operation-failed")
                 ))):
             raise ControlError(
                 "ENVIRONMENT_RPC_INVALID_REQUEST",
@@ -2424,7 +2501,11 @@ class EnvironmentService:
                 "work_intent_id": intent.get("identity"),
             }
             payload = {
-                "schema_version": "mncs.environment.rpc-read-activity/1",
+                "schema_version": (
+                    "mncs.environment.rpc-read-activity/2"
+                    if context_response_summary is not None
+                    else "mncs.environment.rpc-read-activity/1"
+                ),
                 "operation": operation,
                 "outcome_status": outcome_status,
                 "exit_code": exit_code,
@@ -2443,6 +2524,10 @@ class EnvironmentService:
                     "control_dispatch_elapsed_ms": operation_elapsed_ms,
                 },
             }
+            if context_response_summary is not None:
+                payload["context_response_summary"] = dict(
+                    context_response_summary,
+                )
             session = pkg.sessions.Session.open(
                 state_dir=self.state_dir, session_id=session_id,
                 backend="store", store=store,
