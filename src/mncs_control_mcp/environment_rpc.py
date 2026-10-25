@@ -2880,9 +2880,17 @@ class EnvironmentRPCServer:
             approval_reference = owner_approval_reference
         else:
             has_checkout_selector = bool(checkout_selectors)
+            checkout_binding_reference = (
+                f"campaign-writable-checkout:{campaign_id}:{repository_name}:{argv[1]}"
+            )
             if (supplied_approval_reference is not None
-                    or repository_name != caller_repository
-                    or not has_checkout_selector):
+                    and supplied_approval_reference != checkout_binding_reference):
+                raise ControlError(
+                    "ENVIRONMENT_AUTHORITY_DENIED",
+                    "scope grant approval reference does not match the exact campaign-writable checkout binding",
+                    details={"campaign_id": campaign_id, "repository": repository_name},
+                )
+            if repository_name != caller_repository or not has_checkout_selector:
                 raise ControlError(
                     "ENVIRONMENT_AUTHORITY_DENIED",
                     "a new repository scope still needs an exact owner grant; checkout selection without one is limited to the authenticated project repository",
@@ -2891,9 +2899,7 @@ class EnvironmentRPCServer:
             # This marker is only accepted when Environment independently
             # proves the repository is already writable in the selected
             # session. It identifies a checkout binding, not a user approval.
-            approval_reference = (
-                f"campaign-writable-checkout:{campaign_id}:{repository_name}:{argv[1]}"
-            )
+            approval_reference = checkout_binding_reference
             campaign_writable_checkout = True
         target = workspace_root / repository_name
         if target.is_symlink():

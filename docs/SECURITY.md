@@ -132,14 +132,20 @@ path accepts only explicit branch or worktree targets. A mutation requires an
 exact project grant, a repository equal to that grant's checkout, and the exact
 session selected by Environment continuation within the same protected
 execution. Worktree paths are mapped under that project before forwarding.
-Owner-approved repository scope admission also accepts one explicit
-workspace-relative checkout selector for a registered linked worktree outside
-the repository root. Control resolves it under the configured workspace,
-checks the repository's Git common directory and manifest identity, and passes
-the observed checkout facts to Environment. Environment admits the grant only
-when that exact checkout is inside the selected campaign workspace or the
-configured repository root, then rechecks branch, head, rights, claims, and
-canonical Store generation before publishing the scope event.
+Repository scope admission uses an exact configured owner grant when adding a
+repository to a campaign. A campaign that already has write authority for a
+repository may also bind another registered checkout of that same repository;
+this changes checkout selection without expanding the writable repository set.
+Control resolves the selector under the configured workspace, checks the
+repository's Git common directory and manifest identity, and passes the
+observed checkout facts to Environment. A bridge that requires an
+`approval_reference` may send the exact
+`campaign-writable-checkout:<campaign_id>:<repository>:<session_id>` binding.
+That value is not an owner grant: Control accepts it only for the authenticated
+session's already-writable project repository and a request with an explicit
+checkout selector. Environment independently checks session ownership, current
+campaign authority, and checkout identity, then rechecks branch, head, rights,
+claims, and canonical Store generation before publishing the scope event.
 Control also supplies an internal, grant-derived pair of sandbox and host
 project roots so Environment can match Git registrations created under
 `/workspace` without accepting caller-selected mappings. Environment

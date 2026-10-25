@@ -245,6 +245,27 @@ def test_scope_grant_maps_only_the_owner_checked_scope_admission_contract() -> N
         "--checkout", ".worktrees/feature/mncs-compiler",
     ]
 
+    binding_reference = (
+        "campaign-writable-checkout:cmp_selected:mncs-compiler:ses_selected"
+    )
+    compatibility_checkout_argv, selected = _build_argv(
+        "scope_grant",
+        {
+            "campaign_id": "cmp_selected",
+            "repository": "mncs-compiler",
+            "expected_authority_revision": revision,
+            "approval_reference": binding_reference,
+            "checkout_path": ".worktrees/feature/mncs-compiler",
+        },
+        context,
+        "mncs-compiler",
+    )
+    assert selected is True
+    assert compatibility_checkout_argv[-4:] == [
+        "--approval-reference", binding_reference,
+        "--checkout", ".worktrees/feature/mncs-compiler",
+    ]
+
 
 def test_scope_grant_uses_the_session_selected_by_entry(
     monkeypatch: pytest.MonkeyPatch,

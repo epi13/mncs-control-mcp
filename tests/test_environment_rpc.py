@@ -564,6 +564,30 @@ def test_scope_grant_binds_existing_project_checkout_without_second_approval(
     assert translated[-3] == "--owner-authorized-checkout-json"
     assert json.loads(translated[-2]) == checkout_facts
 
+    checkout_binding_reference = (
+        "campaign-writable-checkout:cmp_scope_test:"
+        "mncs-environment:ses_scope_test"
+    )
+    explicit_binding_args = [
+        *args[:-2],
+        "--approval-reference", checkout_binding_reference,
+        "--checkout", args[-1],
+    ]
+    assert server._translate_argv(explicit_binding_args, environment, grant) == translated
+
+    for invalid_reference in (
+        "user-authorization:unconfigured",
+        checkout_binding_reference.replace("ses_scope_test", "ses_other"),
+    ):
+        invalid_binding_args = [
+            *args[:-2],
+            "--approval-reference", invalid_reference,
+            "--checkout", args[-1],
+        ]
+        with pytest.raises(ControlError) as denied:
+            server._translate_argv(invalid_binding_args, environment, grant)
+        assert denied.value.code == "ENVIRONMENT_AUTHORITY_DENIED"
+
     other_repo_args = [
         "scope-grant", "ses_scope_test",
         "--campaign-id", "cmp_scope_test",

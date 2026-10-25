@@ -1077,7 +1077,10 @@ def main() -> None:
             "contracts; Environment enforces the selected session's repository authority. "
             "Scope_grant may use an exact configured owner grant to add repository scope, "
             "or bind a Control-verified checkout in a repository already writable in the "
-            "campaign. Environment revalidates the selected checkout, write scope, and claims. "
+            "campaign. A bridge that requires approval_reference may send the exact "
+            "campaign-writable-checkout:<campaign_id>:<repository>:<session_id> binding; "
+            "this selects a checkout without adding repository authority. Environment "
+            "revalidates the selected checkout, write scope, and claims. "
             "No shell or arbitrary CLI arguments are accepted."
         ),
     )
