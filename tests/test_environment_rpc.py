@@ -1867,6 +1867,8 @@ def test_operator_approved_liveness_only_excludes_managed_codex_daemon(
             b"/usr/lib/systemd/systemd\x00--user\x00",
         str(proc_root / str(user_systemd_pid) / "status"):
             f"Name:\tsystemd\nPPid:\t1\nUid:\t{os.getuid()}\t{os.getuid()}\t{os.getuid()}\t{os.getuid()}\n",
+        str(proc_root / str(user_systemd_pid) / "comm"):
+            "systemd\n",
     }
     original_read_bytes = Path.read_bytes
     original_read_text = Path.read_text
@@ -1891,7 +1893,7 @@ def test_operator_approved_liveness_only_excludes_managed_codex_daemon(
         if selected == f"/proc/{codex_pid}/cwd":
             return codex_cwd["path"]
         if selected == f"/proc/{user_systemd_pid}/exe":
-            return "/usr/lib/systemd/systemd"
+            raise PermissionError("user manager executable link is hidden")
         return original_readlink(path, *args)
 
     monkeypatch.setattr(Path, "read_bytes", read_bytes)

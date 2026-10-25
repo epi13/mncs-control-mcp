@@ -3348,15 +3348,13 @@ class EnvironmentRPCServer:
                 if line.startswith("PPid:")
             ))
             parent = Path("/proc") / str(parent_pid)
-            parent_executable = Path(os.readlink(parent / "exe")).resolve(
-                strict=False,
-            )
             parent_argv = [
                 part.decode("utf-8", errors="replace")
                 for part in (parent / "cmdline").read_bytes().split(b"\x00")
                 if part
             ]
             parent_status = (parent / "status").read_text(encoding="utf-8")
+            parent_comm = (parent / "comm").read_text(encoding="utf-8").strip()
             parent_uid = int(next(
                 line.split()[1] for line in parent_status.splitlines()
                 if line.startswith("Uid:")
@@ -3364,7 +3362,7 @@ class EnvironmentRPCServer:
         except (OSError, StopIteration, ValueError, IndexError):
             return False
         if (parent_uid != os.getuid()
-                or parent_executable.name.casefold() != "systemd"
+                or parent_comm.casefold() != "systemd"
                 or "--user" not in parent_argv
                 or executable.name.casefold() != "codex"
                 or len(argv) < 4
