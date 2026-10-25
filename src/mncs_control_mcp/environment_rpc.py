@@ -93,6 +93,73 @@ def _requires_selected_session_for_mutation(command: str, argv: list[Any]) -> bo
     return False
 
 
+_SESSION_POSITIONAL_VALUE_OPTIONS: dict[str, dict[str, int | None]] = {
+    "campaign-state": {
+        "--consumer": 1, "--consumer-kind": 1,
+        "--evidence-offset": 1, "--evidence-limit": 1,
+    },
+    "claims": {
+        "--acquire": 1, "--expected-store-generation": 1, "--release": 1,
+        "--claim-id": 1, "--repository": 1, "--offset": 1, "--limit": 1,
+        "--transfer-to": 1, "--transfer-consumer": 1, "--paths": None,
+        "--worktree": 1, "--branch": 1, "--basis": 1, "--reason": 1,
+        "--ttl": 1, "--explain": 1,
+    },
+    "claim-recover": {
+        "--campaign-id": 1, "--claim-id": 1, "--repository": 1,
+        "--owner-session-id": 1, "--expected-version": 1,
+        "--approval-reference": 1, "--reason": 1,
+    },
+    "scope-grant": {
+        "--campaign-id": 1, "--repository": 1,
+        "--expected-authority-revision": 1, "--approval-reference": 1,
+        "--checkout": 1, "--workspace-checkout": 1,
+        "--owner-authorized-checkout-json": 1,
+    },
+    "projections": {
+        "--consumer": 1, "--consumer-kind": 1, "--interpret": 1,
+        "--repository": 1, "--history-pages": 1,
+        "--evidence-offset": 1, "--evidence-limit": 1,
+        "--session-event-before-sequence": 1, "--session-event-limit": 1,
+        "--apply": 1, "--watch": 1, "--watch-iterations": 1,
+    },
+    "retire": {
+        "--consumer": 1, "--consumer-kind": 1, "--repository": 1,
+        "--branch": 1, "--worktree": 1, "--canonical": 1,
+        "--execution-root": 1, "--sandbox-root": 1, "--request-id": 1,
+    },
+    "resume": {"--consumer": 1, "--consumer-kind": 1, "--workspace": 1},
+    "authority": {"--consumer": 1, "--consumer-kind": 1, "--action": 1, "--target": 1},
+    "invoke": {
+        "--consumer": 1, "--consumer-kind": 1, "--effect-repository": 1,
+        "--input-artifact": 4, "--cwd": 1, "--timeout": 1,
+        "--output-limit-bytes": 1,
+    },
+    "test": {
+        "--consumer": 1, "--consumer-kind": 1, "--checkout": 1,
+        "--format": 1, "--execution": 1, "--timeout": 1,
+        "--max-executions": 1,
+    },
+    "checkpoint": {
+        "--consumer": 1, "--consumer-kind": 1, "--progress": 1,
+        "--remaining": None, "--campaign-base-checkpoint": 1,
+        "--campaign-evidence-json": 1,
+        "--campaign-evidence-delta-json": 1,
+        "--campaign-delivery-json": 1,
+    },
+    "handoff": {
+        "--consumer": 1, "--consumer-kind": 1, "--to": 1,
+        "--to-principal": 1, "--notes": None, "--blockers": None,
+        "--next": None,
+    },
+    "complete": {
+        "--consumer": 1, "--consumer-kind": 1, "--outcome": 1,
+        "--summary": 1,
+    },
+    "store": {"--session": 1},
+}
+
+
 def _environment_pythonpath(environment_path: Path, rights_provenance_path: Path) -> str:
     """Build an isolated import path for Environment and its configured Rights provider."""
     entries = [str(environment_path)]
@@ -478,6 +545,69 @@ class EnvironmentRPCServer:
         grant.token_file.unlink(missing_ok=True)
 
     @staticmethod
+    def _cli_positionals(
+        argv: Any, command_index: int = 0,
+    ) -> list[tuple[int, str]]:
+        """Read positional tokens without mistaking option values for them.
+
+        Environment's argparse CLI permits options before or after positional
+        arguments. Control must follow that grammar when it binds a request to
+        the selected session; taking the first non-flag token can instead bind
+        ``claims --acquire REPOSITORY ... SESSION`` to the repository name.
+        """
+        if (not isinstance(argv, list) or not argv
+                or type(command_index) is not int
+                or not 0 <= command_index < len(argv)
+                or not all(isinstance(item, str) for item in argv)):
+            return []
+        command = argv[command_index]
+        value_options = {
+            "--consumer": 1,
+            "--consumer-kind": 1,
+            **_SESSION_POSITIONAL_VALUE_OPTIONS.get(command, {}),
+        }
+        positionals: list[tuple[int, str]] = []
+        index = command_index + 1
+        while index < len(argv):
+            item = argv[index]
+            if item == "--":
+                positionals.extend(
+                    (position, value)
+                    for position, value in enumerate(argv[index + 1:], index + 1)
+                )
+                break
+            if item.startswith("-"):
+                option, separator, _ = item.partition("=")
+                arity = value_options.get(option)
+                if option in value_options:
+                    if separator:
+                        index += 1
+                    elif arity is None:
+                        index += 1
+                        while index < len(argv) and not argv[index].startswith("-"):
+                            index += 1
+                    else:
+                        index += 1 + arity
+                else:
+                    # A flag, or an option that the CLI will reject. Unknown
+                    # arguments are left for argparse to diagnose downstream.
+                    index += 1
+                continue
+            positionals.append((index, item))
+            index += 1
+        return positionals
+
+    @classmethod
+    def _session_argument(
+        cls, argv: Any, command_index: int = 0,
+    ) -> tuple[int, str] | None:
+        """Find the first session-shaped positional in a CLI argument list."""
+        for position, value in cls._cli_positionals(argv, command_index):
+            if re.fullmatch(r"ses_[A-Za-z0-9_-]{1,120}", value):
+                return position, value
+        return None
+
+    @staticmethod
     def _request_session(
         argv: Any, *, bound_session_id: str | None = None,
     ) -> str | None:
@@ -511,8 +641,8 @@ class EnvironmentRPCServer:
                 return value if isinstance(value, str) else None
             except (ValueError, IndexError):
                 return None
-        return next((item for item in argv[1:]
-                     if isinstance(item, str) and not item.startswith("-")), None)
+        selected = EnvironmentRPCServer._session_argument(argv)
+        return selected[1] if selected is not None else None
 
     @staticmethod
     def _read_only_operation_identity(argv: Any) -> str | None:
@@ -2698,34 +2828,54 @@ class EnvironmentRPCServer:
         self, argv: list[str], cwd: Path, record: _GrantRecord,
     ) -> dict[str, str | int]:
         """Admit only the exact owner-approved claim generation in Control config."""
-        required = (
+        required = {
             "--campaign-id", "--claim-id", "--repository",
             "--owner-session-id", "--expected-version",
             "--approval-reference", "--reason",
-        )
-        if len(argv) != 2 + 2 * len(required):
+        }
+        selected = self._session_argument(argv)
+        if selected is None:
+            raise ControlError(
+                "ENVIRONMENT_RPC_INVALID_REQUEST",
+                "claim recovery requires one Environment session identity",
+            )
+        session_position, session_id = selected
+        normalized_argv = list(argv)
+        normalized_argv.pop(session_position)
+        normalized_argv.insert(1, session_id)
+        if (not isinstance(argv, list) or not argv
+                or normalized_argv[0] != "claim-recover"):
             raise ControlError(
                 "ENVIRONMENT_RPC_INVALID_REQUEST",
                 "claim recovery requires one exact selected-session transition",
             )
-        if not re.fullmatch(r"ses_[A-Za-z0-9_-]{1,120}", argv[1]):
-            raise ControlError("ENVIRONMENT_RPC_INVALID_REQUEST", "claim recovery session identity is invalid")
         values: dict[str, str] = {}
         index = 2
-        for option in required:
-            if argv[index] != option:
+        while index < len(normalized_argv):
+            item = normalized_argv[index]
+            if item.startswith("--") and "=" in item:
+                option, value = item.split("=", 1)
+                index += 1
+            elif item in required and index + 1 < len(normalized_argv):
+                option, value = item, normalized_argv[index + 1]
+                index += 2
+            else:
                 raise ControlError(
                     "ENVIRONMENT_RPC_INVALID_REQUEST",
                     "claim recovery arguments must use the bounded owner operation form",
                 )
-            value = argv[index + 1]
-            if not value or value.startswith("--") or "\x00" in value:
+            if (option not in required or option in values
+                    or not value or value.startswith("--") or "\x00" in value):
                 raise ControlError(
                     "ENVIRONMENT_RPC_INVALID_REQUEST",
                     f"{option} has an invalid value",
                 )
             values[option] = value
-            index += 2
+        if set(values) != required:
+            raise ControlError(
+                "ENVIRONMENT_RPC_INVALID_REQUEST",
+                "claim recovery requires every bounded owner operation field exactly once",
+            )
         campaign_id = values["--campaign-id"]
         claim_id = values["--claim-id"]
         repository = values["--repository"]
@@ -2757,7 +2907,7 @@ class EnvironmentRPCServer:
                 "ENVIRONMENT_AUTHORITY_DENIED",
                 "claim recovery is available only through the Environment project grant",
             )
-        if record.bound_session_id != argv[1]:
+        if record.bound_session_id != session_id:
             raise ControlError(
                 "ENVIRONMENT_AUTHORITY_DENIED",
                 "claim recovery must use the session selected by this authenticated continuation",
@@ -2767,7 +2917,7 @@ class EnvironmentRPCServer:
             "repository": repository,
             "claim_version": expected_version,
             "owner_session_id": owner_session_id,
-            "requester_session_id": argv[1],
+            "requester_session_id": session_id,
             "approval_reference": values["--approval-reference"],
         }
         if not isinstance(approved, dict) or any(
@@ -2779,11 +2929,11 @@ class EnvironmentRPCServer:
                 details={"campaign_id": campaign_id, "claim_id": claim_id,
                          "repository": repository, "version": expected_version},
             )
-        self._authorize_session(argv[1], record.principal_id)
+        self._authorize_session(session_id, record.principal_id)
         pkg = self.environment_service._pkg()
         store = self.environment_service._store(pkg)
         try:
-            snapshot = store.load_snapshot(argv[1])
+            snapshot = store.load_snapshot(session_id)
         finally:
             store.close()
         if ((snapshot.get("campaign") or {}).get("identity") != campaign_id
@@ -2793,7 +2943,7 @@ class EnvironmentRPCServer:
                 "claim recovery campaign does not match the authenticated Environment session",
             )
         return {
-            "session_id": argv[1],
+            "session_id": session_id,
             "campaign_id": campaign_id,
             "claim_id": claim_id,
             "repository": repository,
@@ -2825,18 +2975,28 @@ class EnvironmentRPCServer:
             "--owner-authorized-checkout-json",
         }
         values: dict[str, str] = {}
-        index = 2  # command plus the positional Environment session identity
-        if len(argv) < 2 or not re.fullmatch(r"ses_[A-Za-z0-9_-]{1,120}", argv[1]):
+        selected = self._session_argument(argv)
+        if selected is None:
             raise ControlError(
                 "ENVIRONMENT_RPC_INVALID_REQUEST",
                 "scope admission requires one Environment session identity",
             )
-        while index < len(argv):
-            item = argv[index]
+        session_position, session_id = selected
+        normalized_argv = list(argv)
+        normalized_argv.pop(session_position)
+        normalized_argv.insert(1, session_id)
+        if not normalized_argv or normalized_argv[0] != "scope-grant":
+            raise ControlError(
+                "ENVIRONMENT_RPC_INVALID_REQUEST",
+                "scope admission requires one Environment session identity",
+            )
+        index = 2  # command plus the parsed Environment session identity
+        while index < len(normalized_argv):
+            item = normalized_argv[index]
             if item.startswith("--") and "=" in item:
                 option, value = item.split("=", 1)
-            elif item in required | optional and index + 1 < len(argv):
-                option, value = item, argv[index + 1]
+            elif item in required | optional and index + 1 < len(normalized_argv):
+                option, value = item, normalized_argv[index + 1]
                 index += 1
             else:
                 raise ControlError(
@@ -2918,7 +3078,7 @@ class EnvironmentRPCServer:
         else:
             has_checkout_selector = bool(checkout_selectors)
             checkout_binding_reference = (
-                f"campaign-writable-checkout:{campaign_id}:{repository_name}:{argv[1]}"
+                f"campaign-writable-checkout:{campaign_id}:{repository_name}:{session_id}"
             )
             if (supplied_approval_reference is not None
                     and supplied_approval_reference != checkout_binding_reference):
@@ -4491,10 +4651,11 @@ class EnvironmentRPCServer:
             argv[acquire_indexes[0] + 1]
             if acquire_indexes else acquire_values[0]
         )
-        session_id = argv[1]
-        if (not re.fullmatch(r"ses_[A-Za-z0-9_-]{1,120}", session_id)
+        selected = self._session_argument(argv)
+        if (selected is None
                 or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,119}", repository)):
             return
+        session_id = selected[1]
         if self._project_repository(record) != repository:
             return
         # Keep explicit custom scopes and recovery policies on their existing
@@ -4818,21 +4979,21 @@ class EnvironmentRPCServer:
         if command in {"inspect", "context", "resume", "health", "capabilities", "checkpoint", "handoff", "accept", "claims", "claim-recover", "complete", "retire", "store", "scope-grant", "invoke", "artifact-read", "campaign-state"}:
             try:
                 command_index = argv.index(command)
-                if command in {"scope-grant", "claim-recover"}:
-                    session_id = argv[command_index + 1]
+                if command == "store":
+                    session_id = argv[argv.index("--session") + 1]
+                elif command == "accept":
+                    positionals = self._accept_positionals(argv, command_index)
+                    session_id = positionals[0]
                 else:
-                    positional = (
-                        self._accept_positionals(argv, command_index)
-                        if command == "accept"
-                        else [item for item in argv[command_index + 1:]
-                              if not item.startswith("-")]
-                    )
-                    session_id = positional[0]
+                    selected = self._session_argument(argv, command_index)
+                    if selected is None:
+                        raise ValueError("session identity is unavailable")
+                    session_id = selected[1]
             except (StopIteration, ValueError, IndexError) as error:
                 raise ControlError("ENVIRONMENT_RPC_INVALID_REQUEST", "session identity is required") from error
             if command == "accept":
                 try:
-                    handoff_id = positional[1]
+                    handoff_id = positionals[1]
                 except IndexError as error:
                     raise ControlError("ENVIRONMENT_RPC_INVALID_REQUEST",
                                        "handoff identity is required") from error

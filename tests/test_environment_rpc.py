@@ -406,6 +406,17 @@ def test_scope_grant_rpc_requires_exact_campaign_approval_and_selected_project_g
     ]
 
     assert server._translate_argv(args, environment, grant) == args
+    trailing_session_args = [
+        "scope-grant",
+        "--campaign-id", "cmp_scope_test",
+        "--repository", "mncs-control-mcp",
+        "--expected-authority-revision", "a" * 64,
+        "--approval-reference", approval,
+        "ses_scope_test",
+    ]
+    assert server._translate_argv(
+        trailing_session_args, environment, grant,
+    ) == trailing_session_args
     no_token_args = args[:-2]
     assert server._translate_argv(no_token_args, environment, grant) == [
         *no_token_args, "--approval-reference", approval,
@@ -1136,6 +1147,22 @@ def test_claim_recovery_rpc_requires_exact_owner_approval_generation_and_session
     assert result["expected_version"] == 63
     assert result["owner_consumer_id"] == approved["owner_consumer_id"]
     assert authorized_sessions == ["ses_new_campaign"]
+    trailing_session_args = [
+        "claim-recover",
+        "--campaign-id", "cmp_mncs_continuity_20261010",
+        "--claim-id", "claim:mncs-compiler",
+        "--repository", "mncs-compiler",
+        "--owner-session-id", "ses_old_compiler",
+        "--expected-version", "63",
+        "--approval-reference", approval,
+        "--reason", "operator-approved recovery after host reboot",
+        "ses_new_campaign",
+    ]
+    trailing_result = server._authorize_claim_recovery_argv(
+        trailing_session_args, environment, grant,
+    )
+    assert trailing_result["session_id"] == "ses_new_campaign"
+    assert authorized_sessions == ["ses_new_campaign", "ses_new_campaign"]
     for changed in (
         args[:11] + ["64"] + args[12:],
         args[:-3] + ["user-approval:other", "--reason", "operator-approved recovery"],
@@ -2117,6 +2144,91 @@ def test_claim_recovery_request_tracks_selected_continuation_session() -> None:
     assert EnvironmentRPCServer._request_session(
         ["complete", "ses_old_owner", "--outcome", "done"],
     ) == "ses_old_owner"
+    assert EnvironmentRPCServer._request_session([
+        "claims", "--acquire", "mncs-environment", "--paths",
+        "mncs_env/claims.py", "--reason", "claim files", "ses_selected",
+    ]) == "ses_selected"
+    assert EnvironmentRPCServer._request_session([
+        "claims", "--transfer-to", "ses_recipient", "--claim-id",
+        "claim:mncs-environment", "ses_selected",
+    ]) == "ses_selected"
+    assert EnvironmentRPCServer._request_session([
+        "scope-grant", "--campaign-id", "cmp_scope", "--repository",
+        "mncs-environment", "--expected-authority-revision", "a" * 64,
+        "--approval-reference", "owner-grant", "ses_selected",
+    ]) == "ses_selected"
+    assert EnvironmentRPCServer._request_session([
+        "claim-recover", "--owner-session-id", "ses_prior_owner",
+        "--campaign-id", "cmp_recovery", "ses_selected",
+    ]) == "ses_selected"
+
+
+def test_claim_acquisition_rpc_binds_trailing_session_after_options(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "projects"
+    project = workspace / "mncs-environment"
+    project.mkdir(parents=True)
+    token = "claim-acquisition-session-order-grant"
+    server = EnvironmentRPCServer(
+        ControlConfig(
+            workspace_root=workspace,
+            repositories={"environment": "mncs-environment"},
+            sandbox_home=tmp_path / "home",
+            environment_rpc_socket=tmp_path / "rpc" / "environment.sock",
+        ),
+        environment_service=SimpleNamespace(
+            state_dir=tmp_path / "state",
+            environment_path=tmp_path / "environment-source",
+            rights_provenance_path=tmp_path / "rights-provenance",
+        ),
+        policy=object(),
+    )
+    grant = _GrantRecord(
+        grant_id="claim-acquisition-session-order",
+        principal_id="principal-agent",
+        host_root=project,
+        sandbox_root="/workspace/mncs-environment",
+        scope="project",
+        uid=0,
+        expires_at=time.monotonic() + 60,
+        token_file=tmp_path / "grant",
+        bound_session_id="ses_environment",
+    )
+    server._grants[hashlib.sha256(token.encode()).hexdigest()] = grant
+    authorized_sessions: list[str] = []
+    calls: list[list[str]] = []
+    monkeypatch.setattr(server, "_grant", lambda _request, _peer: grant)
+    monkeypatch.setattr(
+        server, "_authorize_session",
+        lambda session_id, _principal: authorized_sessions.append(session_id),
+    )
+    monkeypatch.setattr(server, "_auto_recover_same_operator_claim", lambda *a, **k: None)
+
+    def run(argv: list[str], **_kwargs: object) -> SimpleNamespace:
+        calls.append(argv)
+        return SimpleNamespace(
+            returncode=0,
+            stdout='{"claim_id":"claim:mncs-environment:paths:example"}\n',
+            stderr="",
+        )
+
+    monkeypatch.setattr("mncs_control_mcp.environment_rpc.subprocess.run", run)
+    argv = [
+        "claims", "--acquire", "mncs-environment", "--paths",
+        "mncs_env/claims.py", "--reason", "claim exact paths", "ses_environment",
+    ]
+    response = server.dispatch({
+        "grant": token,
+        "request_id": "req_claim_acquisition_session_order",
+        "argv": argv,
+        "cwd": "/workspace/mncs-environment",
+    }, peer_uid=0)
+
+    assert response["ok"] is True
+    assert authorized_sessions == ["ses_environment"]
+    assert calls[0][-len(argv):] == argv
+    assert EnvironmentRPCServer._request_session(argv) == "ses_environment"
 
 
 def test_claim_recovery_refuses_a_live_former_owner_process(
