@@ -1024,6 +1024,43 @@ class EnvironmentRPCServer:
         candidate = Path(value)
         if candidate.is_absolute():
             sandbox_path = candidate
+            if allow_workspace_worktree:
+                workspace_root = Path(self.config.workspace_root).expanduser().resolve(
+                    strict=True
+                )
+                host_candidate = Path(os.path.abspath(str(candidate)))
+                try:
+                    workspace_relative = host_candidate.relative_to(workspace_root)
+                except ValueError:
+                    pass
+                else:
+                    host_root = record.host_root.expanduser().resolve(strict=True)
+                    if (record.scope != "project"
+                            or host_root.parent != workspace_root
+                            or Path(record.sandbox_root)
+                            != Path("/workspace") / host_root.name):
+                        raise ControlError(
+                            "ENVIRONMENT_WORKSPACE_ESCAPE",
+                            "host checkout paths require an immediate project grant",
+                        )
+                    cursor = workspace_root
+                    for part in workspace_relative.parts:
+                        if part in {"", "."}:
+                            continue
+                        cursor = cursor / part
+                        if cursor.is_symlink():
+                            raise ControlError(
+                                "ENVIRONMENT_WORKSPACE_ESCAPE",
+                                "host checkout path traverses a symbolic link",
+                            )
+                    resolved_host_candidate = host_candidate.resolve(strict=False)
+                    if (resolved_host_candidate != workspace_root
+                            and workspace_root not in resolved_host_candidate.parents):
+                        raise ControlError(
+                            "ENVIRONMENT_WORKSPACE_ESCAPE",
+                            "host checkout path resolves outside the configured workspace",
+                        )
+                    sandbox_path = Path("/workspace") / workspace_relative
         else:
             sandbox_path = (
                 Path(record.sandbox_root)

@@ -127,6 +127,13 @@ operation may include `session_id`, `campaign_id`, or `task_identity` to reselec
 through Control after a fresh MCP process starts; the caller does not
 need to reuse an in-memory session ID or depend on a prior connector process.
 
+For `claims --worktree`, Control accepts either a `/workspace/<project>/...`
+path or the matching absolute host path reported by Environment. Host paths are
+mapped back through the current project sandbox only when they remain inside the
+configured workspace; project-grant, registered-checkout, Git identity, and
+symlink checks still apply. This is path translation for the same checkout, not
+additional repository authority.
+
 The authenticated Environment subprocess keeps its configured Environment
 checkout first on `PYTHONPATH`. When the configured Rights repository contains
 `src/mncs_rights_provenance/__init__.py`, Control adds that package source after

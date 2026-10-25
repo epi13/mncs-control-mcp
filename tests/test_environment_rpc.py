@@ -903,6 +903,72 @@ def test_client_parent_paths_are_allowed_only_within_the_project_grant(
     assert symlink_escape.value.code == "ENVIRONMENT_WORKSPACE_ESCAPE"
 
 
+def test_host_worktree_paths_map_through_the_project_sandbox_without_widening(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "projects"
+    environment = workspace / "mncs-environment"
+    compiler = workspace / "mncs-compiler"
+    environment_checkout = environment / ".worktrees" / "environment-feature"
+    compiler_checkout = compiler / ".worktrees" / "compiler-feature"
+    outside = tmp_path / "outside"
+    for path in (environment_checkout, compiler_checkout, outside):
+        path.mkdir(parents=True)
+    (environment / ".git").mkdir(parents=True)
+    (compiler / ".git").mkdir(parents=True)
+    symlink_checkout = environment / ".worktrees" / "checkout-alias"
+    symlink_checkout.symlink_to(environment_checkout, target_is_directory=True)
+
+    server = EnvironmentRPCServer(
+        ControlConfig(
+            workspace_root=workspace,
+            sandbox_home=tmp_path / "home",
+            environment_rpc_socket=tmp_path / "rpc" / "environment.sock",
+        ),
+        environment_service=SimpleNamespace(state_dir=tmp_path / "state"),
+        policy=object(),
+    )
+    grant = _GrantRecord(
+        grant_id="host-worktree-path-grant",
+        principal_id="principal-test",
+        host_root=environment,
+        sandbox_root="/workspace/mncs-environment",
+        scope="project",
+        uid=os.getuid(),
+        expires_at=time.monotonic() + 60,
+        token_file=tmp_path / "grant",
+    )
+
+    assert server._map_client_path(
+        str(environment_checkout), grant, environment,
+        allow_workspace_worktree=True,
+    ) == environment_checkout.resolve()
+    assert server._map_client_path(
+        str(compiler_checkout), grant, environment,
+        allow_workspace_worktree=True,
+    ) == compiler_checkout.resolve()
+
+    with pytest.raises(ControlError) as symlink:
+        server._map_client_path(
+            str(symlink_checkout), grant, environment,
+            allow_workspace_worktree=True,
+        )
+    assert symlink.value.code == "ENVIRONMENT_WORKSPACE_ESCAPE"
+
+    with pytest.raises(ControlError) as outside_workspace:
+        server._map_client_path(
+            str(outside), grant, environment,
+            allow_workspace_worktree=True,
+        )
+    assert outside_workspace.value.code == "ENVIRONMENT_WORKSPACE_ESCAPE"
+
+    with pytest.raises(ControlError) as without_worktree_authority:
+        server._map_client_path(
+            str(environment_checkout), grant, environment,
+        )
+    assert without_worktree_authority.value.code == "ENVIRONMENT_WORKSPACE_ESCAPE"
+
+
 def test_workspace_relative_scope_checkout_rejects_escape_and_unregistered_path(
     tmp_path: Path,
 ) -> None:
