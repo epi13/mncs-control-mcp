@@ -261,6 +261,11 @@ when its command line and environment remain visible. For user services,
 recovery also reads systemd's active-unit metadata and blocks when a live
 `MainPID` has a declared `WorkingDirectory` inside the claimed worktree. It
 does not infer that such a process is gone from an unreadable procfs cwd link.
+When an authenticated claim request names repo-relative paths, automatic
+same-operator recovery carries that exact subset into overlap analysis. A
+disjoint path claim in the same repository therefore does not widen the
+recovery request or block its independent path scope. Recovery still requires
+the existing same-principal, serialized host-liveness checks.
 
 The installer deliberately does not download an unverified tunnel binary, invent
 a tunnel ID, enable lingering, or run `sudo`. It creates/enables the user unit and

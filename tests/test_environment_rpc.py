@@ -2301,6 +2301,184 @@ def test_ordinary_claim_acquisition_builds_same_operator_worktree_recovery(
     assert server._perform_claim_recovery.call_count == 2
 
 
+def test_path_claim_recovery_keeps_requested_scope_and_ignores_disjoint_claims(
+    tmp_path: Path,
+) -> None:
+    repository = "mncs-environment"
+    project = tmp_path / repository
+    checkout = project / ".worktrees" / "fresh-campaign"
+    checkout.mkdir(parents=True)
+    principal = "same-local-operator"
+    target_file = "mncs_env/capability_intelligence.py"
+    unrelated_file = "mncs_env/sessions.py"
+    first_claim = {
+        "claim_id": "claim:mncs-environment:paths:target",
+        "version": 4,
+        "status": "held",
+        "repository": repository,
+        "session_id": "ses_old_owner",
+        "consumer_id": "old-agent",
+        "scope": {
+            "kind": "paths", "repository": repository,
+            "checkout": None, "branch": None,
+            "paths": [target_file], "exclusive": False,
+        },
+    }
+    unrelated_claim = {
+        "claim_id": "claim:mncs-environment:paths:unrelated",
+        "version": 2,
+        "status": "held",
+        "repository": repository,
+        "session_id": "ses_old_owner",
+        "consumer_id": "old-agent",
+        "scope": {
+            "kind": "paths", "repository": repository,
+            "checkout": None, "branch": None,
+            "paths": [unrelated_file], "exclusive": False,
+        },
+    }
+    live_claims = {
+        first_claim["claim_id"]: first_claim,
+        unrelated_claim["claim_id"]: unrelated_claim,
+    }
+
+    def normalize_scope(scope: dict[str, Any], repo: str) -> dict[str, Any]:
+        paths = scope.get("paths")
+        return {
+            "kind": scope.get("kind", "repository"),
+            "repository": repo,
+            "checkout": scope.get("checkout"),
+            "branch": scope.get("branch"),
+            "paths": sorted(set(paths)) if paths is not None else None,
+            "exclusive": bool(scope.get("exclusive", False)),
+        }
+
+    def scopes_conflict(left: dict[str, Any], right: dict[str, Any]) -> str | None:
+        if left.get("repository") != right.get("repository"):
+            return None
+        if left.get("kind") == "repository" or right.get("kind") == "repository":
+            return "repository-wide overlap"
+        left_paths, right_paths = left.get("paths"), right.get("paths")
+        if left.get("kind") == "paths" or right.get("kind") == "paths":
+            if left_paths is None or right_paths is None or set(left_paths) & set(right_paths):
+                return "repository-relative paths overlap"
+            return None
+        if left.get("checkout") == right.get("checkout"):
+            if left_paths is None or right_paths is None or set(left_paths) & set(right_paths):
+                return "same checkout overlaps"
+            return None
+        if left.get("branch") == right.get("branch"):
+            if left_paths is None or right_paths is None or set(left_paths) & set(right_paths):
+                return "same branch overlaps"
+        return None
+
+    requester_snapshot = {
+        "session_id": "ses_requester",
+        "authenticated_principal_id": principal,
+        "campaign": {"identity": "cmp_path_claim_recovery"},
+        "workspace": {"root": str(tmp_path)},
+        "selected_checkouts": {},
+    }
+    owner_snapshot = {"authenticated_principal_id": principal}
+
+    class Store:
+        def load_snapshot(self, session_id: str) -> dict[str, Any]:
+            return requester_snapshot if session_id == "ses_requester" else owner_snapshot
+
+        def read_claims(self) -> list[dict[str, Any]]:
+            return list(live_claims.values())
+
+        def close(self) -> None:
+            pass
+
+    claims_api = SimpleNamespace(
+        normalize_scope=normalize_scope,
+        active_claims=lambda _records: live_claims,
+        scopes_conflict=scopes_conflict,
+    )
+    package = SimpleNamespace(
+        claims=claims_api,
+        workspace=SimpleNamespace(verify_registered_checkout=mock.Mock(return_value={
+            "path": str(checkout), "branch": "campaign/fresh",
+        })),
+        sessions=SimpleNamespace(Session=lambda _store, _session: SimpleNamespace(
+            effective_authority=lambda: {
+                "writable": [repository], "protected_repositories": [],
+            },
+        )),
+    )
+    server = EnvironmentRPCServer(
+        ControlConfig(
+            workspace_root=tmp_path,
+            sandbox_home=tmp_path / "home",
+            environment_rpc_socket=tmp_path / "rpc" / "environment.sock",
+        ),
+        environment_service=SimpleNamespace(
+            state_dir=tmp_path / "state",
+            _pkg=lambda: package,
+            _store=lambda _pkg: Store(),
+        ),
+        policy=object(),
+    )
+    record = _GrantRecord(
+        grant_id="same-principal-auto-recovery",
+        principal_id=principal,
+        host_root=project,
+        sandbox_root=f"/workspace/{repository}",
+        scope="project",
+        uid=os.getuid(),
+        expires_at=time.monotonic() + 60,
+        token_file=tmp_path / "grant",
+        bound_session_id="ses_requester",
+    )
+    server._perform_claim_recovery = mock.Mock(return_value={
+        "status": "recovered", "claim": {"claim_id": first_claim["claim_id"]},
+    })
+    paths = ["docs/PROJECTIONS.md", target_file, "tests/test_capability_intelligence.py"]
+
+    recovered = server._auto_recover_same_operator_claim(
+        ["claims", "ses_requester", "--acquire", repository,
+         "--worktree", str(checkout), "--branch", "campaign/fresh",
+         "--paths", *paths],
+        record=record,
+        request_id="req_path_scoped_recovery",
+    )
+
+    assert recovered["status"] == "recovered"
+    request = server._perform_claim_recovery.call_args.args[0]
+    assert request["claim_id"] == first_claim["claim_id"]
+    assert request["expected_version"] == first_claim["version"]
+    assert request["target_scope"] == {
+        "kind": "worktree", "repository": repository,
+        "checkout": str(checkout), "branch": "campaign/fresh",
+        "paths": sorted(paths), "exclusive": False,
+    }
+
+    path_only_recovery = server._auto_recover_same_operator_claim(
+        ["claims", "ses_requester", "--acquire", repository,
+         "--paths", *paths],
+        record=record,
+        request_id="req_repository_path_recovery",
+    )
+    assert path_only_recovery["status"] == "recovered"
+    assert server._perform_claim_recovery.call_args.args[0]["target_scope"] == {
+        "kind": "paths", "repository": repository,
+        "checkout": None, "branch": None,
+        "paths": sorted(paths), "exclusive": False,
+    }
+
+    # A whole-worktree request still overlaps both held path claims, so it
+    # remains blocked instead of silently recovering either broader scope.
+    broad_request = server._auto_recover_same_operator_claim(
+        ["claims", "ses_requester", "--acquire", repository,
+         "--worktree", str(checkout), "--branch", "campaign/fresh"],
+        record=record,
+        request_id="req_broad_recovery",
+    )
+    assert broad_request is None
+    assert server._perform_claim_recovery.call_count == 2
+
+
 def test_same_operator_recovery_uses_host_liveness_and_narrows_scope(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
