@@ -5,8 +5,8 @@ import subprocess
 
 import pytest
 
-from mncs_control_mcp.git_adapter import GitService
 from mncs_control_mcp.errors import ControlError
+from mncs_control_mcp.git_adapter import GitService
 from mncs_control_mcp.sandbox import Sandbox
 from mncs_control_mcp.tooling import ProjectService, ToolInventory
 from mncs_control_mcp.workspace import WorkspacePolicy
@@ -34,17 +34,75 @@ def test_project_discovery_creation_and_full_local_git_workflow(config) -> None:
     git.add("demo", ["pyproject.toml", "src/demo.py"])
     first = git.commit("demo", "initial")
     assert len(first["commit"]) == 40
+    base_branch = next(item["name"] for item in git.branches("demo")["branches"] if item["current"])
     git.create_branch("demo", "feature/test")
     (config.workspace_root / "demo" / "src" / "demo.py").write_text("VALUE = 2\n", encoding="utf-8")
+    dirty_head = git.log("demo", limit=1)["commits"][0]["hash"]
+    with pytest.raises(ControlError) as dirty_merge:
+        git.merge("demo", base_branch)
+    assert dirty_merge.value.code == "GIT_WORKTREE_DIRTY"
+    assert git.log("demo", limit=1)["commits"][0]["hash"] == dirty_head
+    assert (config.workspace_root / "demo" / "src" / "demo.py").read_text(encoding="utf-8") == "VALUE = 2\n"
     assert "VALUE = 2" in git.diff("demo")["diff"]
     git.add("demo", ["src/demo.py"])
     git.commit("demo", "change value")
     assert git.log("demo", limit=2)["commits"][0]["subject"] == "change value"
     assert any(item["current"] and item["name"] == "feature/test" for item in git.branches("demo")["branches"])
+    git.checkout("demo", base_branch)
+    merged = git.merge("demo", "feature/test")
+    assert merged["target_branch"] == base_branch
+    assert merged["source_branch"] == "feature/test"
+    assert git.status("demo")["clean"] is True
+    assert (config.workspace_root / "demo" / "src" / "demo.py").read_text(encoding="utf-8") == "VALUE = 2\n"
     listed = projects.list_projects()
     row = next(item for item in listed["projects"] if item["name"] == "demo")
     assert row["is_git"] is True
     assert "python" in row["project_types"]
+
+
+@pytest.mark.requires_bwrap_namespace
+@pytest.mark.skipif(shutil.which("bwrap") is None, reason="bubblewrap is not installed")
+def test_git_merge_conflict_aborts_and_preserves_clean_target(config) -> None:
+    policy = WorkspacePolicy(config)
+    sandbox = Sandbox(config, policy)
+    git = GitService(config, policy, sandbox)
+    projects = ProjectService(config, policy, sandbox, git)
+    projects.create("merge-conflict", kind="empty", git_init=True)
+    sandbox.run(
+        "git config user.email test@example.invalid; git config user.name Test",
+        scope="project",
+        project="merge-conflict",
+        cwd=".",
+        timeout_seconds=20,
+        network=False,
+    )
+    source = config.workspace_root / "merge-conflict" / "value.txt"
+    source.write_text("base\n", encoding="utf-8")
+    git.add("merge-conflict", ["value.txt"])
+    git.commit("merge-conflict", "base")
+    base_branch = next(
+        item["name"] for item in git.branches("merge-conflict")["branches"]
+        if item["current"]
+    )
+    git.create_branch("merge-conflict", "feature/conflict")
+    source.write_text("feature value\n", encoding="utf-8")
+    git.add("merge-conflict", ["value.txt"])
+    git.commit("merge-conflict", "feature value")
+    git.checkout("merge-conflict", base_branch)
+    source.write_text("main value\n", encoding="utf-8")
+    git.add("merge-conflict", ["value.txt"])
+    git.commit("merge-conflict", "main value")
+    target_head = git.log("merge-conflict", limit=1)["commits"][0]["hash"]
+
+    with pytest.raises(ControlError) as failed_merge:
+        git.merge("merge-conflict", "feature/conflict")
+
+    assert failed_merge.value.code == "GIT_MERGE_FAILED"
+    assert failed_merge.value.details["merge_aborted"] is True
+    assert failed_merge.value.details["working_tree_clean"] is True
+    assert git.log("merge-conflict", limit=1)["commits"][0]["hash"] == target_head
+    assert git.status("merge-conflict")["clean"] is True
+    assert source.read_text(encoding="utf-8") == "main value\n"
 
 
 def test_tool_inventory_has_no_environment_dump(config, monkeypatch: pytest.MonkeyPatch) -> None:

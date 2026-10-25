@@ -279,12 +279,12 @@ Synchronous results include command, sandbox cwd, scope, project, timestamps, ex
 ### Git
 
 - `git_status`, `git_diff`, `git_log`, `git_show`, `git_branches`
-- `git_create_branch`, `git_checkout`, `git_add`, `git_commit`
+- `git_create_branch`, `git_checkout`, `git_merge`, `git_add`, `git_commit`
 - `git_fetch`, `git_pull`, `git_push`, `git_clone`
 - `git_remotes`, `git_restore`, `git_stash`
 - backward-compatible MNCS-alias `repo_status`
 
-Every Git command runs inside the same project sandbox, including repository hooks. Repository and path inputs resolve inside the workspace. Clone destinations cannot escape. Remote failures return bounded diagnostics without exposing host credential variables.
+Every Git command runs inside the same project sandbox, including repository hooks. Branch checkout uses a normal `git switch` and refuses to overwrite conflicting work. `git_merge` merges a named local branch into the checked out branch only when the target worktree is clean; conflicts are aborted and reported. Neither operation resets or force-updates a branch. Repository and path inputs resolve inside the workspace. Clone destinations cannot escape. Remote failures return bounded diagnostics without exposing host credential variables. Push remains a normal network-enabled mutation and force push is not exposed.
 
 ### System and MNCS
 

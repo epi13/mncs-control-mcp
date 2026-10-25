@@ -572,6 +572,86 @@ class GitService:
         result = self._run(repository, ["switch", branch])
         return {"repository": repository, "branch": branch, **self._output(result)}
 
+    def merge(self, repository: str, source_branch: str) -> dict[str, object]:
+        """Merge one local branch into the current branch without losing work.
+
+        Only a clean, attached target checkout is eligible. Git performs a
+        normal fast-forward or merge commit; force updates are never used. If
+        the merge stops on conflicts, abort only the merge started by this
+        call and report whether the original clean tree was restored.
+        """
+        source_branch = self._ref(source_branch, "source_branch")
+        self._run(repository, ["check-ref-format", "--branch", source_branch])
+        current_branch = self._run(repository, ["branch", "--show-current"]).stdout.strip()
+        if not current_branch:
+            raise ControlError("DETACHED_HEAD", "git merge requires a checked out target branch")
+        if source_branch == current_branch:
+            raise ControlError("INVALID_INPUT", "source_branch must differ from the current branch")
+
+        source = self._run(
+            repository,
+            ["show-ref", "--verify", "--quiet", f"refs/heads/{source_branch}"],
+            allow_failure=True,
+        )
+        if source.exit_code != 0:
+            raise ControlError(
+                "GIT_BRANCH_NOT_FOUND",
+                f"local source branch does not exist: {source_branch}",
+            )
+
+        status = self._run(repository, ["status", "--porcelain=v1", "--untracked-files=all"])
+        if status.stdout.strip():
+            raise ControlError(
+                "GIT_WORKTREE_DIRTY",
+                "git merge requires a clean target worktree; existing changes were left untouched",
+                details={"branch": current_branch},
+            )
+        merge_head = self._run(
+            repository,
+            ["rev-parse", "--quiet", "--verify", "MERGE_HEAD"],
+            allow_failure=True,
+        )
+        if merge_head.exit_code == 0:
+            raise ControlError(
+                "GIT_OPERATION_IN_PROGRESS",
+                "git merge cannot start while another merge is in progress",
+            )
+
+        previous_head = self._run(repository, ["rev-parse", "HEAD"]).stdout.strip()
+        merged = self._run(repository, ["merge", "--no-edit", source_branch], allow_failure=True)
+        current_head = self._run(repository, ["rev-parse", "HEAD"]).stdout.strip()
+        if merged.exit_code != 0:
+            aborted = None
+            if current_head == previous_head:
+                in_progress = self._run(
+                    repository,
+                    ["rev-parse", "--quiet", "--verify", "MERGE_HEAD"],
+                    allow_failure=True,
+                )
+                if in_progress.exit_code == 0:
+                    aborted = self._run(repository, ["merge", "--abort"], allow_failure=True)
+            final_status = self._run(
+                repository,
+                ["status", "--porcelain=v1", "--untracked-files=all"],
+            )
+            raise ControlError(
+                "GIT_MERGE_FAILED",
+                merged.stderr.strip() or merged.stdout.strip() or "git merge failed",
+                details={
+                    "exit_code": merged.exit_code,
+                    "head": current_head,
+                    "merge_aborted": aborted is not None and aborted.exit_code == 0,
+                    "working_tree_clean": not final_status.stdout.strip(),
+                },
+            )
+        return {
+            "repository": repository,
+            "target_branch": current_branch,
+            "source_branch": source_branch,
+            "commit": current_head,
+            **self._output(merged),
+        }
+
     def _repo_path(self, repository: str, value: str, *, must_exist: bool) -> Path:
         repo, _, _ = self._repository(repository)
         relative = self.policy.normalize_relative(value)

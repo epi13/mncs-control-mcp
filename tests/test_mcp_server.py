@@ -133,6 +133,8 @@ environment_rpc_socket = {str(environment_rpc_socket)!r}
             "terminal_start",
             "terminal_jobs",
             "git_status",
+            "git_checkout",
+            "git_merge",
             "git_commit",
             "tool_inventory",
             "fabric_status",
@@ -351,6 +353,12 @@ fabric_execution_mode = "unavailable-until-service-support"
         assert not any(name.startswith("commons_publish") for name in by_name)
         assert by_name["file_delete"]["annotations"]["destructiveHint"] is True
         assert by_name["git_fetch"]["annotations"]["openWorldHint"] is True
+        assert by_name["git_checkout"]["annotations"]["readOnlyHint"] is False
+        assert by_name["git_checkout"]["annotations"]["destructiveHint"] is False
+        assert by_name["git_merge"]["inputSchema"]["required"] == ["repository", "source_branch"]
+        assert by_name["git_merge"]["annotations"]["readOnlyHint"] is False
+        assert by_name["git_merge"]["annotations"]["destructiveHint"] is False
+        assert by_name["git_merge"]["annotations"]["openWorldHint"] is False
         assert by_name["dispatch_fabric_job"]["annotations"]["readOnlyHint"] is False
         assert {
             "fabric_work_status",

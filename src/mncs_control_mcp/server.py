@@ -407,9 +407,13 @@ def build_server(config: ControlConfig | None = None) -> Any:
     def git_create_branch(repository: str, branch: str, checkout: bool = True) -> dict[str, object]:
         return invoke("git_create_branch", git.create_branch, repository, branch, checkout=checkout, audit_metadata={"repository": repository, "branch": branch})  # type: ignore[return-value]
 
-    @server.tool(name="git_checkout", description="Switch to an existing Git branch without forced reset.", annotations=destructive, structured_output=True)
+    @server.tool(name="git_checkout", description="Switch to an existing Git branch; refuses to overwrite conflicting work.", annotations=mutate, structured_output=True)
     def git_checkout(repository: str, branch: str) -> dict[str, object]:
         return invoke("git_checkout", git.checkout, repository, branch, audit_metadata={"repository": repository, "branch": branch})  # type: ignore[return-value]
+
+    @server.tool(name="git_merge", description="Merge one local branch into the checked out branch. Requires a clean worktree and aborts merge conflicts; never resets or force-updates.", annotations=mutate, structured_output=True)
+    def git_merge(repository: str, source_branch: str) -> dict[str, object]:
+        return invoke("git_merge", git.merge, repository, source_branch, audit_metadata={"repository": repository, "source_branch": source_branch})  # type: ignore[return-value]
 
     @server.tool(name="git_add", description="Stage validated repository-relative paths.", annotations=mutate, structured_output=True)
     def git_add(repository: str, paths: list[str]) -> dict[str, object]:
