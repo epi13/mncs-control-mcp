@@ -2744,6 +2744,11 @@ class EnvironmentRPCServer:
                                 "operator_approved_resident_agent_hosts", [],
                             )
                         ),
+                        "approved_persistent_agent_host_rejections": (
+                            before.get("process_diagnostics", {}).get(
+                                "operator_approved_resident_agent_host_rejections", [],
+                            )
+                        ),
                     },
                 )
 
@@ -3353,8 +3358,19 @@ class EnvironmentRPCServer:
         Environment clients, their children, project jobs, and user services
         remain independently visible to claim-recovery liveness checks.
         """
+        return self._managed_codex_app_server_rejection_reason(
+            pid, expected_start_ticks,
+            repository_root=repository_root,
+            selected_checkout=selected_checkout,
+        ) is None
+
+    def _managed_codex_app_server_rejection_reason(
+        self, pid: int, expected_start_ticks: str, *,
+        repository_root: Path, selected_checkout: Path | None,
+    ) -> str | None:
+        """Return a bounded reason when an audited process is not the daemon."""
         if self._proc_start_ticks(pid) != expected_start_ticks:
-            return False
+            return "process_start_identity_changed"
         entry = Path("/proc") / str(pid)
         try:
             argv = [
@@ -3377,7 +3393,7 @@ class EnvironmentRPCServer:
                 if line.startswith("Uid:")
             ))
         except (OSError, StopIteration, ValueError, IndexError):
-            return False
+            return "process_metadata_unavailable"
         if (parent_pid <= 1
                 or parent_uid != os.getuid()
                 or parent_comm.casefold() != "systemd"
@@ -3388,7 +3404,10 @@ class EnvironmentRPCServer:
                 or "--managed-daemon" not in argv
                 or "--listen" not in argv
                 or "unix://" not in argv):
-            return False
+            if (parent_pid <= 1 or parent_uid != os.getuid()
+                    or parent_comm.casefold() != "systemd"):
+                return "parent_not_same_uid_systemd"
+            return "codex_app_server_signature_mismatch"
         protected_roots = [repository_root]
         if selected_checkout is not None:
             protected_roots.append(selected_checkout)
@@ -3396,8 +3415,8 @@ class EnvironmentRPCServer:
             if (cwd == protected_root or protected_root in cwd.parents
                     or executable == protected_root
                     or protected_root in executable.parents):
-                return False
-        return True
+                return "codex_app_server_inside_repository_scope"
+        return None
 
     @staticmethod
     def _looks_like_codex_launcher_wrapper(
@@ -3762,6 +3781,7 @@ class EnvironmentRPCServer:
             (item.get("pid"), item.get("start_ticks")) for item in matches
         }
         persistent_agent_hosts: list[dict[str, object]] = []
+        persistent_agent_host_rejections: dict[str, int] = {}
         for item in audited_processes:
             identity = (item.get("pid"), item.get("start_ticks"))
             if identity in matched_identities:
@@ -3780,26 +3800,48 @@ class EnvironmentRPCServer:
                     "process_kind": "managed-codex-app-server",
                 })
                 continue
+            if (allow_persistent_codex_daemon
+                    and type(item.get("pid")) is int
+                    and isinstance(item.get("start_ticks"), str)):
+                rejection = self._managed_codex_app_server_rejection_reason(
+                    int(item["pid"]), str(item["start_ticks"]),
+                    repository_root=repository_root,
+                    selected_checkout=scope_root,
+                )
+                if rejection is not None:
+                    persistent_agent_host_rejections[rejection] = (
+                        persistent_agent_host_rejections.get(rejection, 0) + 1
+                    )
             matches.append(item)
         matches.sort(key=lambda item: int(item["pid"]))
+        process_diagnostics: dict[str, object] = {
+            "request_process_tree_complete": exclusion_complete,
+            "current_request_process_root": current_peer_identity,
+            "current_request_processes_excluded": excluded_processes,
+            "tracked_job_process_tree_complete": tracked_exclusion_complete,
+            "tracked_job_processes_excluded": tracked_excluded_processes,
+            "unreadable_match_count": unreadable_match_count,
+            "unreadable_matches": unreadable_matches,
+            "owner_execution_audit_complete": audit_complete,
+            "owner_execution_audit_rows": audit_row_count,
+            "operator_approved_resident_agent_hosts": persistent_agent_hosts,
+            "incomplete_reasons": [
+                {"reason": reason, "count": count}
+                for reason, count in sorted(incomplete_counts.items())
+            ],
+        }
+        if persistent_agent_host_rejections:
+            process_diagnostics[
+                "operator_approved_resident_agent_host_rejections"
+            ] = [
+                {"reason": reason, "count": count}
+                for reason, count in sorted(
+                    persistent_agent_host_rejections.items(),
+                )
+            ]
         return (matches, resident_services, excluded_processes,
                 len([item for item in entries if item.name.isdigit()]),
-                same_uid_examined, boot_id, complete, {
-                    "request_process_tree_complete": exclusion_complete,
-                    "current_request_process_root": current_peer_identity,
-                    "current_request_processes_excluded": excluded_processes,
-                    "tracked_job_process_tree_complete": tracked_exclusion_complete,
-                    "tracked_job_processes_excluded": tracked_excluded_processes,
-                    "unreadable_match_count": unreadable_match_count,
-                    "unreadable_matches": unreadable_matches,
-                    "owner_execution_audit_complete": audit_complete,
-                    "owner_execution_audit_rows": audit_row_count,
-                    "operator_approved_resident_agent_hosts": persistent_agent_hosts,
-                    "incomplete_reasons": [
-                        {"reason": reason, "count": count}
-                        for reason, count in sorted(incomplete_counts.items())
-                    ],
-                })
+                same_uid_examined, boot_id, complete, process_diagnostics)
 
     def _current_request_process_inventory(
         self, current_grant_id: str, entries: list[Path],
