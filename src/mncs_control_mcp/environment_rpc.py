@@ -2651,16 +2651,17 @@ class EnvironmentRPCServer:
         """Gate one Environment session's repository-scope admission.
 
         The Control-owned approval file grants exactly a campaign/repository
-        pair. Admission can be requested from an authenticated project grant;
-        the Control-owned approval file bounds the exact campaign/repository
-        pair. Environment performs the independent session, rights, Git,
-        claim, and Store-CAS checks before recording the immutable grant.
+        pair. A repository already writable in the selected campaign may also
+        bind one exact registered checkout in that same repository, because
+        this changes checkout selection without expanding repository authority.
+        Environment independently checks the session, rights, Git identity,
+        current write scope, claims, and Store-CAS before recording the grant.
         """
         required = {
             "--campaign-id", "--repository", "--expected-authority-revision",
-            "--approval-reference",
         }
         optional = {
+            "--approval-reference",
             "--checkout", "--workspace-checkout",
             "--owner-authorized-checkout-json",
         }
@@ -2730,7 +2731,7 @@ class EnvironmentRPCServer:
         campaign_id = values["--campaign-id"]
         repository_name = values["--repository"]
         authority_revision = values["--expected-authority-revision"]
-        approval_reference = values["--approval-reference"]
+        supplied_approval_reference = values.get("--approval-reference")
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,119}", repository_name):
             raise ControlError(
                 "ENVIRONMENT_RPC_INVALID_REQUEST", "scope admission repository identity is invalid"
@@ -2744,12 +2745,34 @@ class EnvironmentRPCServer:
                 "ENVIRONMENT_RPC_INVALID_REQUEST", "scope admission authority revision is invalid"
             )
         approved = self.config.environment_scope_grants.get(campaign_id, {})
-        if approved.get(repository_name) != approval_reference:
-            raise ControlError(
-                "ENVIRONMENT_AUTHORITY_DENIED",
-                "Control has no exact owner-approved campaign/repository scope grant",
-                details={"campaign_id": campaign_id, "repository": repository_name},
+        owner_approval_reference = approved.get(repository_name)
+        campaign_writable_checkout = False
+        if owner_approval_reference is not None:
+            if (supplied_approval_reference is not None
+                    and supplied_approval_reference != owner_approval_reference):
+                raise ControlError(
+                    "ENVIRONMENT_AUTHORITY_DENIED",
+                    "scope grant approval reference does not match the exact configured owner grant",
+                    details={"campaign_id": campaign_id, "repository": repository_name},
+                )
+            approval_reference = owner_approval_reference
+        else:
+            has_checkout_selector = bool(checkout_selectors)
+            if (supplied_approval_reference is not None
+                    or repository_name != caller_repository
+                    or not has_checkout_selector):
+                raise ControlError(
+                    "ENVIRONMENT_AUTHORITY_DENIED",
+                    "a new repository scope still needs an exact owner grant; checkout selection without one is limited to the authenticated project repository",
+                    details={"campaign_id": campaign_id, "repository": repository_name},
+                )
+            # This marker is only accepted when Environment independently
+            # proves the repository is already writable in the selected
+            # session. It identifies a checkout binding, not a user approval.
+            approval_reference = (
+                f"campaign-writable-checkout:{campaign_id}:{repository_name}:{argv[1]}"
             )
+            campaign_writable_checkout = True
         target = workspace_root / repository_name
         if target.is_symlink():
             raise ControlError(
@@ -2888,7 +2911,13 @@ class EnvironmentRPCServer:
                 forwarded.append(item)
                 argument_index += 1
             argv[:] = forwarded
+            if "--approval-reference" not in values:
+                argv.extend(["--approval-reference", approval_reference])
             argv.extend(["--owner-authorized-checkout-json", encoded_facts])
+        elif "--approval-reference" not in values:
+            argv.extend(["--approval-reference", approval_reference])
+        if campaign_writable_checkout:
+            argv.append("--campaign-writable-checkout")
 
     def _authorize_session(self, session_id: str, principal_id: str) -> None:
         pkg = self.environment_service._pkg()

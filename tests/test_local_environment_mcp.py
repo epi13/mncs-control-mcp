@@ -228,6 +228,23 @@ def test_scope_grant_maps_only_the_owner_checked_scope_admission_contract() -> N
             "mncs-compiler",
         )
 
+    campaign_checkout_argv, selected = _build_argv(
+        "scope_grant",
+        {
+            "campaign_id": "cmp_selected",
+            "repository": "mncs-compiler",
+            "expected_authority_revision": revision,
+            "checkout_path": ".worktrees/feature/mncs-compiler",
+        },
+        context,
+        "mncs-compiler",
+    )
+    assert selected is True
+    assert "--approval-reference" not in campaign_checkout_argv
+    assert campaign_checkout_argv[-2:] == [
+        "--checkout", ".worktrees/feature/mncs-compiler",
+    ]
+
 
 def test_scope_grant_bridge_preserves_the_campaign_selector(
     monkeypatch: pytest.MonkeyPatch,

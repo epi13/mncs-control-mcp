@@ -305,10 +305,14 @@ def _build_argv(
         )
         if not re.fullmatch(r"[0-9a-f]{64}", revision):
             raise ValueError("expected_authority_revision must be a full lowercase SHA-256 revision")
-        approval_reference = _string(
-            values.get("approval_reference"), "approval_reference", max_length=256,
+        approval_reference_value = values.get("approval_reference")
+        approval_reference = (
+            _string(
+                approval_reference_value, "approval_reference", max_length=256,
+            )
+            if approval_reference_value is not None else None
         )
-        if not approval_reference.strip():
+        if approval_reference is not None and not approval_reference.strip():
             raise ValueError("approval_reference must be nonempty text")
         if "checkout_path" in values and "workspace_checkout" in values:
             raise ValueError("supply only one of checkout_path or workspace_checkout")
@@ -317,8 +321,9 @@ def _build_argv(
             "--campaign-id", campaign_id,
             "--repository", repository,
             "--expected-authority-revision", revision,
-            "--approval-reference", approval_reference,
         ]
+        if approval_reference is not None:
+            argv.extend(["--approval-reference", approval_reference])
         if "checkout_path" in values:
             checkout_path = _string(
                 values["checkout_path"], "checkout_path", max_length=1024,
@@ -1042,7 +1047,7 @@ def main() -> None:
             "include enter, continuation, inspect, context, health, capabilities, "
             "resume, verify, checkpoint, handoff, complete, claims, campaign_state, "
             "environmental_capability, artifact_read, store_generation, and owner-approved "
-            "scope_grant. environmental_capability is a bounded, read-only interpretation "
+            "or campaign-writable scope_grant. environmental_capability is a bounded, read-only interpretation "
             "of authenticated campaign evidence. "
             "Resume revalidates the selected "
             "session. Verify runs one already-bound project verification capability "
@@ -1054,9 +1059,9 @@ def main() -> None:
             "checks principal, project, checkout, and claim ownership before binding. Invoke is "
             "limited to the typed Compiler application-build and Forge application-execution "
             "contracts; Environment enforces the selected session's repository authority. "
-            "Owner-approved scope_grant may select a repository checkout or a registered "
-            "workspace-relative linked worktree, which Environment revalidates against the "
-            "selected campaign workspace. "
+            "Scope_grant may use an exact configured owner grant to add repository scope, "
+            "or bind a Control-verified checkout in a repository already writable in the "
+            "campaign. Environment revalidates the selected checkout, write scope, and claims. "
             "No shell or arbitrary CLI arguments are accepted."
         ),
     )

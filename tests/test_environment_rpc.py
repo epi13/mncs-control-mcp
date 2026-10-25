@@ -368,6 +368,10 @@ def test_scope_grant_rpc_requires_exact_campaign_approval_and_selected_project_g
     ]
 
     assert server._translate_argv(args, environment, grant) == args
+    no_token_args = args[:-2]
+    assert server._translate_argv(no_token_args, environment, grant) == [
+        *no_token_args, "--approval-reference", approval,
+    ]
     for changed in (
         args[:-1] + ["user-approval:other"],
         args[:3] + ["cmp_other"] + args[4:],
@@ -455,6 +459,83 @@ def test_scope_grant_rpc_requires_exact_campaign_approval_and_selected_project_g
     with pytest.raises(ControlError) as raised:
         server._translate_argv(linked_args, environment, grant)
     assert raised.value.code == "ENVIRONMENT_WORKSPACE_ESCAPE"
+
+
+def test_scope_grant_binds_existing_project_checkout_without_second_approval(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "projects"
+    environment = workspace / "mncs-environment"
+    linked = environment / ".worktrees" / "feature" / "mncs-environment"
+    environment.mkdir(parents=True)
+    (environment / ".git").mkdir()
+    linked.mkdir(parents=True)
+    checkout_facts = {
+        "repository": "mncs-environment",
+        "path": str(linked.resolve()),
+        "workspace_root": str(workspace.resolve()),
+        "repository_root": str(environment.resolve()),
+        "git_common_directory": str((environment / ".git").resolve()),
+        "git_common_directory_identity": "git-common-environment",
+        "checkout_identity": "checkout-environment-feature",
+        "observed_path": "mncs-environment/.worktrees/feature/mncs-environment",
+        "branch": "campaign/feature",
+        "head": "a" * 40,
+    }
+    verify = mock.Mock(return_value=checkout_facts)
+    server = EnvironmentRPCServer(
+        ControlConfig(
+            workspace_root=workspace,
+            sandbox_home=tmp_path / "home",
+            environment_rpc_socket=tmp_path / "rpc" / "environment.sock",
+        ),
+        environment_service=SimpleNamespace(
+            state_dir=tmp_path / "state",
+            _pkg=lambda: SimpleNamespace(
+                workspace=SimpleNamespace(verify_registered_checkout=verify),
+            ),
+        ),
+        policy=object(),
+    )
+    grant = _GrantRecord(
+        grant_id="same-project-checkout-selection",
+        principal_id="principal-test",
+        host_root=environment,
+        sandbox_root="/workspace/mncs-environment",
+        scope="project",
+        uid=os.getuid(),
+        expires_at=time.monotonic() + 60,
+        token_file=tmp_path / "grant",
+        bound_session_id="ses_scope_test",
+    )
+    args = [
+        "scope-grant", "ses_scope_test",
+        "--campaign-id", "cmp_scope_test",
+        "--repository", "mncs-environment",
+        "--expected-authority-revision", "b" * 64,
+        "--checkout", ".worktrees/feature/mncs-environment",
+    ]
+
+    translated = server._translate_argv(args, environment, grant)
+
+    assert translated[-1] == "--campaign-writable-checkout"
+    assert translated[-5:-3] == [
+        "--approval-reference",
+        "campaign-writable-checkout:cmp_scope_test:mncs-environment:ses_scope_test",
+    ]
+    assert translated[-3] == "--owner-authorized-checkout-json"
+    assert json.loads(translated[-2]) == checkout_facts
+
+    other_repo_args = [
+        "scope-grant", "ses_scope_test",
+        "--campaign-id", "cmp_scope_test",
+        "--repository", "mncs-control-mcp",
+        "--expected-authority-revision", "b" * 64,
+        "--workspace-checkout", "mncs-control-mcp/.worktrees/feature",
+    ]
+    with pytest.raises(ControlError) as unauthorized:
+        server._translate_argv(other_repo_args, environment, grant)
+    assert unauthorized.value.code == "ENVIRONMENT_AUTHORITY_DENIED"
 
 
 def test_environment_cli_uses_verified_source_not_callers_stale_package(
