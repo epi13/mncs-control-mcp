@@ -432,7 +432,13 @@ def load_config(path: Path | str | None = None) -> ControlConfig:
                 approval_reference = entry.get("approval_reference")
                 if (not isinstance(repository, str)
                         or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,119}", repository)
-                        or claim_id != f"claim:{repository}"
+                        or not (
+                            claim_id == f"claim:{repository}"
+                            or re.fullmatch(
+                                rf"claim:{re.escape(repository)}:(?:paths|worktree):[0-9a-f]{{12}}",
+                                claim_id,
+                            )
+                        )
                         or type(claim_version) is not int or claim_version < 1
                         or not isinstance(owner_session_id, str)
                         or not re.fullmatch(r"ses_[A-Za-z0-9_-]{1,120}", owner_session_id)

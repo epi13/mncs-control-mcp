@@ -2886,9 +2886,11 @@ class EnvironmentRPCServer:
             raise ControlError(
                 "ENVIRONMENT_RPC_INVALID_REQUEST", "claim recovery version is invalid"
             ) from error
+        claim_id_pattern = re.compile(
+            rf"claim:{re.escape(repository)}(?::(?:paths|worktree):[0-9a-f]{{12}})?"
+        )
         if (not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,159}", campaign_id)
-                or not re.fullmatch(r"claim:[A-Za-z0-9][A-Za-z0-9._-]{0,119}", claim_id)
-                or claim_id != f"claim:{repository}"
+                or not claim_id_pattern.fullmatch(claim_id)
                 or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,119}", repository)
                 or not re.fullmatch(r"ses_[A-Za-z0-9_-]{1,120}", owner_session_id)
                 or expected_version < 1):

@@ -1068,8 +1068,14 @@ def test_workspace_relative_scope_checkout_rejects_escape_and_unregistered_path(
     verify.assert_called_once()
 
 
+@pytest.mark.parametrize("claim_id", [
+    "claim:mncs-compiler",
+    "claim:mncs-compiler:paths:012345abcdef",
+    "claim:mncs-compiler:worktree:abcdef012345",
+])
 def test_claim_recovery_rpc_requires_exact_owner_approval_generation_and_session(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    claim_id: str,
 ) -> None:
     workspace = tmp_path / "projects"
     environment = workspace / "mncs-environment"
@@ -1107,7 +1113,7 @@ def test_claim_recovery_rpc_requires_exact_owner_approval_generation_and_session
             environment_rpc_socket=tmp_path / "rpc" / "environment.sock",
             environment_claim_recovery_grants={
                 "cmp_mncs_continuity_20261010": {
-                    "claim:mncs-compiler": approved,
+                    claim_id: approved,
                 },
             },
         ),
@@ -1128,7 +1134,7 @@ def test_claim_recovery_rpc_requires_exact_owner_approval_generation_and_session
     args = [
         "claim-recover", "ses_new_campaign",
         "--campaign-id", "cmp_mncs_continuity_20261010",
-        "--claim-id", "claim:mncs-compiler",
+        "--claim-id", claim_id,
         "--repository", "mncs-compiler",
         "--owner-session-id", "ses_old_compiler",
         "--expected-version", "63",
@@ -1143,14 +1149,14 @@ def test_claim_recovery_rpc_requires_exact_owner_approval_generation_and_session
 
     result = server._authorize_claim_recovery_argv(args, environment, grant)
 
-    assert result["claim_id"] == "claim:mncs-compiler"
+    assert result["claim_id"] == claim_id
     assert result["expected_version"] == 63
     assert result["owner_consumer_id"] == approved["owner_consumer_id"]
     assert authorized_sessions == ["ses_new_campaign"]
     trailing_session_args = [
         "claim-recover",
         "--campaign-id", "cmp_mncs_continuity_20261010",
-        "--claim-id", "claim:mncs-compiler",
+        "--claim-id", claim_id,
         "--repository", "mncs-compiler",
         "--owner-session-id", "ses_old_compiler",
         "--expected-version", "63",
@@ -1163,6 +1169,13 @@ def test_claim_recovery_rpc_requires_exact_owner_approval_generation_and_session
     )
     assert trailing_result["session_id"] == "ses_new_campaign"
     assert authorized_sessions == ["ses_new_campaign", "ses_new_campaign"]
+    malformed_claim = list(args)
+    malformed_claim[malformed_claim.index("--claim-id") + 1] = (
+        "claim:mncs-compiler:paths:not-a-digest"
+    )
+    with pytest.raises(ControlError) as invalid_claim:
+        server._authorize_claim_recovery_argv(malformed_claim, environment, grant)
+    assert invalid_claim.value.code == "ENVIRONMENT_RPC_INVALID_REQUEST"
     for changed in (
         args[:11] + ["64"] + args[12:],
         args[:-3] + ["user-approval:other", "--reason", "operator-approved recovery"],

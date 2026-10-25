@@ -156,7 +156,15 @@ def test_configuration_loads_exact_claim_recovery_approval(tmp_path: Path) -> No
         'owner_session_id = "ses_old_owner"\n'
         'owner_consumer_id = "old-compiler-consumer"\n'
         'requester_session_id = "ses_new_owner"\n'
-        'approval_reference = "user-approval:exact-claim-recovery"\n',
+        'approval_reference = "user-approval:exact-claim-recovery"\n'
+        '\n'
+        '[claim_recovery.cmp_scope_test."claim:mncs-compiler:paths:012345abcdef"]\n'
+        'repository = "mncs-compiler"\n'
+        'claim_version = 64\n'
+        'owner_session_id = "ses_old_path_owner"\n'
+        'owner_consumer_id = "old-path-consumer"\n'
+        'requester_session_id = "ses_new_owner"\n'
+        'approval_reference = "user-approval:exact-path-claim-recovery"\n',
         encoding="utf-8",
     )
     approval_file.chmod(0o600)
@@ -180,6 +188,14 @@ def test_configuration_loads_exact_claim_recovery_approval(tmp_path: Path) -> No
                 "owner_consumer_id": "old-compiler-consumer",
                 "requester_session_id": "ses_new_owner",
                 "approval_reference": "user-approval:exact-claim-recovery",
+            },
+            "claim:mncs-compiler:paths:012345abcdef": {
+                "repository": "mncs-compiler",
+                "claim_version": 64,
+                "owner_session_id": "ses_old_path_owner",
+                "owner_consumer_id": "old-path-consumer",
+                "requester_session_id": "ses_new_owner",
+                "approval_reference": "user-approval:exact-path-claim-recovery",
             },
         },
     }
