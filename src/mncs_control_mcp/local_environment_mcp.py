@@ -1017,7 +1017,8 @@ class LocalEnvironmentMCP:
                     "basis", "paths", "worktree", "branch", "expected_store_generation",
                     "expected_authority_revision", "approval_reference",
                     "checkout_path", "workspace_checkout",
-                    "evidence_offset", "evidence_limit", "capability", "binding_id", "path",
+                    "history_pages", "evidence_offset", "evidence_limit",
+                    "capability", "binding_id", "path",
                     "request_file", "input_artifact", "call", "worktree",
                     *SESSION_SELECTOR_FIELDS,
                 })

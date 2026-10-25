@@ -114,6 +114,36 @@ def test_environmental_capability_maps_to_one_bounded_read_projection() -> None:
         )
 
 
+def test_environmental_capability_bridge_accepts_bounded_history_pages(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bridge = LocalEnvironmentMCP()
+    context = _ProjectContext("secret", "/workspace/mncs-environment")
+    context.selected_session_id = "ses_selected"
+    captured: list[dict] = []
+
+    monkeypatch.setattr(bridge, "_context", lambda _project, _cwd: context)
+    monkeypatch.setattr(
+        local_environment_mcp,
+        "_rpc",
+        lambda _socket, request: captured.append(request) or {
+            "ok": True,
+            "result": {"exit_code": 0, "stdout": "{}", "stderr": ""},
+        },
+    )
+
+    response = bridge.invoke(
+        "mncs-environment", "environmental_capability",
+        {"history_pages": 4, "evidence_limit": 32},
+    )
+
+    assert response["ok"] is True
+    assert captured[0]["argv"] == [
+        "projections", "ses_selected", "--interpret", "environmental-capability",
+        "--history-pages", "4", "--evidence-limit", "32",
+    ]
+
+
 def test_scope_grant_maps_only_the_owner_checked_scope_admission_contract() -> None:
     context = _ProjectContext("secret", "/workspace/mncs-compiler")
     context.selected_session_id = "ses_selected"
