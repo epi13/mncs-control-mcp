@@ -211,14 +211,23 @@ def test_dispatch_records_only_redacted_read_only_operation_outcomes(
 
     server._dispatch_once = lambda *_args, **_kwargs: {
         "ok": False,
-        "error": {"code": "ENVIRONMENT_AUTHORITY_DENIED"},
+        "error": {
+            "code": "ENVIRONMENT_AUTHORITY_DENIED",
+            "message": "private denial details",
+        },
     }  # type: ignore[method-assign]
     denied = server.dispatch({
         **request,
         "request_id": "req_denied_read_operation",
     }, peer_uid=0)
     assert denied["ok"] is False
-    assert len(recorded) == 1
+    assert len(recorded) == 2
+    assert recorded[1]["session_id"] == "ses_activity_control"
+    assert recorded[1]["operation"] == "campaign.state"
+    assert recorded[1]["outcome_status"] == "failed"
+    assert recorded[1]["exit_code"] is None
+    assert recorded[1]["failure_code"] == "ENVIRONMENT_AUTHORITY_DENIED"
+    assert "private denial details" not in json.dumps(recorded)
 
 
 def test_claim_worktree_path_can_name_an_exact_checkout_in_the_workspace(

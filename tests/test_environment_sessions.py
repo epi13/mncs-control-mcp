@@ -140,6 +140,25 @@ def test_control_read_activity_binds_to_authenticated_session_context(
     assert "arguments" not in payload
     assert "response" not in payload
 
+    failed = service.record_read_operation_activity(
+        session_id="ses_activity_control",
+        repository="mncs-control-mcp",
+        operation="campaign.state",
+        outcome_status="failed",
+        exit_code=None,
+        failure_code="ENVIRONMENT_AUTHORITY_DENIED",
+        operation_elapsed_ms=51.0,
+        request_id="req_control_activity_denied_read",
+        operation_digest="1" * 64,
+        control_grant_id="d" * 32,
+        process_identity=None,
+    )
+    assert failed == {"status": "recorded"}
+    assert captured["payload"]["outcome_status"] == "failed"
+    assert captured["payload"]["exit_code"] is None
+    assert captured["payload"]["failure_code"] == "ENVIRONMENT_AUTHORITY_DENIED"
+    assert captured["request_id"] == "req_control_activity_denied_read"
+
     snapshot["authenticated_principal_id"] = "ctrl_" + "f" * 32
     with pytest.raises(ControlError, match="Control-authenticated continuation provenance"):
         service.record_read_operation_activity(
@@ -155,7 +174,7 @@ def test_control_read_activity_binds_to_authenticated_session_context(
             control_grant_id="d" * 32,
             process_identity=None,
         )
-    assert captured["request_id"] == "req_control_activity"
+    assert captured["request_id"] == "req_control_activity_denied_read"
 
 
 def test_environment_package_loader_reloads_changed_sibling_sources(tmp_path: Path) -> None:

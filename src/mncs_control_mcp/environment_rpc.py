@@ -587,16 +587,33 @@ class EnvironmentRPCServer:
         recorder = getattr(
             self.environment_service, "record_read_operation_activity", None,
         )
-        if (not callable(recorder) or session_id is None or operation is None
-                or response.get("ok") is not True):
+        if not callable(recorder) or session_id is None or operation is None:
             return
         result = response.get("result")
-        if not isinstance(result, dict):
-            return
-        exit_code = result.get("exit_code")
-        if type(exit_code) is not int:
+        if response.get("ok") is True:
+            if not isinstance(result, dict):
+                return
+            exit_code = result.get("exit_code")
+            if type(exit_code) is not int:
+                exit_code = None
+            succeeded = exit_code == 0
+            failure_code = (
+                None if succeeded else self._read_operation_failure_code(result)
+            )
+        elif response.get("ok") is False:
+            error = response.get("error")
+            if not isinstance(error, dict):
+                return
+            raw_code = error.get("code")
+            failure_code = (
+                raw_code if isinstance(raw_code, str)
+                and re.fullmatch(r"[A-Za-z0-9._-]{1,96}", raw_code)
+                else "environment-rpc-failed"
+            )
             exit_code = None
-        succeeded = exit_code == 0
+            succeeded = False
+        else:
+            return
         process_identity = None
         if peer_pid is not None:
             with self._request_condition:
@@ -616,8 +633,7 @@ class EnvironmentRPCServer:
                 operation=operation,
                 outcome_status="succeeded" if succeeded else "failed",
                 exit_code=exit_code,
-                failure_code=(None if succeeded
-                              else self._read_operation_failure_code(result)),
+                failure_code=failure_code,
                 operation_elapsed_ms=operation_elapsed_ms,
                 request_id=request_id,
                 operation_digest=operation_digest,
