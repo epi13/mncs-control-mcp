@@ -757,6 +757,147 @@ def test_native_application_invocations_map_to_fixed_typed_contracts() -> None:
             _build_argv("invoke", arguments, context, "mncs-environment")
 
 
+def test_control_worktree_prepare_invocation_is_typed_and_effect_scoped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "projects"
+    workspace.mkdir()
+    monkeypatch.setattr(
+        local_environment_mcp,
+        "load_config",
+        lambda: SimpleNamespace(workspace_root=workspace),
+    )
+    context = _ProjectContext("secret", "/workspace/mncs-control-mcp")
+    context.selected_session_id = "ses_selected"
+
+    argv, selected = _build_argv(
+        "invoke",
+        {
+            "capability": "mncs-control-mcp:workspace.worktree.prepare",
+            "worktree": {
+                "repository": "mncs-control-mcp",
+                "name": "environment-worktree-capability-delivery-20261025",
+                "branch": "campaign/environment-worktree-capability-delivery-20261025",
+            },
+        },
+        context,
+        "mncs-control-mcp",
+    )
+
+    assert selected is True
+    assert argv[:5] == [
+        "invoke", "ses_selected", "mncs-control-mcp:workspace.worktree.prepare",
+        "--effect-repository", "mncs-control-mcp",
+    ]
+    assert argv[5:9] == [
+        "--", "prepare", "--workspace-root", str(workspace.resolve()),
+    ]
+    assert argv[9] == "--requests-json"
+    assert json.loads(argv[10]) == [{
+        "branch": "campaign/environment-worktree-capability-delivery-20261025",
+        "name": "environment-worktree-capability-delivery-20261025",
+        "repository": "mncs-control-mcp",
+        "source_ref": "origin/main",
+    }]
+
+
+def test_control_worktree_prepare_rejects_unsupported_scope_and_arguments(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "projects"
+    workspace.mkdir()
+    monkeypatch.setattr(
+        local_environment_mcp,
+        "load_config",
+        lambda: SimpleNamespace(workspace_root=workspace),
+    )
+    context = _ProjectContext("secret", "/workspace/mncs-control-mcp")
+    context.selected_session_id = "ses_selected"
+    arguments = {
+        "capability": "mncs-control-mcp:workspace.worktree.prepare",
+        "worktree": {
+            "repository": "mncs-control-mcp",
+            "name": "feature",
+            "branch": "campaign/feature",
+        },
+    }
+
+    with pytest.raises(ValueError, match="Control project context"):
+        _build_argv("invoke", arguments, context, "mncs-environment")
+    with pytest.raises(ValueError, match="unsupported arguments"):
+        _build_argv(
+            "invoke", {**arguments, "arbitrary_args": ["rm", "-rf"]},
+            context, "mncs-control-mcp",
+        )
+    with pytest.raises(ValueError, match="requires repository, name, and branch"):
+        _build_argv(
+            "invoke",
+            {
+                "capability": arguments["capability"],
+                "worktree": {**arguments["worktree"], "cwd": "/tmp"},
+            },
+            context,
+            "mncs-control-mcp",
+        )
+
+
+def test_control_worktree_prepare_flows_through_the_selected_environment_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "projects"
+    workspace.mkdir()
+    monkeypatch.setattr(
+        local_environment_mcp,
+        "load_config",
+        lambda: SimpleNamespace(workspace_root=workspace),
+    )
+    bridge = object.__new__(LocalEnvironmentMCP)
+    bridge.socket_path = tmp_path / "unused.sock"
+    context = _ProjectContext(
+        "grant", "/workspace/mncs-control-mcp",
+        selected_session_id="ses_selected",
+    )
+    monkeypatch.setattr(bridge, "_context", lambda _project, _cwd: context)
+    requests: list[dict[str, object]] = []
+
+    def fake_rpc(_socket_path: Path, request: dict[str, object]) -> dict[str, object]:
+        requests.append(request)
+        return {"ok": True, "result": {
+            "stdout": json.dumps({
+                "workspace_root": str(workspace),
+                "selected_checkouts": [{
+                    "repository": "mncs-control-mcp",
+                    "branch": "campaign/environment-worktree-capability-delivery-20261025",
+                    "clean": True,
+                }],
+            }),
+            "stderr": "",
+            "exit_code": 0,
+        }}
+
+    monkeypatch.setattr(local_environment_mcp, "_rpc", fake_rpc)
+    response = bridge.invoke(
+        "mncs-control-mcp",
+        "invoke",
+        {
+            "capability": "mncs-control-mcp:workspace.worktree.prepare",
+            "worktree": {
+                "repository": "mncs-control-mcp",
+                "name": "environment-worktree-capability-delivery-20261025",
+                "branch": "campaign/environment-worktree-capability-delivery-20261025",
+            },
+        },
+    )
+
+    assert response["ok"] is True
+    assert response["operation"] == "invoke"
+    assert response["result"]["selected_checkouts"][0]["clean"] is True
+    assert requests[0]["argv"][:5] == [
+        "invoke", "ses_selected", "mncs-control-mcp:workspace.worktree.prepare",
+        "--effect-repository", "mncs-control-mcp",
+    ]
+
+
 def test_campaign_continuation_trusts_only_control_selected_session() -> None:
     assert LocalEnvironmentMCP._selected_session({
         "status": "ready",

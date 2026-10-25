@@ -175,7 +175,10 @@ def _build_argv(
         "health": {"session_id", "live"}, "capabilities": {"session_id"},
         "resume": {"session_id"},
         "verify": {"session_id", "capability"},
-        "invoke": {"session_id", "capability", "request_file", "input_artifact", "call"},
+        "invoke": {
+            "session_id", "capability", "request_file", "input_artifact", "call",
+            "worktree",
+        },
         "checkpoint": {
             "session_id", "progress", "remaining", "campaign_base_checkpoint",
             "campaign_evidence", "campaign_evidence_delta", "campaign_delivery",
@@ -291,7 +294,56 @@ def _build_argv(
                 artifact["binding_id"], artifact["path"],
                 "--", "--call-json", encoded_call,
             ], True
-        raise ValueError("invoke supports only native-application-build and native-application-execution")
+        if capability == "mncs-control-mcp:workspace.worktree.prepare":
+            if project != "mncs-control-mcp":
+                raise ValueError(
+                    "workspace.worktree.prepare is available only in the Control project context"
+                )
+            if set(values) - {"session_id", "capability", "worktree"}:
+                raise ValueError(
+                    "Control worktree preparation accepts one typed worktree request"
+                )
+            request = values.get("worktree")
+            if (not isinstance(request, dict)
+                    or set(request) - {"repository", "name", "branch", "source_ref"}
+                    or not {"repository", "name", "branch"}.issubset(request)):
+                raise ValueError(
+                    "Control worktree preparation requires repository, name, and branch"
+                )
+            repository = _string(request["repository"], "repository", max_length=128)
+            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", repository):
+                raise ValueError("repository is not a valid repository identifier")
+            name = _string(request["name"], "name", max_length=128)
+            branch = _string(request["branch"], "branch", max_length=256)
+            source_ref = _string(
+                request.get("source_ref", "origin/main"), "source_ref", max_length=256,
+            )
+            if not name or not branch or not source_ref:
+                raise ValueError("worktree name, branch, and source_ref must be nonempty")
+            workspace_root = Path(load_config().workspace_root).expanduser().resolve(strict=True)
+            requests_json = json.dumps(
+                [{
+                    "repository": repository,
+                    "name": name,
+                    "branch": branch,
+                    "source_ref": source_ref,
+                }],
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            if len(requests_json.encode("utf-8")) > 2048:
+                raise ValueError("worktree request exceeds the bounded provider input")
+            return [
+                "invoke", session_id, capability,
+                "--effect-repository", repository,
+                "--", "prepare", "--workspace-root", str(workspace_root),
+                "--requests-json", requests_json,
+            ], True
+        raise ValueError(
+            "invoke supports only native-application-build, native-application-execution, "
+            "and the typed Control worktree-prepare contract"
+        )
     if operation == "scope_grant":
         campaign_id = _string(values.get("campaign_id"), "campaign_id", max_length=160)
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,159}", campaign_id):
@@ -966,7 +1018,7 @@ class LocalEnvironmentMCP:
                     "expected_authority_revision", "approval_reference",
                     "checkout_path", "workspace_checkout",
                     "evidence_offset", "evidence_limit", "capability", "binding_id", "path",
-                    "request_file", "input_artifact", "call",
+                    "request_file", "input_artifact", "call", "worktree",
                     *SESSION_SELECTOR_FIELDS,
                 })
                 selector_values = values
@@ -1073,8 +1125,11 @@ def main() -> None:
             "campaign_id, or task_identity. Session operations may include these selectors "
             "to reselect an authenticated context after an MCP process restart; Control "
             "checks principal, project, checkout, and claim ownership before binding. Invoke is "
-            "limited to the typed Compiler application-build and Forge application-execution "
-            "contracts; Environment enforces the selected session's repository authority. "
+                "limited to the typed Compiler application-build, Forge application-execution, "
+                "and Control worktree-prepare contracts. Worktree preparation is routed only "
+                "from the Control project context and records its repository as the Environment "
+                "effect target; Environment checks the selected session's repository authority "
+                "and Control verifies the requested ref and clean registered checkout. "
             "Scope_grant may use an exact configured owner grant to add repository scope, "
             "or bind a Control-verified checkout in a repository already writable in the "
             "campaign. A bridge that requires approval_reference may send the exact "
