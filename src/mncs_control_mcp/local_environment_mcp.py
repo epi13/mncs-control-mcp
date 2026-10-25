@@ -969,7 +969,23 @@ class LocalEnvironmentMCP:
                     "request_file", "input_artifact", "call",
                     *SESSION_SELECTOR_FIELDS,
                 })
-                selected_error = self._select_session(context, project, values, cwd)
+                selector_values = values
+                if (operation == "scope_grant"
+                        and context.selected_session_id is not None
+                        and "session_id" not in values
+                        and "task_identity" not in values):
+                    # scope_grant's campaign_id is an authorization operand
+                    # checked by Environment against the already selected
+                    # session. Treating it as a fresh continuation selector
+                    # discards a valid entry selection and can make a scoped
+                    # checkout binding fail as not-found after entry succeeds.
+                    selector_values = {
+                        key: value for key, value in values.items()
+                        if key != "campaign_id"
+                    }
+                selected_error = self._select_session(
+                    context, project, selector_values, cwd,
+                )
                 if selected_error is not None:
                     return self._response_error(selected_error)
                 operation_values = {

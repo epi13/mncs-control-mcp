@@ -246,21 +246,16 @@ def test_scope_grant_maps_only_the_owner_checked_scope_admission_contract() -> N
     ]
 
 
-def test_scope_grant_bridge_preserves_the_campaign_selector(
+def test_scope_grant_uses_the_session_selected_by_entry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     bridge = LocalEnvironmentMCP()
     context = _ProjectContext("secret", "/workspace/mncs-compiler")
+    context.selected_session_id = "ses_selected"
     bridge._contexts[("mncs-compiler", "")] = context
     captured: list[dict] = []
 
-    def select_session(selected_context, _project, values, _cwd=""):
-        assert values["campaign_id"] == "cmp_selected"
-        selected_context.selected_session_id = "ses_selected"
-        return None
-
     monkeypatch.setattr(bridge, "_context", lambda _project, _cwd: context)
-    monkeypatch.setattr(bridge, "_select_session", select_session)
     monkeypatch.setattr(
         local_environment_mcp,
         "_rpc",
@@ -283,6 +278,8 @@ def test_scope_grant_bridge_preserves_the_campaign_selector(
     )
 
     assert response["ok"] is True
+    assert len(captured) == 1
+    assert captured[0]["argv"][0] == "scope-grant"
     assert captured[0]["argv"][2:4] == ["--campaign-id", "cmp_selected"]
     assert captured[0]["argv"][-2:] == [
         "--checkout", ".worktrees/compiler/mncs-environment",
@@ -300,6 +297,8 @@ def test_scope_grant_bridge_preserves_the_campaign_selector(
         },
     )
     assert workspace_response["ok"] is True
+    assert len(captured) == 2
+    assert captured[1]["argv"][0] == "scope-grant"
     assert captured[1]["argv"][-2:] == [
         "--workspace-checkout", "mncs-compiler/.worktrees/native-app/vm",
     ]
