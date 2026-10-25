@@ -44,6 +44,7 @@ ALLOWED_COMMANDS = frozenset({
 MAX_CAMPAIGN_EVIDENCE_PAGE = 128
 MAX_ENVIRONMENTAL_PROJECTION_HISTORY_PAGES = 4
 MAX_ENVIRONMENTAL_PROJECTION_EVIDENCE_PAGE = 32
+MAX_ENVIRONMENTAL_PROJECTION_SESSION_EVENT_PAGE = 256
 MAX_CONTEXT_RESPONSE_SUMMARY_BYTES = 128 * 1024
 MAX_CONTEXT_RESPONSE_CAPABILITY_LIST = 20
 CONTEXT_RESPONSE_SUMMARY_SCHEMA = "mncs.environment.context-response-summary/1"
@@ -2511,6 +2512,7 @@ class EnvironmentRPCServer:
 
         allowed = {
             "--interpret", "--history-pages", "--evidence-offset", "--evidence-limit",
+            "--session-event-before-sequence", "--session-event-limit",
         }
         seen: set[str] = set()
         interpretation = None
@@ -2555,11 +2557,24 @@ class EnvironmentRPCServer:
                         "ENVIRONMENT_RPC_INVALID_REQUEST",
                         "--evidence-offset exceeds the supported range",
                     )
+                if (option == "--session-event-before-sequence"
+                        and not 1 <= value <= 2**31 - 1):
+                    raise ControlError(
+                        "ENVIRONMENT_RPC_INVALID_REQUEST",
+                        "--session-event-before-sequence exceeds the supported range",
+                    )
                 if (option == "--evidence-limit"
                         and not 1 <= value <= MAX_ENVIRONMENTAL_PROJECTION_EVIDENCE_PAGE):
                     raise ControlError(
                         "ENVIRONMENT_RPC_INVALID_REQUEST",
                         f"--evidence-limit must be between 1 and {MAX_ENVIRONMENTAL_PROJECTION_EVIDENCE_PAGE}",
+                    )
+                if (option == "--session-event-limit"
+                        and not 1 <= value <= MAX_ENVIRONMENTAL_PROJECTION_SESSION_EVENT_PAGE):
+                    raise ControlError(
+                        "ENVIRONMENT_RPC_INVALID_REQUEST",
+                        "--session-event-limit must be between 1 and "
+                        f"{MAX_ENVIRONMENTAL_PROJECTION_SESSION_EVENT_PAGE}",
                     )
             seen.add(option)
             index += 2

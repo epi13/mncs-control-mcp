@@ -5808,7 +5808,8 @@ def test_environmental_capability_projection_is_bounded_session_read_and_observe
     argv = [
         "projections", "ses_environment", "--interpret", "environmental-capability",
         "--history-pages", "4", "--evidence-limit", "8",
-        "--evidence-offset", "16",
+        "--evidence-offset", "16", "--session-event-limit", "32",
+        "--session-event-before-sequence", "128",
     ]
     request = {
         "grant": token,
@@ -5823,7 +5824,7 @@ def test_environmental_capability_projection_is_bounded_session_read_and_observe
     assert json.loads(response["result"]["stdout"]) == {
         "status": "ready", "observation_count": 1,
     }
-    assert calls[0][-10:] == argv
+    assert calls[0][-len(argv):] == argv
     assert EnvironmentRPCServer._request_session(argv) == "ses_environment"
     assert EnvironmentRPCServer._read_only_operation_identity(argv) == (
         "environmental-capability.projection"
@@ -5839,6 +5840,14 @@ def test_environmental_capability_projection_is_bounded_session_read_and_observe
          "--history-pages", "5"],
         ["projections", "ses_environment", "--interpret", "environmental-capability",
          "--evidence-limit", "33"],
+        ["projections", "ses_environment", "--interpret", "environmental-capability",
+         "--session-event-limit", "257"],
+        ["projections", "ses_environment", "--interpret", "environmental-capability",
+         "--session-event-limit", "0"],
+        ["projections", "ses_environment", "--interpret", "environmental-capability",
+         "--session-event-before-sequence", "0"],
+        ["projections", "ses_environment", "--interpret", "environmental-capability",
+         "--session-event-before-sequence", "2147483648"],
         ["projections", "ses_environment", "--interpret", "environmental-capability",
          "--apply", "write-projection"],
         ["projections", "ses_other", "--interpret", "environmental-capability"],

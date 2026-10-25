@@ -70,6 +70,8 @@ def test_environmental_capability_maps_to_one_bounded_read_projection() -> None:
             "history_pages": 4,
             "evidence_offset": 16,
             "evidence_limit": 8,
+            "session_event_limit": 32,
+            "session_event_before_sequence": 128,
         },
         context,
         "mncs-environment",
@@ -79,7 +81,8 @@ def test_environmental_capability_maps_to_one_bounded_read_projection() -> None:
     assert argv == [
         "projections", "ses_selected", "--interpret", "environmental-capability",
         "--history-pages", "4", "--evidence-limit", "8",
-        "--evidence-offset", "16",
+        "--evidence-offset", "16", "--session-event-limit", "32",
+        "--session-event-before-sequence", "128",
     ]
 
     default_argv, _selected = _build_argv(
@@ -102,6 +105,20 @@ def test_environmental_capability_maps_to_one_bounded_read_projection() -> None:
         _build_argv(
             "environmental_capability",
             {"session_id": "ses_selected", "evidence_limit": 33},
+            context,
+            "mncs-environment",
+        )
+    with pytest.raises(ValueError, match="session_event_limit"):
+        _build_argv(
+            "environmental_capability",
+            {"session_id": "ses_selected", "session_event_limit": 257},
+            context,
+            "mncs-environment",
+        )
+    with pytest.raises(ValueError, match="session_event_before_sequence"):
+        _build_argv(
+            "environmental_capability",
+            {"session_id": "ses_selected", "session_event_before_sequence": 0},
             context,
             "mncs-environment",
         )
@@ -134,13 +151,19 @@ def test_environmental_capability_bridge_accepts_bounded_history_pages(
 
     response = bridge.invoke(
         "mncs-environment", "environmental_capability",
-        {"history_pages": 4, "evidence_limit": 32},
+        {
+            "history_pages": 4, "evidence_limit": 32,
+            "session_event_limit": 32,
+            "session_event_before_sequence": 128,
+        },
     )
 
     assert response["ok"] is True
     assert captured[0]["argv"] == [
         "projections", "ses_selected", "--interpret", "environmental-capability",
         "--history-pages", "4", "--evidence-limit", "32",
+        "--session-event-limit", "32",
+        "--session-event-before-sequence", "128",
     ]
 
 

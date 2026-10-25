@@ -198,6 +198,7 @@ def _build_argv(
         "campaign_state": {"session_id", "evidence_offset", "evidence_limit"},
         "environmental_capability": {
             "session_id", "history_pages", "evidence_offset", "evidence_limit",
+            "session_event_before_sequence", "session_event_limit",
         },
         "artifact_read": {"session_id", "capability", "binding_id", "path"},
         "store_generation": {"session_id"},
@@ -552,6 +553,18 @@ def _build_argv(
             if type(number) is not int or not 0 <= number <= 2**31 - 1:
                 raise ValueError("evidence_offset is outside its supported range")
             argv.extend(["--evidence-offset", str(number)])
+        if "session_event_limit" in values:
+            number = values["session_event_limit"]
+            if type(number) is not int or not 1 <= number <= 256:
+                raise ValueError("session_event_limit is outside its supported range")
+            argv.extend(["--session-event-limit", str(number)])
+        if "session_event_before_sequence" in values:
+            number = values["session_event_before_sequence"]
+            if type(number) is not int or not 1 <= number <= 2**31 - 1:
+                raise ValueError(
+                    "session_event_before_sequence is outside its supported range"
+                )
+            argv.extend(["--session-event-before-sequence", str(number)])
         return argv, True
     if operation == "artifact_read":
         capability = _string(values.get("capability"), "capability", max_length=256)
@@ -1018,8 +1031,9 @@ class LocalEnvironmentMCP:
                     "expected_authority_revision", "approval_reference",
                     "checkout_path", "workspace_checkout",
                     "history_pages", "evidence_offset", "evidence_limit",
+                    "session_event_before_sequence", "session_event_limit",
                     "capability", "binding_id", "path",
-                    "request_file", "input_artifact", "call", "worktree",
+                    "request_file", "input_artifact", "call",
                     *SESSION_SELECTOR_FIELDS,
                 })
                 selector_values = values
