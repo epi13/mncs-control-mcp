@@ -448,6 +448,67 @@ def test_scope_grant_rpc_requires_exact_campaign_approval_and_selected_project_g
     assert raised.value.code == "ENVIRONMENT_WORKSPACE_ESCAPE"
 
 
+def test_environment_cli_uses_verified_source_not_callers_stale_package(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = tmp_path / "mncs-environment"
+    selected_source = tmp_path / "selected-environment-main"
+    stale_package = project / "mncs_env"
+    selected_package = selected_source / "mncs_env"
+    stale_package.mkdir(parents=True)
+    selected_package.mkdir(parents=True)
+    (stale_package / "__init__.py").write_text("", encoding="utf-8")
+    (selected_package / "__init__.py").write_text("", encoding="utf-8")
+    (stale_package / "cli.py").write_text(
+        "def main():\n    print('stale-project-package')\n    return 0\n",
+        encoding="utf-8",
+    )
+    (selected_package / "cli.py").write_text(
+        "def main():\n    print(__file__)\n    return 0\n",
+        encoding="utf-8",
+    )
+    project.mkdir(exist_ok=True)
+    grant = _GrantRecord(
+        grant_id="environment-source-precedence",
+        principal_id="principal-test",
+        host_root=project,
+        sandbox_root=str(project),
+        scope="project",
+        uid=os.getuid(),
+        expires_at=time.monotonic() + 60,
+        token_file=tmp_path / "grant",
+        bound_session_id="ses_source_precedence",
+    )
+    server = EnvironmentRPCServer(
+        ControlConfig(
+            workspace_root=tmp_path,
+            sandbox_home=tmp_path / "home",
+            environment_rpc_socket=tmp_path / "rpc" / "environment.sock",
+        ),
+        environment_service=SimpleNamespace(
+            state_dir=tmp_path / "state",
+            environment_path=selected_source,
+        ),
+        policy=object(),
+    )
+    monkeypatch.setattr(server, "_grant", lambda _request, _peer: grant)
+    monkeypatch.setattr(server, "_authorize_session", lambda *_args: None)
+
+    response = server._dispatch_once(
+        {
+            "cwd": str(project),
+            "argv": ["inspect", "ses_source_precedence"],
+            "request_id": "req_environment_source_precedence",
+        },
+        peer_uid=grant.uid,
+    )
+
+    assert response["ok"] is True
+    stdout = response["result"]["stdout"]
+    assert str(selected_package / "cli.py") in stdout
+    assert "stale-project-package" not in stdout
+
+
 def test_scope_grant_forwards_only_control_verified_registered_worktree(
     tmp_path: Path,
 ) -> None:
@@ -5709,7 +5770,7 @@ def test_store_verify_rpc_is_session_bound_and_read_only(
         "generation": 7, "objects_verified": 43000,
     }
     assert len(calls) == 1
-    assert calls[0][0][3:7] == [
+    assert calls[0][0][4:8] == [
         "--state-dir", str(Environment.state_dir), "--persistence", "store",
     ]
     assert calls[0][0][-4:] == [
@@ -6299,7 +6360,7 @@ def test_workspace_entry_attaches_capsule_after_readiness_block(tmp_path: Path, 
     real_run = subprocess.run
 
     def run_with_blocked_entry(command, *args, **kwargs):
-        if isinstance(command, list) and len(command) > 2 and command[1] == "-c":
+        if isinstance(command, list) and len(command) > 2 and command[2] == "-c":
             return subprocess.CompletedProcess(
                 command, 5, stdout=json.dumps(entry_result), stderr="",
             )

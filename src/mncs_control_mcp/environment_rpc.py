@@ -4672,7 +4672,13 @@ class EnvironmentRPCServer:
             "MNCS_ENV_AUTH_PRINCIPAL_ID": record.principal_id,
             "MNCS_ENV_RPC_REQUEST_ID": request_id,
         }
-        host_argv = [sys.executable, "-c", program, "--state-dir",
+        # A ``-c`` process normally prepends its working directory to
+        # ``sys.path``. That directory is the caller's project checkout and
+        # may contain a stale ``mncs_env`` package which shadows the clean
+        # main checkout selected above. Keep the caller's cwd for Environment
+        # path semantics, but exclude it from import resolution so PYTHONPATH
+        # loads the verified source.
+        host_argv = [sys.executable, "-P", "-c", program, "--state-dir",
                      str(self.environment_service.state_dir), "--persistence", "store", *argv]
         try:
             completed = subprocess.run(
