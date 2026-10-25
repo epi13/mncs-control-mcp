@@ -149,6 +149,13 @@ verified from the current `/proc` tree. A hidden working directory is not
 treated as proof that an owner is gone; an uncorrelated unreadable process
 still makes recovery incomplete and fails closed.
 
+For an exact configured operator-approved recovery only, Control can classify
+the detached, user-systemd-managed Codex app-server as a resident shared agent
+host. Its PID and start time are preserved in the v3 recovery observation. This
+does not exempt Environment client processes, their active descendants,
+repository workers, jobs, active owner requests, or user services. Automatic
+same-principal recovery cannot use this exception.
+
 ## Workspace and scope model
 
 The sandbox also aliases the host workspace path to `/workspace`. Project

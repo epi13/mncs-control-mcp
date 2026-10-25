@@ -2596,6 +2596,11 @@ class EnvironmentRPCServer:
             "recovery_basis", "operator-approved-config",
         ))
         approval_reference = recovery_request.get("approval_reference")
+        allow_persistent_codex_daemon = (
+            recovery_basis == "operator-approved-config"
+            and isinstance(approval_reference, str)
+            and bool(approval_reference.strip())
+        )
         owner_consumer_id = str(recovery_request["owner_consumer_id"])
         liveness_request_id = current_request_id or request_id
 
@@ -2692,6 +2697,7 @@ class EnvironmentRPCServer:
                 current_request_id=liveness_request_id,
                 current_grant_id=record.grant_id,
                 checkout=source_checkout,
+                allow_persistent_codex_daemon=allow_persistent_codex_daemon,
             )
             if not before["process_complete"] or not before["services_complete"]:
                 raise ControlError(
@@ -2727,6 +2733,7 @@ class EnvironmentRPCServer:
                 current_request_id=liveness_request_id,
                 current_grant_id=record.grant_id,
                 checkout=source_checkout,
+                allow_persistent_codex_daemon=allow_persistent_codex_daemon,
             )
             if (not after["process_complete"] or not after["services_complete"]
                     or after["jobs"] or after["grants"] or after["active_requests"]
@@ -2744,7 +2751,7 @@ class EnvironmentRPCServer:
                 )
 
             host_observation: dict[str, Any] = {
-                "schema_version": "mncs.control.host-execution-liveness/2",
+                "schema_version": "mncs.control.host-execution-liveness/3",
                 "observed_at": datetime.now(UTC).isoformat(timespec="seconds"),
                 "host_boot_id": str(after["host_boot_id"]),
                 "control_owner_pid": os.getpid(),
@@ -2763,6 +2770,9 @@ class EnvironmentRPCServer:
                 "matching_processes": after["processes"],
                 "matching_user_services": after["services"],
                 "resident_services": after["resident_services"],
+                "operator_approved_resident_agent_hosts": after[
+                    "process_diagnostics"
+                ].get("operator_approved_resident_agent_hosts", []),
                 "complete": True,
             }
             if not isinstance(host_observation["control_owner_start_ticks"], str):
@@ -2771,7 +2781,7 @@ class EnvironmentRPCServer:
                     "Control host process identity could not be established",
                 )
             authorization: dict[str, Any] = {
-                "schema_version": "mncs.environment.control-owner-claim-recovery/2",
+                "schema_version": "mncs.environment.control-owner-claim-recovery/3",
                 "campaign_id": campaign_id,
                 "requester_session_id": session_id,
                 "requester_principal_id": record.principal_id,
@@ -3310,6 +3320,70 @@ class EnvironmentRPCServer:
             for index in range(len(argv) - 1)
         )
 
+    def _is_managed_codex_app_server(
+        self, pid: int, expected_start_ticks: str, *,
+        repository_root: Path, selected_checkout: Path | None,
+    ) -> bool:
+        """Identify only the detached Codex app-server shared across sessions.
+
+        This process hosts multiple conversations and persists after an
+        Environment session ends. It is not itself a repository writer; live
+        Environment clients, their children, project jobs, and user services
+        remain independently visible to claim-recovery liveness checks.
+        """
+        if self._proc_start_ticks(pid) != expected_start_ticks:
+            return False
+        entry = Path("/proc") / str(pid)
+        try:
+            argv = [
+                part.decode("utf-8", errors="replace")
+                for part in (entry / "cmdline").read_bytes().split(b"\x00")
+                if part
+            ]
+            executable = Path(os.readlink(entry / "exe")).resolve(strict=False)
+            cwd = Path(os.readlink(entry / "cwd")).resolve(strict=False)
+            status = (entry / "status").read_text(encoding="utf-8")
+            parent_pid = int(next(
+                line.split()[1] for line in status.splitlines()
+                if line.startswith("PPid:")
+            ))
+            parent = Path("/proc") / str(parent_pid)
+            parent_executable = Path(os.readlink(parent / "exe")).resolve(
+                strict=False,
+            )
+            parent_argv = [
+                part.decode("utf-8", errors="replace")
+                for part in (parent / "cmdline").read_bytes().split(b"\x00")
+                if part
+            ]
+            parent_status = (parent / "status").read_text(encoding="utf-8")
+            parent_uid = int(next(
+                line.split()[1] for line in parent_status.splitlines()
+                if line.startswith("Uid:")
+            ))
+        except (OSError, StopIteration, ValueError, IndexError):
+            return False
+        if (parent_uid != os.getuid()
+                or parent_executable.name.casefold() != "systemd"
+                or "--user" not in parent_argv
+                or executable.name.casefold() != "codex"
+                or len(argv) < 4
+                or Path(argv[0]).name.casefold() != "codex"
+                or argv[1] != "app-server"
+                or "--managed-daemon" not in argv
+                or "--listen" not in argv
+                or "unix://" not in argv):
+            return False
+        protected_roots = [repository_root]
+        if selected_checkout is not None:
+            protected_roots.append(selected_checkout)
+        for protected_root in protected_roots:
+            if (cwd == protected_root or protected_root in cwd.parents
+                    or executable == protected_root
+                    or protected_root in executable.parents):
+                return False
+        return True
+
     @staticmethod
     def _looks_like_codex_launcher_wrapper(
         executable: str | None, argv: list[str],
@@ -3394,6 +3468,7 @@ class EnvironmentRPCServer:
         checkout: str | None = None, current_grant_id: str,
         tracked_job_roots: list[dict[str, object]] | None = None,
         current_peer_identity: dict[str, object] | None = None,
+        allow_persistent_codex_daemon: bool = False,
     ) -> tuple[list[dict[str, object]], list[dict[str, object]],
                list[dict[str, object]], int, int, str | None, bool,
                dict[str, object]]:
@@ -3665,10 +3740,26 @@ class EnvironmentRPCServer:
         matched_identities = {
             (item.get("pid"), item.get("start_ticks")) for item in matches
         }
-        matches.extend(
-            item for item in audited_processes
-            if (item.get("pid"), item.get("start_ticks")) not in matched_identities
-        )
+        persistent_agent_hosts: list[dict[str, object]] = []
+        for item in audited_processes:
+            identity = (item.get("pid"), item.get("start_ticks"))
+            if identity in matched_identities:
+                continue
+            if (allow_persistent_codex_daemon
+                    and type(item.get("pid")) is int
+                    and isinstance(item.get("start_ticks"), str)
+                    and self._is_managed_codex_app_server(
+                        int(item["pid"]), str(item["start_ticks"]),
+                        repository_root=repository_root,
+                        selected_checkout=scope_root,
+                    )):
+                persistent_agent_hosts.append({
+                    "pid": int(item["pid"]),
+                    "start_ticks": str(item["start_ticks"]),
+                    "process_kind": "managed-codex-app-server",
+                })
+                continue
+            matches.append(item)
         matches.sort(key=lambda item: int(item["pid"]))
         return (matches, resident_services, excluded_processes,
                 len([item for item in entries if item.name.isdigit()]),
@@ -3682,6 +3773,7 @@ class EnvironmentRPCServer:
                     "unreadable_matches": unreadable_matches,
                     "owner_execution_audit_complete": audit_complete,
                     "owner_execution_audit_rows": audit_row_count,
+                    "operator_approved_resident_agent_hosts": persistent_agent_hosts,
                     "incomplete_reasons": [
                         {"reason": reason, "count": count}
                         for reason, count in sorted(incomplete_counts.items())
@@ -4287,6 +4379,7 @@ class EnvironmentRPCServer:
     def _recovery_liveness_snapshot(
         self, *, owner_session_id: str, repository: str, current_request_id: str,
         current_grant_id: str, checkout: str | None = None,
+        allow_persistent_codex_daemon: bool = False,
     ) -> dict[str, Any]:
         if self.process_manager is None:
             raise ControlError(
@@ -4331,6 +4424,7 @@ class EnvironmentRPCServer:
                 checkout=checkout, current_grant_id=current_grant_id,
                 tracked_job_roots=tracked_job_roots,
                 current_peer_identity=current_peer_identity,
+                allow_persistent_codex_daemon=allow_persistent_codex_daemon,
             )
         )
         services, service_count, services_complete = self._matching_user_services(

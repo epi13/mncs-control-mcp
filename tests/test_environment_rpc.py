@@ -1435,6 +1435,7 @@ def test_recovery_process_inventory_excludes_only_its_current_terminal_tree(
             "unreadable_matches": [],
             "owner_execution_audit_complete": True,
             "owner_execution_audit_rows": 0,
+                "operator_approved_resident_agent_hosts": [],
             "incomplete_reasons": [],
         }
         assert current.pid in excluded_ids
@@ -1837,6 +1838,145 @@ def test_idle_environment_bridge_is_not_treated_as_an_active_writer(
                 process.wait(timeout=3)
 
 
+def test_operator_approved_liveness_only_excludes_managed_codex_daemon(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    server = EnvironmentRPCServer(
+        ControlConfig(
+            workspace_root=tmp_path,
+            sandbox_home=tmp_path / "home",
+            environment_rpc_socket=tmp_path / "rpc" / "environment.sock",
+        ),
+        environment_service=SimpleNamespace(state_dir=tmp_path / "state"),
+        policy=object(),
+        process_manager=SimpleNamespace(
+            claim_recovery_request_root_identities=lambda _grant: [],
+        ),
+    )
+    codex_pid, user_systemd_pid = 77101, 77102
+    proc_root = Path("/proc")
+    root = tmp_path / "mncs-fixture"
+    checkout = root / ".worktrees" / "selected"
+    checkout.mkdir(parents=True)
+    data = {
+        str(proc_root / str(codex_pid) / "cmdline"):
+            b"/opt/codex/codex\x00app-server\x00--listen\x00unix://\x00--managed-daemon\x00",
+        str(proc_root / str(codex_pid) / "status"):
+            f"Name:\tcodex\nPPid:\t{user_systemd_pid}\nUid:\t{os.getuid()}\t{os.getuid()}\t{os.getuid()}\t{os.getuid()}\n",
+        str(proc_root / str(user_systemd_pid) / "cmdline"):
+            b"/usr/lib/systemd/systemd\x00--user\x00",
+        str(proc_root / str(user_systemd_pid) / "status"):
+            f"Name:\tsystemd\nPPid:\t1\nUid:\t{os.getuid()}\t{os.getuid()}\t{os.getuid()}\t{os.getuid()}\n",
+    }
+    original_read_bytes = Path.read_bytes
+    original_read_text = Path.read_text
+    original_readlink = os.readlink
+    codex_cwd = {"path": str(tmp_path)}
+
+    def read_bytes(path: Path) -> bytes:
+        if str(path) in data:
+            return data[str(path)]
+        return original_read_bytes(path)
+
+    def read_text(path: Path, *args: object, **kwargs: object) -> str:
+        if str(path) in data:
+            value = data[str(path)]
+            return value.decode() if isinstance(value, bytes) else value
+        return original_read_text(path, *args, **kwargs)
+
+    def readlink(path: str | os.PathLike[str], *args: object) -> str:
+        selected = os.fspath(path)
+        if selected == f"/proc/{codex_pid}/exe":
+            return "/opt/codex/codex"
+        if selected == f"/proc/{codex_pid}/cwd":
+            return codex_cwd["path"]
+        if selected == f"/proc/{user_systemd_pid}/exe":
+            return "/usr/lib/systemd/systemd"
+        return original_readlink(path, *args)
+
+    monkeypatch.setattr(Path, "read_bytes", read_bytes)
+    monkeypatch.setattr(Path, "read_text", read_text)
+    monkeypatch.setattr(os, "readlink", readlink)
+    monkeypatch.setattr(
+        server, "_proc_start_ticks",
+        lambda pid: "25111" if pid == codex_pid else None,
+    )
+
+    assert server._is_managed_codex_app_server(
+        codex_pid, "25111", repository_root=root, selected_checkout=checkout,
+    )
+    assert not server._is_managed_codex_app_server(
+        codex_pid, "stale-start", repository_root=root,
+        selected_checkout=checkout,
+    )
+    data[str(proc_root / str(codex_pid) / "cmdline")] = (
+        b"/opt/codex/codex\x00app-server\x00--listen\x00unix://\x00"
+    )
+    assert not server._is_managed_codex_app_server(
+        codex_pid, "25111", repository_root=root, selected_checkout=checkout,
+    )
+    data[str(proc_root / str(codex_pid) / "cmdline")] += b"--managed-daemon\x00"
+    codex_cwd["path"] = str(checkout)
+    assert not server._is_managed_codex_app_server(
+        codex_pid, "25111", repository_root=root, selected_checkout=checkout,
+    )
+
+
+def test_claim_recovery_records_only_operator_approved_resident_agent_hosts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = "mncs-fixture"
+    (tmp_path / repository).mkdir()
+    server = EnvironmentRPCServer(
+        ControlConfig(
+            workspace_root=tmp_path,
+            sandbox_home=tmp_path / "home",
+            environment_rpc_socket=tmp_path / "rpc" / "environment.sock",
+        ),
+        environment_service=SimpleNamespace(state_dir=tmp_path / "state"),
+        policy=object(),
+        process_manager=SimpleNamespace(
+            claim_recovery_request_root_identities=lambda _grant: [],
+        ),
+    )
+    audited = [{
+        "pid": 77103, "ppid": 1, "start_ticks": "25112", "comm": "codex",
+        "reason": "former-session-authenticated-client",
+    }]
+    original_iterdir = Path.iterdir
+    monkeypatch.setattr(
+        Path, "iterdir",
+        lambda path: iter([]) if path == Path("/proc") else original_iterdir(path),
+    )
+    monkeypatch.setattr(
+        server, "_audited_session_processes",
+        lambda **_kwargs: (audited, True, 1, {(77103, "25112")}),
+    )
+    monkeypatch.setattr(
+        server, "_is_managed_codex_app_server",
+        lambda pid, ticks, **_kwargs: pid == 77103 and ticks == "25112",
+    )
+
+    strict = server._host_process_inventory(
+        owner_session_id="ses_old", repository=repository,
+        current_grant_id="grant", current_peer_identity=None,
+    )
+    assert [item["pid"] for item in strict[0]] == [77103]
+    assert strict[7]["operator_approved_resident_agent_hosts"] == []
+
+    approved = server._host_process_inventory(
+        owner_session_id="ses_old", repository=repository,
+        current_grant_id="grant", current_peer_identity=None,
+        allow_persistent_codex_daemon=True,
+    )
+    assert approved[0] == []
+    assert approved[7]["operator_approved_resident_agent_hosts"] == [{
+        "pid": 77103,
+        "start_ticks": "25112",
+        "process_kind": "managed-codex-app-server",
+    }]
+
+
 def test_audit_identity_from_prior_host_boot_cannot_keep_a_reused_pid_live(
     tmp_path: Path,
 ) -> None:
@@ -2061,6 +2201,7 @@ def test_host_process_inventory_explains_an_incomplete_request_tree(
         "unreadable_matches": [],
         "owner_execution_audit_complete": True,
         "owner_execution_audit_rows": 0,
+            "operator_approved_resident_agent_hosts": [],
         "incomplete_reasons": [
             {"reason": "current_request_process_tree_incomplete", "count": 1},
             {"reason": "request_process_root_unreadable", "count": 1},
@@ -2752,6 +2893,9 @@ def test_same_operator_recovery_uses_host_liveness_and_narrows_scope(
         "host_boot_id": "00000000-0000-0000-0000-000000000000",
         "process_complete": True, "services": [], "user_units_examined": 3,
         "services_complete": True, "resident_services": [],
+        "process_diagnostics": {
+            "operator_approved_resident_agent_hosts": [],
+        },
     }
     liveness_calls: list[dict[str, object]] = []
 
@@ -2785,9 +2929,10 @@ def test_same_operator_recovery_uses_host_liveness_and_narrows_scope(
         call["current_request_id"] == "req_outer_environment_rpc"
         for call in liveness_calls
     )
+    assert all(call["allow_persistent_codex_daemon"] is False for call in liveness_calls)
     assert service.recover_claim.call_args.kwargs["request_id"] == "req_auto_recover_scope"
     authorization = service.recover_claim.call_args.kwargs["authorization"]
-    assert authorization["schema_version"] == "mncs.environment.control-owner-claim-recovery/2"
+    assert authorization["schema_version"] == "mncs.environment.control-owner-claim-recovery/3"
     assert authorization["recovery_basis"] == "same-principal-host-liveness"
     assert authorization["operator_approval_reference"] is None
     assert authorization["owner_scope"] == owner_scope
@@ -2795,6 +2940,31 @@ def test_same_operator_recovery_uses_host_liveness_and_narrows_scope(
     assert authorization["host_observation"]["complete"] is True
     process_manager.begin_claim_recovery.assert_called_once_with(repository)
     process_manager.end_claim_recovery.assert_called_once_with(repository)
+
+    server._perform_claim_recovery(
+        {
+            "session_id": "ses_new_owner", "campaign_id": "cmp_new_compiler",
+            "claim_id": claim["claim_id"], "repository": repository,
+            "owner_session_id": claim["session_id"],
+            "owner_consumer_id": claim["consumer_id"],
+            "expected_version": claim["version"],
+            "owner_scope": owner_scope, "target_scope": target_scope,
+            "recovery_basis": "operator-approved-config",
+            "approval_reference": "user-approval:exact-fixture-recovery",
+            "reason": "operator approved this exact claim transition",
+        },
+        record=record,
+        request_id="req_operator_recover_scope",
+        current_request_id="req_outer_environment_rpc",
+    )
+    assert all(
+        call["allow_persistent_codex_daemon"] is True
+        for call in liveness_calls[2:]
+    )
+    operator_authorization = service.recover_claim.call_args.kwargs["authorization"]
+    assert operator_authorization["recovery_basis"] == "operator-approved-config"
+    assert process_manager.begin_claim_recovery.call_count == 2
+    assert process_manager.end_claim_recovery.call_count == 2
 
 
 def test_rpc_accepts_bounded_campaign_metadata_and_rejects_oversized_arguments(
