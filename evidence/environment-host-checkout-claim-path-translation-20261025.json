@@ -1,0 +1,72 @@
+{
+  "schema_version": "mncs.control.evidence/1",
+  "evidence_id": "ev_control_environment_host_checkout_claim_path_translation_20261025",
+  "recorded_at": "2026-10-25T17:10:39Z",
+  "campaign_id": "cmp_environment_capability_intelligence_continuation_20261025",
+  "session_id": "ses_71fd38cce3a4ad5c",
+  "owner_repository": "mncs-control-mcp",
+  "purpose": "Remove the host-path translation failure between Environment's registered checkout identity and Control's project-scoped worktree claim interface.",
+  "authorization": {
+    "scope": "mncs-control-mcp",
+    "basis": "User-authorized environmental capability campaign; implementation is limited to path translation for existing project-scoped worktree authority."
+  },
+  "observation": {
+    "source": "Authenticated Environment claim requests and Control path-mapping responses during the campaign.",
+    "facts": [
+      "Environment supplied a registered checkout as an absolute host path under the configured Projects workspace.",
+      "Control rejected that host path before claim processing because its client path adapter accepted only /workspace paths.",
+      "The equivalent /workspace path reached ownership checks, where a separate live claim prevented acquisition of the overlapping Environment files."
+    ],
+    "interpretation": "The host-path rejection was an interface mismatch. The later live-claim conflict is an ownership condition and is not evidence that path translation should bypass claim policy.",
+    "historical_cause_of_claim_conflict": "A live owner was observed; no inference is made about its broader campaign status."
+  },
+  "implementation": {
+    "base_main": "46e700301d1e96a6e33821078c5ea7cc556dc9a6",
+    "branch": "campaign/control-host-worktree-path-alias-20261025",
+    "commit": "7b631d704724520e05a956a8c58fe6a92c051c70",
+    "files": {
+      "src/mncs_control_mcp/environment_rpc.py": "719c616581757b1443b0ac98fc63f509cdc89538e04d7e1fc547e7a8460b12ab",
+      "tests/test_environment_rpc.py": "346767ed923da806e77f877cd08b9103d9e4b098baca3d1b5f722139ee7d9b8a",
+      "README.md": "83052cee1e83732aff730b3ec3a747c55f965531dbe74335ae361c650f2af5f0"
+    },
+    "behavior": [
+      "Only worktree-scoped path mapping recognizes an absolute host path beneath the configured workspace and maps it through /workspace.",
+      "The project grant must identify an immediate workspace project with the matching sandbox root.",
+      "Workspace containment, symbolic-link rejection, registered-checkout validation, and existing claim ownership checks remain in force.",
+      "Requests without worktree authority continue to reject cross-project paths."
+    ]
+  },
+  "verification": {
+    "result": "PASS",
+    "tests": [
+      {
+        "command": "python3 -m pytest -q tests/test_environment_rpc.py -k 'host_worktree_paths_map_through_the_project_sandbox_without_widening or client_parent_paths_are_allowed_only_within_the_project_grant or workspace_relative_scope_checkout_rejects_escape_and_unregistered_path or path_claim_recovery_keeps_requested_scope_and_ignores_disjoint_claims or ordinary_claim_acquisition_builds_same_operator_worktree_recovery'",
+        "result": "5 passed"
+      },
+      {
+        "command": "python3 -m ruff check src/mncs_control_mcp/environment_rpc.py tests/test_environment_rpc.py",
+        "result": "passed"
+      },
+      {
+        "command": "python3 -m compileall -q src/mncs_control_mcp/environment_rpc.py",
+        "result": "passed"
+      },
+      {
+        "command": "git diff --check",
+        "result": "passed"
+      }
+    ]
+  },
+  "delivery": {
+    "repository": "mncs-control-mcp",
+    "branch": "main",
+    "head": "7b631d704724520e05a956a8c58fe6a92c051c70",
+    "remote_head": "7b631d704724520e05a956a8c58fe6a92c051c70",
+    "status": "pushed"
+  },
+  "limitations": [
+    "Verification proves path mapping and preserved checks; it does not claim a live worktree acquisition succeeded.",
+    "The observed overlapping claim remained with its live owner and was not acquired, released, transferred, or overridden.",
+    "This change does not relax repository grants or claim ownership policy."
+  ]
+}
