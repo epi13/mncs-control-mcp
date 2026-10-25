@@ -451,7 +451,7 @@ class EnvironmentService:
         try:
             return _load_flat_package(PACKAGE, self.environment_path,
                                       ("sessions", "session_store", "entry", "claims",
-                                       "campaign_selector"))
+                                       "campaign_selector", "selection"))
         except ControlError:
             raise
         except Exception as exc:
@@ -1041,12 +1041,14 @@ class EnvironmentService:
             # snapshot is still loaded and checked against canonical Store
             # state below, including principal, checkout, project-link, and
             # claim ownership. This keeps exact continuation from reopening
-            # every historical session on each request.
-            entry_selection = getattr(
-                getattr(pkg, "entry", None), "selection", None,
-            )
-            select_sessions = getattr(entry_selection, "select", None)
-            if campaign_id is not None and callable(select_sessions):
+            # every historical session on each request. A task selector with
+            # no exact session retains the full scan because it must detect
+            # conflicting bindings across project-linked campaign contexts.
+            session_selection = getattr(pkg, "selection", None)
+            select_sessions = getattr(session_selection, "select", None)
+            if (campaign_id is not None
+                    and (task_identity is None or exact_session_id is not None)
+                    and callable(select_sessions)):
                 campaign_selector = {
                     "control_campaign_continuation": 1,
                     "campaign_identity": campaign_id,

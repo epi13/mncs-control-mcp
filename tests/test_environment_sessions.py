@@ -814,7 +814,8 @@ def test_campaign_continuation_returns_project_scoped_duplicate_capsules(tmp_pat
             if record.get("status") == "held"
         }),
         sessions=SimpleNamespace(Session=SimpleNamespace(open=lambda **kwargs: Session(kwargs["session_id"]))),
-        entry=SimpleNamespace(selection=Selection),
+        entry=SimpleNamespace(),
+        selection=Selection,
     )
     service._pkg = lambda: pkg
     service._store = lambda _pkg: store
