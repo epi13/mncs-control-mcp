@@ -728,11 +728,15 @@ def test_campaign_continuation_returns_project_scoped_duplicate_capsules(tmp_pat
 
     class Store:
         closed = False
+        list_sessions_calls = 0
+        loaded_sessions = []
 
         def list_sessions(self):
+            type(self).list_sessions_calls += 1
             return list(snapshots)
 
         def load_snapshot(self, session_id: str):
+            type(self).loaded_sessions.append(session_id)
             return snapshots.get(session_id)
 
         def read_claims(self):
@@ -795,12 +799,22 @@ def test_campaign_continuation_returns_project_scoped_duplicate_capsules(tmp_pat
             }}
 
     store = Store()
+    selection_calls = []
+
+    class Selection:
+        @staticmethod
+        def select(_store, selector, matches):
+            selection_calls.append(selector)
+            return [session_id for session_id, value in snapshots.items()
+                    if matches(value)]
+
     pkg = SimpleNamespace(
         claims=SimpleNamespace(active_claims=lambda records: {
             record["claim_id"]: record for record in records
             if record.get("status") == "held"
         }),
         sessions=SimpleNamespace(Session=SimpleNamespace(open=lambda **kwargs: Session(kwargs["session_id"]))),
+        entry=SimpleNamespace(selection=Selection),
     )
     service._pkg = lambda: pkg
     service._store = lambda _pkg: store
@@ -868,6 +882,8 @@ def test_campaign_continuation_returns_project_scoped_duplicate_capsules(tmp_pat
     assert discovered["status"] == "ambiguous"
     assert discovered["campaign_id"] == "campaign-1"
 
+    Store.loaded_sessions.clear()
+    list_sessions_calls_before_exact = Store.list_sessions_calls
     exact = service.campaign_continuation(
         "mncs-control-mcp", session_id="ses_first",
     )
@@ -876,6 +892,22 @@ def test_campaign_continuation_returns_project_scoped_duplicate_capsules(tmp_pat
     assert exact["selected_session_id"] == "ses_first"
     assert exact["selection_basis"] == "authenticated-exact-session-link"
     assert [item["session_id"] for item in exact["continuations"]] == ["ses_first"]
+    assert Store.list_sessions_calls == list_sessions_calls_before_exact
+    assert "ses_other_campaign" not in Store.loaded_sessions
+    assert selection_calls[-1] == {
+        "control_campaign_continuation": 1,
+        "campaign_identity": "campaign-1",
+        "lifecycle": "nonterminal",
+    }
+
+    foreign_duplicate = snapshot("ses_foreign_duplicate", version=1)
+    foreign_duplicate["authenticated_principal_id"] = "principal-foreign"
+    snapshots["ses_foreign_duplicate"] = foreign_duplicate
+    with pytest.raises(ControlError) as foreign_campaign_owner:
+        service.campaign_continuation(
+            "mncs-control-mcp", session_id="ses_first",
+        )
+    assert foreign_campaign_owner.value.code == "ENVIRONMENT_AUTHORITY_DENIED"
 
     with pytest.raises(ControlError) as selector_conflict:
         service.campaign_continuation(

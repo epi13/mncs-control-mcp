@@ -1034,7 +1034,46 @@ class EnvironmentService:
                     if isinstance(recovered_checkout, dict):
                         working_checkout = recovered_checkout
 
-            session_ids = store.list_sessions()
+            # An explicit campaign identity is already known before the
+            # continuation scan. Reuse Environment's recoverable selection
+            # projection to enumerate only that campaign's nonterminal
+            # snapshots. The projection is only an index: each returned
+            # snapshot is still loaded and checked against canonical Store
+            # state below, including principal, checkout, project-link, and
+            # claim ownership. This keeps exact continuation from reopening
+            # every historical session on each request.
+            entry_selection = getattr(
+                getattr(pkg, "entry", None), "selection", None,
+            )
+            select_sessions = getattr(entry_selection, "select", None)
+            if campaign_id is not None and callable(select_sessions):
+                campaign_selector = {
+                    "control_campaign_continuation": 1,
+                    "campaign_identity": campaign_id,
+                    "lifecycle": "nonterminal",
+                }
+
+                def is_campaign_continuation(snapshot: dict[str, Any]) -> bool:
+                    campaign = snapshot.get("campaign")
+                    return bool(
+                        isinstance(campaign, dict)
+                        and campaign.get("identity") == campaign_id
+                        and snapshot.get("lifecycle") not in _TERMINAL_LIFECYCLES
+                    )
+
+                try:
+                    session_ids = select_sessions(
+                        store, campaign_selector, is_campaign_continuation,
+                    )
+                except ValueError as error:
+                    # The shared selection index has a bounded workspace
+                    # inventory. Preserve the existing continuation bound
+                    # and behavior when a larger workspace cannot use it.
+                    if str(error) != "session selection exceeds bounded index":
+                        raise
+                    session_ids = store.list_sessions()
+            else:
+                session_ids = store.list_sessions()
             if len(session_ids) > 10000:
                 raise ControlError(
                     "ENVIRONMENT_LOOKUP_LIMIT",
