@@ -119,10 +119,12 @@ verification capability already bound to that Environment session, using only
 the fixed arguments declared by the project and the selected project's authority.
 The operation list can grow without changing the MCP tool schema. If continuation
 reports multiple campaigns, pass the campaign ID already named by the requested
-work. The bridge selects a session only when the returned campaign has exactly
-one session; otherwise it returns bounded campaign choices without mutation.
-Any session-scoped operation may include `campaign_id` or `task_identity` to
-reselect through Control after a fresh MCP process starts; the caller does not
+work. When a campaign has duplicate continuations or the local context was lost,
+pass the exact `session_id`; Control reselects it only after validating its
+principal, project link, checkout, lifecycle, and overlapping claims. A task
+identity remains available for a previously bound task. Any session-scoped
+operation may include `session_id`, `campaign_id`, or `task_identity` to reselect
+through Control after a fresh MCP process starts; the caller does not
 need to reuse an in-memory session ID or depend on a prior connector process.
 
 The authenticated Environment subprocess keeps its configured Environment
