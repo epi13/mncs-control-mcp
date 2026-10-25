@@ -4492,6 +4492,8 @@ class EnvironmentRPCServer:
                 return
             worktree_values: list[str] = []
             branch_values: list[str] = []
+            path_values: list[str] = []
+            paths_option_seen = False
             for index, item in enumerate(argv):
                 if item == "--worktree" and index + 1 < len(argv):
                     worktree_values.append(argv[index + 1])
@@ -4501,7 +4503,27 @@ class EnvironmentRPCServer:
                     branch_values.append(argv[index + 1])
                 elif item.startswith("--branch="):
                     branch_values.append(item.partition("=")[2])
+                elif item == "--paths":
+                    if paths_option_seen:
+                        return
+                    paths_option_seen = True
+                    path_index = index + 1
+                    while path_index < len(argv) and not argv[path_index].startswith("--"):
+                        path_values.append(argv[path_index])
+                        path_index += 1
+                elif item.startswith("--paths="):
+                    if paths_option_seen:
+                        return
+                    paths_option_seen = True
+                    path_values.append(item.partition("=")[2])
             if len(worktree_values) > 1 or len(branch_values) > 1:
+                return
+            if paths_option_seen and (
+                not path_values or len(path_values) > 64
+                or any(not value for value in path_values)
+            ):
+                # An empty or malformed path request must never widen into a
+                # whole-worktree recovery candidate.
                 return
 
             if worktree_values:
@@ -4539,6 +4561,18 @@ class EnvironmentRPCServer:
                     "kind": "worktree",
                     "checkout": verified_path,
                     "branch": verified_branch,
+                    "paths": path_values if paths_option_seen else None,
+                    "exclusive": False,
+                }, repository)
+            elif paths_option_seen:
+                # Preserve the caller's exact path scope while evaluating
+                # recovery. Widening it to the selected worktree makes
+                # unrelated path claims look like overlaps and can strand a
+                # legitimate narrow recovery.
+                target_scope = pkg.claims.normalize_scope({
+                    "kind": "paths",
+                    "branch": branch_values[0] if branch_values else None,
+                    "paths": path_values,
                     "exclusive": False,
                 }, repository)
             else:
