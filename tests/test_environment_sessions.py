@@ -819,6 +819,9 @@ def test_campaign_continuation_returns_project_scoped_duplicate_capsules(tmp_pat
             "mncs-control-mcp", session_id="ses_foreign_exact",
         )
     assert foreign_selector.value.code == "ENVIRONMENT_AUTHORITY_DENIED"
+    next_step = foreign_selector.value.details["next"]
+    assert "explicit handoff" in next_step
+    assert "new campaign_id and task_identity" in next_step
 
 
 def test_owner_scope_grant_links_only_its_exact_campaign_worktree(
@@ -1491,6 +1494,9 @@ def test_campaign_continuation_hides_foreign_session_identity(tmp_path: Path) ->
 
     assert excinfo.value.code == "ENVIRONMENT_AUTHORITY_DENIED"
     assert "ses_foreign_secret" not in repr(excinfo.value.details)
+    next_step = excinfo.value.details["next"]
+    assert "explicit handoff" in next_step
+    assert "new campaign_id and task_identity" in next_step
 
 
 def test_campaign_continuation_requires_authenticated_principal_and_project_scope(

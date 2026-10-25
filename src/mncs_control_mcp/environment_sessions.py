@@ -43,6 +43,11 @@ _CONTINUABLE_LIFECYCLES = frozenset({
     "active", "blocked", "waiting", "checkpointed", "abandoned",
 })
 _TERMINAL_LIFECYCLES = frozenset({"completed", "failed"})
+_FOREIGN_CAMPAIGN_NEXT = (
+    "Request an explicit handoff from the recorded owner to resume this campaign. "
+    "For independent work, enter with a new campaign_id and task_identity, then "
+    "include both selectors on later session-scoped operations."
+)
 _PACKAGE_LOAD_LOCK = threading.RLock()
 _PACKAGE_SOURCE_IDENTITIES: dict[str, tuple[str, str]] = {}
 
@@ -530,7 +535,7 @@ class EnvironmentService:
                     "ENVIRONMENT_AUTHORITY_DENIED",
                     "selected session belongs to a different authenticated principal",
                     details={"session_id": session_id,
-                             "next": "request an explicit handoff from the recorded owner"},
+                             "next": _FOREIGN_CAMPAIGN_NEXT},
                 )
             campaign = snapshot.get("campaign")
             campaign = campaign if isinstance(campaign, dict) else {}
@@ -810,6 +815,7 @@ class EnvironmentService:
                     raise ControlError(
                         "ENVIRONMENT_AUTHORITY_DENIED",
                         "selected Environment session belongs to a different authenticated principal",
+                        details={"next": _FOREIGN_CAMPAIGN_NEXT},
                     )
                 selected_campaign = selected_snapshot.get("campaign")
                 selected_campaign_id = (
@@ -1031,7 +1037,7 @@ class EnvironmentService:
                     "ENVIRONMENT_AUTHORITY_DENIED",
                     "campaign or project work is owned by a different authenticated principal",
                     details={**({"campaign_id": campaign_id} if campaign_id is not None else {}),
-                             "next": "request an explicit handoff from the recorded owner"},
+                             "next": _FOREIGN_CAMPAIGN_NEXT},
                 )
 
             task_selector_projection: dict[str, Any] | None = None
