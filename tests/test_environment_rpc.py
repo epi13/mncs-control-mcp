@@ -5193,7 +5193,7 @@ def test_explicit_campaign_selection_does_not_bind_ambiguous_or_unlinked_rows(
     assert "selected_session_id" not in json.loads(response["result"]["stdout"])
 
 
-def test_project_continuation_refuses_selection_when_other_context_holds_claim(
+def test_project_continuation_selects_unique_context_and_preserves_claim_uncertainty(
     tmp_path: Path,
 ) -> None:
     workspace = tmp_path / "projects"
@@ -5269,10 +5269,11 @@ def test_project_continuation_refuses_selection_when_other_context_holds_claim(
         capsule, record, "mncs-environment",
     )
 
-    assert result["status"] == "context-conflict"
-    assert "selected_session_id" not in result
-    assert result["project_selection"]["status"] == "blocked"
-    assert result["project_selection"]["competing_claim_sessions"] == ["ses_other"]
+    assert result["status"] == "ready"
+    assert result["selected_session_id"] == "ses_project"
+    assert result["coordination"]["claim_observation_status"] == "incomplete"
+    assert result["coordination"]["unresolved_claim_sessions"] == ["ses_other"]
+    assert "handoff" not in result["next"]
 
 
 def test_project_continuation_does_not_select_from_truncated_inventory(
@@ -8764,12 +8765,18 @@ def test_registered_checkout_selects_one_campaign_and_scoped_claims(
             "scope": {"kind": "repository", "repository": "mncs-environment"},
         }),
     ]
-    blocked = server._select_project_campaign_context(
+    selected_with_overlap = server._select_project_campaign_context(
         conflicting, record, "mncs-environment", project_checkout=selected_checkout,
     )
-    assert blocked["status"] == "ambiguous"
-    assert blocked["project_selection"]["status"] == "blocked"
-    assert blocked["project_selection"]["competing_claim_sessions"] == ["ses_two"]
+    assert selected_with_overlap["status"] == "ready"
+    assert selected_with_overlap["selected_session_id"] == "ses_one"
+    assert selected_with_overlap["coordination"]["claim_observation_status"] == "overlap"
+    assert selected_with_overlap["coordination"]["overlapping_claim_sessions"] == [
+        "ses_two",
+    ]
+    assert "does not release or override claims" in (
+        selected_with_overlap["coordination"]["mutation_handling"]
+    )
 
 
 def test_project_root_resolves_unique_verified_nested_continuation(
@@ -9022,8 +9029,10 @@ def test_project_root_resolves_unique_verified_nested_continuation(
             },
         }),
     ])
-    assert overlapping["status"] == "blocked"
-    assert overlapping["project_selection"]["competing_claim_sessions"] == [
+    assert overlapping["status"] == "ready"
+    assert overlapping["selected_session_id"] == "ses_nested_one"
+    assert overlapping["coordination"]["claim_observation_status"] == "overlap"
+    assert overlapping["coordination"]["overlapping_claim_sessions"] == [
         "ses_other_context"
     ]
 

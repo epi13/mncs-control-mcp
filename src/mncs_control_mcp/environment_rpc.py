@@ -6280,8 +6280,10 @@ class EnvironmentRPCServer:
 
         A definition/workspace pair narrows the candidates when available. A
         verified registered checkout is the strongest selector and permits
-        independent worktrees to coexist under one campaign. Claims are then
-        checked by their actual scope so only overlapping writers block.
+        independent worktrees to coexist under one campaign. Claims are
+        retained as coordination evidence; they do not decide whether a
+        uniquely identified session can be selected. Environment checks the
+        current claim state against each exact mutation scope before effects.
         """
         if record.scope not in {"project", "workspace"}:
             return capsule
@@ -6950,23 +6952,15 @@ class EnvironmentRPCServer:
                 getattr(claims_package, "claims", None), "scopes_conflict", None,
             )
             checkout_path = selected_checkout.get("path")
-            if not callable(claims_checker) or not isinstance(checkout_path, str):
-                capsule["project_selection"] = {
-                    "status": "unknown",
-                    "reason": "registered-checkout-claim-scope-checker-unavailable",
+            if isinstance(checkout_path, str):
+                selected_scope = {
+                    "kind": "worktree",
+                    "repository": repository,
+                    "checkout": checkout_path,
+                    "branch": selected_checkout.get("branch"),
+                    "paths": None,
+                    "exclusive": False,
                 }
-                if capsule.get("status") == "ready":
-                    capsule["context_conflict_status"] = "ready"
-                    capsule["status"] = "unknown"
-                return capsule
-            selected_scope = {
-                "kind": "worktree",
-                "repository": repository,
-                "checkout": checkout_path,
-                "branch": selected_checkout.get("branch"),
-                "paths": None,
-                "exclusive": False,
-            }
 
         other_rows = [row for row in rows if row.get("session_id") != selected_session]
         competing_claim_sessions: list[str] = []
@@ -6991,8 +6985,11 @@ class EnvironmentRPCServer:
                 continue
             if not claim_ids and not claims:
                 continue
-            if project_checkout is None:
-                competing_claim_sessions.append(blocker_id)
+            if selected_scope is None or not callable(claims_checker):
+                # Without an exact selected checkout and scope checker this
+                # view cannot establish overlap. Keep the uncertainty visible;
+                # it must not prevent read-only context selection.
+                unknown_claim_sessions.append(blocker_id)
                 continue
             if len(claim_ids) > len(claims):
                 unknown_claim_sessions.append(blocker_id)
@@ -7019,28 +7016,24 @@ class EnvironmentRPCServer:
             elif unknown:
                 unknown_claim_sessions.append(blocker_id)
 
-        if competing_claim_sessions or unknown_claim_sessions:
-            capsule["project_selection"] = {
-                "status": "blocked" if competing_claim_sessions else "unknown",
-                "reason": (
-                    "another-session-holds-an-overlapping-project-claim"
-                    if competing_claim_sessions
-                    else "session-claim-projection-is-incomplete"
-                ),
-                **({"definition_id": selector[0], "workspace_root": selector[1]}
-                   if selector is not None else {}),
-                "competing_claim_sessions": sorted(set(competing_claim_sessions)),
-                "unknown_claim_sessions": sorted(set(unknown_claim_sessions)),
-            }
-            capsule["next"] = (
-                "inspect the listed overlapping project claims and use the owning session's handoff or release protocol; Control did not transfer ownership"
-                if competing_claim_sessions else
-                "refresh the complete claim projection before selecting a project session"
-            )
-            if capsule.get("status") == "ready":
-                capsule["context_conflict_status"] = "ready"
-                capsule["status"] = "blocked" if competing_claim_sessions else "unknown"
-            return capsule
+        overlapping_sessions = sorted(set(competing_claim_sessions))
+        unresolved_sessions = sorted(set(unknown_claim_sessions))
+        capsule["coordination"] = {
+            "claim_observation_status": (
+                "overlap" if overlapping_sessions else
+                "incomplete" if unresolved_sessions else "clear"
+            ),
+            "overlapping_claim_sessions": overlapping_sessions[:8],
+            "overlapping_claim_sessions_count": len(overlapping_sessions),
+            "overlapping_claim_sessions_truncated": len(overlapping_sessions) > 8,
+            "unresolved_claim_sessions": unresolved_sessions[:8],
+            "unresolved_claim_sessions_count": len(unresolved_sessions),
+            "unresolved_claim_sessions_truncated": len(unresolved_sessions) > 8,
+            "mutation_handling": (
+                "session selection does not release or override claims; "
+                "Environment rechecks current claims against each exact mutation scope"
+            ),
+        }
 
         unselected_contexts: dict[tuple[str, str], list[str]] = {}
         for row in other_rows:
