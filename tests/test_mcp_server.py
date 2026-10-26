@@ -8,6 +8,7 @@ import subprocess
 import sys
 import threading
 import time
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -105,6 +106,8 @@ home = {str(tmp_path / "sandbox-home")!r}
 job_state_path = {str(tmp_path / "state" / "jobs.json")!r}
 [server]
 audit_path = {str(tmp_path / "state" / "audit.jsonl")!r}
+[journal]
+projects = ["e2e"]
 [integration]
 environment_rpc_socket = {str(environment_rpc_socket)!r}
 """,
@@ -258,6 +261,72 @@ environment_rpc_socket = {str(environment_rpc_socket)!r}
         assert any(job["job_id"] == job_id for job in listed["jobs"])
         status = client.call("git_status", {"repository": "e2e"})
         assert status["clean"] is False
+        client.call("git_add", {"repository": "e2e", "paths": ["hello.py"]})
+        client.call("git_commit", {"repository": "e2e", "message": "initial evidence fixture"})
+        branches = client.call("git_branches", {"repository": "e2e"})["branches"]
+        target_branch = next(item["name"] for item in branches if item["current"])
+        client.call(
+            "git_create_branch",
+            {"repository": "e2e", "branch": "feature/evidence-transition", "checkout": True},
+        )
+        client.call("file_write", {"path": "e2e/hello.py", "content": "print('merged')\n"})
+        client.call("git_add", {"repository": "e2e", "paths": ["hello.py"]})
+        client.call("git_commit", {"repository": "e2e", "message": "evidence fixture change"})
+        client.call("git_checkout", {"repository": "e2e", "branch": target_branch})
+        merged = client.call(
+            "git_merge",
+            {"repository": "e2e", "source_branch": "feature/evidence-transition"},
+        )
+        assert merged["target_branch"] == target_branch
+        assert merged["source_branch"] == "feature/evidence-transition"
+        assert len(merged["commit"]) == 40
+        client.call(
+            "git_create_branch",
+            {"repository": "e2e", "branch": "feature/conflicting-transition", "checkout": True},
+        )
+        client.call("file_write", {"path": "e2e/hello.py", "content": "print('source conflict')\n"})
+        client.call("git_add", {"repository": "e2e", "paths": ["hello.py"]})
+        client.call("git_commit", {"repository": "e2e", "message": "source conflict fixture"})
+        client.call("git_checkout", {"repository": "e2e", "branch": target_branch})
+        client.call("file_write", {"path": "e2e/hello.py", "content": "print('target conflict')\n"})
+        client.call("git_add", {"repository": "e2e", "paths": ["hello.py"]})
+        client.call("git_commit", {"repository": "e2e", "message": "target conflict fixture"})
+        rejected = client.call(
+            "git_merge",
+            {"repository": "e2e", "source_branch": "feature/conflicting-transition"},
+        )
+        assert rejected["error"] == "GIT_MERGE_FAILED"
+        assert rejected["details"]["merge_aborted"] is True
+        assert rejected["details"]["working_tree_clean"] is True
+        now = datetime.now(UTC)
+        journal = client.call(
+            "journal_context_collect",
+            {
+                "start": (now - timedelta(minutes=2)).isoformat().replace("+00:00", "Z"),
+                "end": (now + timedelta(minutes=1)).isoformat().replace("+00:00", "Z"),
+                "projects": ["e2e"],
+                "include_local_git": False,
+                "include_uncommitted": False,
+                "include_experiments": False,
+                "include_commons": False,
+                "include_fabric_refs": False,
+                "include_forge_refs": False,
+                "page_size": 50,
+            },
+        )
+        merge_evidence = [
+            item for item in journal["items"]
+            if item["source_system"] == "mncs-control-redacted-audit"
+            and "git_merge" in item["summary"]
+        ]
+        successful_merge = next(item for item in merge_evidence if "success=True" in item["summary"])
+        rejected_merge = next(item for item in merge_evidence if "success=False" in item["summary"])
+        assert f"target_branch={target_branch}" in successful_merge["summary"]
+        assert "source_branch=feature/evidence-transition" in successful_merge["summary"]
+        assert f"commit={merged['commit']}" in successful_merge["summary"]
+        assert "source_branch=feature/conflicting-transition" in rejected_merge["summary"]
+        assert "merge_aborted=True" in rejected_merge["summary"]
+        assert "working_tree_clean=True" in rejected_merge["summary"]
         client.call("file_delete", {"path": "e2e", "recursive": True})
         assert not (workspace / "e2e").exists()
     finally:

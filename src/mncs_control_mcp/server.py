@@ -147,16 +147,33 @@ def build_server(config: ControlConfig | None = None) -> Any:
                 for key in ("exit_code", "job_id", "scope", "project", "cwd", "network", "timed_out"):
                     if key in result:
                         details[key] = result[key]
+                # Keep only machine-readable Git outcome facts. Raw Git output
+                # can contain remote URLs, paths, or commit messages and stays
+                # in the bounded tool response rather than the durable audit.
+                outcome_fields = {
+                    "git_merge": ("source_branch", "target_branch", "commit"),
+                    "git_push": ("remote", "branch", "force"),
+                }.get(name, ())
+                for key in outcome_fields:
+                    if key in result:
+                        details[key] = result[key]
             audit.record(name, success=True, duration_seconds=round(time.monotonic() - started, 3), **details)
             LOGGER.info("MCP call completed tool=%s success=true duration=%.3f", name, time.monotonic() - started)
             return bounded
         except ControlError as exc:
+            details = dict(audit_metadata or {})
+            if name == "git_merge" and isinstance(exc.details, dict):
+                # Capture bounded evidence about a rejected merge attempt,
+                # including whether Git restored the original clean tree.
+                for key in ("source_branch", "target_branch", "merge_aborted", "working_tree_clean", "exit_code", "head"):
+                    if key in exc.details:
+                        details[key] = exc.details[key]
             audit.record(
                 name,
                 success=False,
                 error=exc.code,
                 duration_seconds=round(time.monotonic() - started, 3),
-                **(audit_metadata or {}),
+                **details,
             )
             LOGGER.info("MCP call completed tool=%s success=false code=%s", name, exc.code)
             return exc.as_dict()
@@ -413,7 +430,8 @@ def build_server(config: ControlConfig | None = None) -> Any:
 
     @server.tool(name="git_merge", description="Merge one local branch into the checked out branch. Requires a clean worktree and aborts merge conflicts; never resets or force-updates.", annotations=mutate, structured_output=True)
     def git_merge(repository: str, source_branch: str) -> dict[str, object]:
-        return invoke("git_merge", git.merge, repository, source_branch, audit_metadata={"repository": repository, "source_branch": source_branch})  # type: ignore[return-value]
+        project = selected.repositories.get(repository, repository).split("/", 1)[0]
+        return invoke("git_merge", git.merge, repository, source_branch, audit_metadata={"repository": repository, "project": project, "source_branch": source_branch})  # type: ignore[return-value]
 
     @server.tool(name="git_add", description="Stage validated repository-relative paths.", annotations=mutate, structured_output=True)
     def git_add(repository: str, paths: list[str]) -> dict[str, object]:
@@ -433,7 +451,8 @@ def build_server(config: ControlConfig | None = None) -> Any:
 
     @server.tool(name="git_push", description="Push normally through the sandbox and SSH agent; force push is not exposed.", annotations=network_mutate, structured_output=True)
     def git_push(repository: str, remote: str = "origin", branch: str | None = None, set_upstream: bool = False) -> dict[str, object]:
-        return invoke("git_push", git.push, repository, remote, branch, set_upstream=set_upstream, audit_metadata={"repository": repository, "remote": remote, "network": True})  # type: ignore[return-value]
+        project = selected.repositories.get(repository, repository).split("/", 1)[0]
+        return invoke("git_push", git.push, repository, remote, branch, set_upstream=set_upstream, audit_metadata={"repository": repository, "project": project, "remote": remote, "branch": branch, "network": True})  # type: ignore[return-value]
 
     @server.tool(name="git_clone", description="Clone a repository into a new workspace-relative destination.", annotations=network_mutate, structured_output=True)
     def git_clone(url: str, destination: str, branch: str | None = None, depth: int | None = None) -> dict[str, object]:

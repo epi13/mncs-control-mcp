@@ -596,7 +596,24 @@ class JournalContextService:
                 continue
             project = event.get("project") if isinstance(event.get("project"), str) else None
             tool = str(event.get("tool") or "control")
-            items.append(self._item(source_class="control_activity", source_system="mncs-control-redacted-audit", project=project, locator=f"audit:{event.get('timestamp')}:{tool}", occurred_at=event.get("timestamp"), summary=f"{tool} success={event.get('success')} duration={event.get('duration_seconds')} error={event.get('error')}", authority="control-activity-projection", confidence="HIGH", unresolved=event.get("success") is not True, negative=event.get("success") is False))
+            facts: list[str] = []
+            if tool == "git_merge":
+                for key in ("repository", "source_branch", "target_branch", "commit", "observed_head", "merge_aborted", "working_tree_clean"):
+                    value = event.get(key)
+                    if isinstance(value, (str, bool)):
+                        facts.append(f"{key}={value}")
+                exit_code = event.get("exit_code")
+                if type(exit_code) is int:
+                    facts.append(f"exit_code={exit_code}")
+            elif tool == "git_push":
+                for key in ("repository", "remote"):
+                    value = event.get(key)
+                    if isinstance(value, str):
+                        facts.append(f"{key}={value}")
+                branch = event.get("branch")
+                facts.append(f"requested_branch={branch if isinstance(branch, str) else 'unspecified'}")
+            detail = f" evidence={' '.join(facts)}" if facts else ""
+            items.append(self._item(source_class="control_activity", source_system="mncs-control-redacted-audit", project=project, locator=f"audit:{event.get('timestamp')}:{tool}", occurred_at=event.get("timestamp"), summary=f"{tool} success={event.get('success')} duration={event.get('duration_seconds')} error={event.get('error')}{detail}", authority="control-activity-projection", confidence="HIGH", unresolved=event.get("success") is not True, negative=event.get("success") is False))
         try:
             job_payload = self.processes.list()
             jobs = job_payload.get("jobs", []) if isinstance(job_payload, dict) else []

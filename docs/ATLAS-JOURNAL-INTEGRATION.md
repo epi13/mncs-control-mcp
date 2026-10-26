@@ -35,8 +35,16 @@ confidence, unresolved/negative flags, and `untrusted_data=true`.
   references only. Execution is not correctness or conformance.
 - Forge references are limited to existing public integration status and
   Forge-related Control activity. Forge remains the evidence owner.
-- Control activity is a redacted project-scoped chronology. Raw commands,
-  environments, credentials, tokens, and unrelated activity are not exposed.
+- Control activity is a redacted project-scoped chronology. Successful Git
+  merges include validated source/target branch names and the resulting local
+  commit. Rejected merge attempts can include the observed HEAD and whether Git
+  aborted the merge and restored a clean tree. Push records include the remote
+  and explicitly requested branch when supplied. A successful push event
+  records Control's operation result and does not independently assert the
+  remote's resulting object ID. Raw commands, environments, credentials,
+  tokens, and unrelated activity are not exposed.
+  These events are repository-level evidence; Control does not infer an agent
+  objective or identity when the originating operation did not provide one.
 - Local notes are restricted to configured include patterns beneath an allowed
   project root, with byte/item limits and generated/vendor/cache exclusions.
 

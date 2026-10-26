@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from mncs_control_mcp.audit import AuditLog
@@ -154,3 +154,67 @@ def test_status_distinguishes_empty_from_unavailable(tmp_path: Path):
     status = service.status()
     assert status["sources"]["local_repositories"]["status"] == "AVAILABLE"
     assert status["sources"]["control_activity"]["status"] == "AVAILABLE"
+
+
+def test_journal_exposes_git_transition_facts_without_raw_audit_payload(tmp_path: Path):
+    service = make_service(tmp_path)
+    now = datetime.now(UTC)
+    service.audit.record(
+        "git_merge",
+        success=True,
+        duration_seconds=0.2,
+        project="mncs-language",
+        repository="mncs-language",
+        source_branch="feature/native-parser",
+        target_branch="main",
+        commit="a" * 40,
+        command="must-not-be-projected",
+    )
+    service.audit.record(
+        "git_push",
+        success=True,
+        duration_seconds=0.4,
+        project="mncs-language",
+        repository="mncs-language",
+        remote="origin",
+        branch=None,
+        force=False,
+        command="must-not-be-projected",
+    )
+    start = (now - timedelta(seconds=2)).isoformat().replace("+00:00", "Z")
+    end = (now + timedelta(seconds=2)).isoformat().replace("+00:00", "Z")
+
+    events = service.audit.journal_projection(
+        start, end, projects=["mncs-language"], limit=20
+    )["events"]
+    merge = next(event for event in events if event["tool"] == "git_merge")
+    push = next(event for event in events if event["tool"] == "git_push")
+    assert merge["source_branch"] == "feature/native-parser"
+    assert merge["target_branch"] == "main"
+    assert merge["commit"] == "a" * 40
+    assert "command" not in merge
+    assert push["remote"] == "origin"
+    assert push["branch"] is None
+    assert push["force"] is False
+    assert "command" not in push
+
+    bundle = service.collect(
+        start=start,
+        end=end,
+        projects=["mncs-language"],
+        include_local_git=False,
+        include_uncommitted=False,
+        include_experiments=False,
+        include_commons=False,
+        include_fabric_refs=False,
+        include_forge_refs=False,
+        page_size=50,
+    )
+    activity = [item for item in bundle["items"] if item["source_class"] == "control_activity"]
+    merge_item = next(item for item in activity if "git_merge" in str(item["summary"]))
+    push_item = next(item for item in activity if "git_push" in str(item["summary"]))
+    assert "source_branch=feature/native-parser" in merge_item["summary"]
+    assert f"commit={'a' * 40}" in merge_item["summary"]
+    assert "requested_branch=unspecified" in push_item["summary"]
+    assert "commit=" not in push_item["summary"]
+    assert "must-not-be-projected" not in json.dumps(bundle)

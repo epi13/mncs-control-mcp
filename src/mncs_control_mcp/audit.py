@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import threading
 from collections import deque
 from datetime import UTC, datetime
@@ -9,6 +10,11 @@ from pathlib import Path
 from typing import Any
 
 from .security import redact_text
+
+_GIT_BRANCH = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/@{}~^:+-]{0,255}$")
+_GIT_COMMIT = re.compile(r"^[0-9a-fA-F]{40,64}$")
+_GIT_REMOTE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_GIT_REPOSITORY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,255}$")
 
 
 class AuditLog:
@@ -171,19 +177,56 @@ class AuditLog:
             if allowed and project is not None and project not in allowed:
                 continue
             # Keep only chronology fields. In particular, command, environment,
-            # and arbitrary adapter payloads are never projected.
-            events.append(
-                {
-                    "timestamp": timestamp,
-                    "tool": str(record.get("tool") or "unknown")[:128],
-                    "success": record.get("success") if isinstance(record.get("success"), bool) else None,
-                    "error": str(record.get("error"))[:128] if record.get("error") else None,
-                    "project": project,
-                    "scope": str(record.get("scope"))[:32] if record.get("scope") else None,
-                    "duration_seconds": record.get("duration_seconds") if isinstance(record.get("duration_seconds"), (int, float)) else None,
-                    "job_id": str(record.get("job_id"))[:64] if record.get("job_id") else None,
-                }
-            )
+            # and arbitrary adapter payloads are never projected. Git outcome
+            # facts are separately allowlisted and validated below.
+            tool = str(record.get("tool") or "unknown")[:128]
+            event: dict[str, object] = {
+                "timestamp": timestamp,
+                "tool": tool,
+                "success": record.get("success") if isinstance(record.get("success"), bool) else None,
+                "error": str(record.get("error"))[:128] if record.get("error") else None,
+                "project": project,
+                "scope": str(record.get("scope"))[:32] if record.get("scope") else None,
+                "duration_seconds": record.get("duration_seconds") if isinstance(record.get("duration_seconds"), (int, float)) else None,
+                "job_id": str(record.get("job_id"))[:64] if record.get("job_id") else None,
+            }
+            if tool == "git_merge":
+                repository = record.get("repository")
+                if isinstance(repository, str) and _GIT_REPOSITORY.fullmatch(repository) and ".." not in repository.split("/"):
+                    event["repository"] = repository
+                for key in ("source_branch", "target_branch"):
+                    value = record.get(key)
+                    if isinstance(value, str) and _GIT_BRANCH.fullmatch(value):
+                        event[key] = redact_text(value)[:256]
+                commit = record.get("commit")
+                if isinstance(commit, str) and _GIT_COMMIT.fullmatch(commit):
+                    event["commit"] = commit.lower()
+                observed_head = record.get("head")
+                if isinstance(observed_head, str) and _GIT_COMMIT.fullmatch(observed_head):
+                    event["observed_head"] = observed_head.lower()
+                for key in ("merge_aborted", "working_tree_clean"):
+                    value = record.get(key)
+                    if isinstance(value, bool):
+                        event[key] = value
+                exit_code = record.get("exit_code")
+                if type(exit_code) is int:
+                    event["exit_code"] = exit_code
+            elif tool == "git_push":
+                repository = record.get("repository")
+                if isinstance(repository, str) and _GIT_REPOSITORY.fullmatch(repository) and ".." not in repository.split("/"):
+                    event["repository"] = repository
+                remote = record.get("remote")
+                if isinstance(remote, str) and _GIT_REMOTE.fullmatch(remote):
+                    event["remote"] = remote
+                branch = record.get("branch")
+                if isinstance(branch, str) and _GIT_BRANCH.fullmatch(branch):
+                    event["branch"] = redact_text(branch)[:256]
+                elif branch is None:
+                    event["branch"] = None
+                force = record.get("force")
+                if isinstance(force, bool):
+                    event["force"] = force
+            events.append(event)
             if len(events) >= limit:
                 break
         return {"status": "AVAILABLE" if events else "EMPTY", "events": events, "detail": "raw audit fields omitted from journal projection"}

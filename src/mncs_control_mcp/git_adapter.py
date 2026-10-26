@@ -640,6 +640,8 @@ class GitService:
                 details={
                     "exit_code": merged.exit_code,
                     "head": current_head,
+                    "target_branch": current_branch,
+                    "source_branch": source_branch,
                     "merge_aborted": aborted is not None and aborted.exit_code == 0,
                     "working_tree_clean": not final_status.stdout.strip(),
                 },
