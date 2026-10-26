@@ -25,13 +25,13 @@ TOKEN_RE = re.compile(r"[A-Za-z0-9_-]{32,128}")
 OPERATIONS = frozenset({
     "enter", "continuation", "inspect", "context", "health", "capabilities",
     "resume", "verify", "invoke", "checkpoint", "handoff", "complete", "claims",
-    "campaign_state", "environmental_capability", "artifact_read",
+    "campaign_state", "environmental_capability", "session_updates", "artifact_read",
     "store_generation", "scope_grant",
 })
 SESSION_OPERATIONS = frozenset({
     "inspect", "context", "health", "capabilities", "resume", "verify", "invoke",
     "checkpoint", "handoff", "complete", "claims", "campaign_state",
-    "environmental_capability", "artifact_read", "store_generation", "scope_grant",
+    "environmental_capability", "session_updates", "artifact_read", "store_generation", "scope_grant",
 })
 SESSION_SELECTOR_FIELDS = frozenset({"campaign_id", "task_identity", "session_id"})
 
@@ -200,6 +200,7 @@ def _build_argv(
             "session_id", "history_pages", "evidence_offset", "evidence_limit",
             "session_event_before_sequence", "session_event_limit",
         },
+        "session_updates": {"session_id", "since"},
         "artifact_read": {"session_id", "capability", "binding_id", "path"},
         "store_generation": {"session_id"},
     }
@@ -565,6 +566,14 @@ def _build_argv(
                     "session_event_before_sequence is outside its supported range"
                 )
             argv.extend(["--session-event-before-sequence", str(number)])
+        return argv, True
+    if operation == "session_updates":
+        argv = ["updates", session_id]
+        if "since" in values:
+            number = values["since"]
+            if type(number) is not int or not 0 <= number <= 2**31 - 1:
+                raise ValueError("since is outside its supported range")
+            argv.extend(["--since", str(number)])
         return argv, True
     if operation == "artifact_read":
         capability = _string(values.get("capability"), "capability", max_length=256)
@@ -1029,6 +1038,7 @@ class LocalEnvironmentMCP:
                     "mode", "repository", "claim_id", "offset", "limit", "reason", "ttl",
                     "basis", "paths", "worktree", "branch", "expected_store_generation",
                     "expected_authority_revision", "approval_reference",
+                    "since",
                     "checkout_path", "workspace_checkout",
                     "history_pages", "evidence_offset", "evidence_limit",
                     "session_event_before_sequence", "session_event_limit",
@@ -1129,9 +1139,9 @@ def main() -> None:
             "strictly validated Environment lifecycle operation. Supported operations "
             "include enter, continuation, inspect, context, health, capabilities, "
             "resume, verify, checkpoint, handoff, complete, claims, campaign_state, "
-            "environmental_capability, artifact_read, store_generation, and owner-approved "
+            "environmental_capability, session_updates, artifact_read, store_generation, and owner-approved "
             "or campaign-writable scope_grant. environmental_capability is a bounded, read-only interpretation "
-            "of authenticated campaign evidence. "
+            "of authenticated campaign evidence. session_updates is a read-only classified event delta for the selected session. "
             "Resume revalidates the selected "
             "session. Verify runs one already-bound project verification capability "
             "with its descriptor's fixed arguments and selected project authority. "

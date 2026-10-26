@@ -5757,6 +5757,112 @@ def test_campaign_state_read_uses_the_bound_compiler_project_session(
     assert len(calls) == 1
 
 
+def test_session_updates_is_a_selected_session_read_and_records_its_use(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "projects"
+    project = workspace / "mncs-environment"
+    project.mkdir(parents=True)
+    token = "session-updates-grant"
+    observations: list[dict[str, object]] = []
+
+    class Store:
+        def load_snapshot(self, session_id: str) -> dict[str, str]:
+            assert session_id == "ses_environment"
+            return {"authenticated_principal_id": "principal-agent"}
+
+        def close(self) -> None:
+            pass
+
+    class Environment:
+        state_dir = tmp_path / "state"
+        environment_path = tmp_path / "environment"
+        rights_provenance_path = tmp_path / "rights-provenance"
+
+        def _pkg(self) -> object:
+            return object()
+
+        def _store(self, _pkg: object) -> Store:
+            return Store()
+
+        def record_read_operation_activity(self, **values: object) -> None:
+            observations.append(values)
+
+    server = EnvironmentRPCServer(
+        ControlConfig(
+            workspace_root=workspace,
+            repositories={"environment": "mncs-environment"},
+            sandbox_home=tmp_path / "home",
+            environment_rpc_socket=tmp_path / "rpc" / "environment.sock",
+        ),
+        environment_service=Environment(),
+        policy=object(),
+    )
+    grant = _GrantRecord(
+        grant_id="session-updates-grant",
+        principal_id="principal-agent",
+        host_root=project,
+        sandbox_root="/workspace/mncs-environment",
+        scope="project",
+        uid=0,
+        expires_at=time.monotonic() + 60,
+        token_file=tmp_path / "grant",
+        bound_session_id="ses_environment",
+    )
+    server._grants[hashlib.sha256(token.encode()).hexdigest()] = grant
+    calls: list[list[str]] = []
+
+    def run(argv: list[str], **_kwargs: object) -> SimpleNamespace:
+        calls.append(argv)
+        return SimpleNamespace(
+            returncode=0,
+            stdout='{"session_id":"ses_environment","index":119,"total":121,'
+                   '"items":[{"kind":"authority.denied"}],"truncated":false}\n',
+            stderr="",
+        )
+
+    monkeypatch.setattr("mncs_control_mcp.environment_rpc.subprocess.run", run)
+    request = {
+        "grant": token,
+        "request_id": "req_session_updates_read",
+        "argv": ["updates", "ses_environment", "--since", "119"],
+        "cwd": "/workspace/mncs-environment",
+    }
+
+    response = server.dispatch(request, peer_uid=0)
+
+    assert response["ok"] is True
+    assert json.loads(response["result"]["stdout"])["items"] == [
+        {"kind": "authority.denied"},
+    ]
+    assert calls[0][-4:] == ["updates", "ses_environment", "--since", "119"]
+    assert EnvironmentRPCServer._request_session(request["argv"]) == "ses_environment"
+    assert EnvironmentRPCServer._read_only_operation_identity(request["argv"]) == (
+        "session.updates"
+    )
+    assert observations[0]["session_id"] == "ses_environment"
+    assert observations[0]["repository"] == "mncs-environment"
+    assert observations[0]["operation"] == "session.updates"
+    assert observations[0]["outcome_status"] == "succeeded"
+
+    grant.bound_session_id = "ses_other"
+    denied = server.dispatch({
+        **request, "request_id": "req_session_updates_other_session",
+    }, peer_uid=0)
+    assert denied["error"]["code"] == "ENVIRONMENT_AUTHORITY_DENIED"
+    assert len(calls) == 1
+
+    grant.bound_session_id = "ses_environment"
+    for invalid_argv in (
+        ["updates", "ses_environment", "--since", "-1"],
+        ["updates", "ses_environment", "--since", "2147483648"],
+        ["updates", "ses_environment", "--since", "0", "--since", "1"],
+        ["updates", "ses_environment", "--ack", "1"],
+    ):
+        with pytest.raises(ControlError):
+            server._translate_argv(invalid_argv, project, grant)
+
+
 def test_environmental_capability_projection_is_bounded_session_read_and_observed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

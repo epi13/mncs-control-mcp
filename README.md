@@ -93,6 +93,8 @@ If typed `env_*` tools are absent from a caller's MCP snapshot, Environment work
 
 The stable `mncs_environment` tool also exposes `environmental_capability` for the selected session. It runs only the existing `projections --interpret environmental-capability` view, with at most four evidence pages and 32 references per page; Control requires the authenticated project grant to select the exact queried session.
 
+The same tool exposes `session_updates` as a read-only view of the selected session's classified event delta. It accepts an optional nonnegative `since` cursor, returns at most the Environment classifier's 30 items, and never acknowledges or changes the session. Control requires the authenticated project grant to select the exact queried session and records the read outcome, so coordination and authority events can be inspected through the normal agent interface.
+
 For local Codex CLI sessions, the same owner service also supports one stable
 stdio MCP tool. Register it once with the Control checkout's editable Python
 environment:

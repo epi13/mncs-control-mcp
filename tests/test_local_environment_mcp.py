@@ -167,6 +167,37 @@ def test_environmental_capability_bridge_accepts_bounded_history_pages(
     ]
 
 
+def test_session_updates_maps_to_a_read_only_selected_session_delta() -> None:
+    context = _ProjectContext("secret", "/workspace/mncs-environment")
+    context.selected_session_id = "ses_selected"
+
+    argv, selected = _build_argv(
+        "session_updates", {"session_id": "ses_selected", "since": 119},
+        context, "mncs-environment",
+    )
+
+    assert selected is True
+    assert argv == ["updates", "ses_selected", "--since", "119"]
+
+    default_argv, _selected = _build_argv(
+        "session_updates", {}, context, "mncs-environment",
+    )
+    assert default_argv == ["updates", "ses_selected"]
+
+    for invalid_since in (-1, 2**31, True, "119"):
+        with pytest.raises(ValueError, match="since"):
+            _build_argv(
+                "session_updates", {"since": invalid_since}, context,
+                "mncs-environment",
+            )
+
+    with pytest.raises(ValueError, match="unsupported arguments"):
+        _build_argv(
+            "session_updates", {"session_id": "ses_selected", "ack": True},
+            context, "mncs-environment",
+        )
+
+
 def test_scope_grant_maps_only_the_owner_checked_scope_admission_contract() -> None:
     context = _ProjectContext("secret", "/workspace/mncs-compiler")
     context.selected_session_id = "ses_selected"

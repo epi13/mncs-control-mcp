@@ -116,6 +116,13 @@ directory and Store persistence provider, and forwards no Store path or file
 handle. Bare Store inspection, alternate persistence roots, and other Store
 operations remain unavailable through this endpoint.
 
+The `updates <session-id> [--since <index>]` operation is also read-only. It is
+available only for the exact session selected by the authenticated project
+continuation, accepts only one bounded nonnegative cursor, and exposes no
+acknowledgment or lifecycle mutation. The Environment classifier limits the
+result to 30 items; Control records the operation outcome with the selected
+session and project.
+
 The typed `mncs-compiler:native-application-build` request-file invocation
 accepts a project grant from either Environment or Compiler. In both cases,
 Control requires the grant's selected session, the exact Compiler capability,

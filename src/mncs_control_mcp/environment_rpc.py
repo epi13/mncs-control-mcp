@@ -38,7 +38,7 @@ MAX_ARGUMENT_BYTES = 48 * 1024
 ALLOWED_COMMANDS = frozenset({
     "enter", "inspect", "context", "resume", "health", "capabilities", "checkpoint", "handoff", "accept", "claims",
     "complete", "store", "invoke", "artifact-read", "campaign-state",
-    "projections", "retire", "continuation", "campaign-bind", "scope-grant",
+    "projections", "updates", "retire", "continuation", "campaign-bind", "scope-grant",
     "claim-recover",
 })
 MAX_CAMPAIGN_EVIDENCE_PAGE = 128
@@ -99,6 +99,7 @@ _SESSION_POSITIONAL_VALUE_OPTIONS: dict[str, dict[str, int | None]] = {
         "--consumer": 1, "--consumer-kind": 1,
         "--evidence-offset": 1, "--evidence-limit": 1,
     },
+    "updates": {"--since": 1},
     "claims": {
         "--acquire": 1, "--expected-store-generation": 1, "--release": 1,
         "--claim-id": 1, "--repository": 1, "--offset": 1, "--limit": 1,
@@ -619,7 +620,7 @@ class EnvironmentRPCServer:
             "inspect", "context", "resume", "health", "capabilities", "continuation",
             "checkpoint", "handoff", "accept", "claims", "claim-recover",
             "invoke", "retire", "store", "scope-grant", "complete",
-            "campaign-bind", "campaign-state", "projections", "artifact-read",
+            "campaign-bind", "campaign-state", "projections", "updates", "artifact-read",
         }:
             return None
         if command == "accept":
@@ -663,6 +664,7 @@ class EnvironmentRPCServer:
             "continuation": "campaign.continuation",
             "campaign-state": "campaign.state",
             "projections": "environmental-capability.projection",
+            "updates": "session.updates",
             "artifact-read": "session.artifact-read",
         }
         if command in simple:
@@ -1421,6 +1423,8 @@ class EnvironmentRPCServer:
                 )
         if command == "campaign-state":
             self._authorize_campaign_state_argv(argv, record)
+        if command == "updates":
+            self._authorize_session_updates_argv(argv, record)
         if command == "projections":
             self._authorize_environmental_capability_projection_argv(argv, record)
         if command == "artifact-read":
@@ -2502,6 +2506,61 @@ class EnvironmentRPCServer:
                     f"--evidence-limit must be between 1 and {MAX_CAMPAIGN_EVIDENCE_PAGE}",
                 )
             seen.add(key)
+            index += 2
+
+    def _authorize_session_updates_argv(
+        self, argv: list[str], record: _GrantRecord,
+    ) -> None:
+        """Expose only a cursor-bounded read of this grant's selected session."""
+        if (len(argv) < 2
+                or not re.fullmatch(r"ses_[A-Za-z0-9_-]{1,120}", argv[1])):
+            raise ControlError(
+                "ENVIRONMENT_RPC_INVALID_REQUEST",
+                "updates requires one Environment session identity",
+            )
+        if record.scope != "project":
+            raise ControlError(
+                "ENVIRONMENT_AUTHORITY_DENIED",
+                "session updates require an authenticated project grant",
+            )
+        if record.bound_session_id != argv[1]:
+            raise ControlError(
+                "ENVIRONMENT_AUTHORITY_DENIED",
+                "session updates are limited to the session selected by this project's authenticated continuation",
+                details={
+                    "session_id": argv[1],
+                    "selected_session_id": record.bound_session_id,
+                    "next": "run project continuation and inspect only its selected session",
+                },
+            )
+
+        seen: set[str] = set()
+        index = 2
+        while index < len(argv):
+            option = argv[index]
+            if option != "--since":
+                raise ControlError(
+                    "ENVIRONMENT_AUTHORITY_DENIED",
+                    "session updates expose only a read-only cursor argument",
+                    details={"allowed": ["--since"]},
+                )
+            if option in seen or index + 1 >= len(argv):
+                raise ControlError(
+                    "ENVIRONMENT_RPC_INVALID_REQUEST",
+                    "--since must be supplied once with an integer value",
+                )
+            raw_value = argv[index + 1]
+            if not re.fullmatch(r"[0-9]{1,10}", raw_value):
+                raise ControlError(
+                    "ENVIRONMENT_RPC_INVALID_REQUEST",
+                    "--since must be a nonnegative integer",
+                )
+            if int(raw_value) > 2**31 - 1:
+                raise ControlError(
+                    "ENVIRONMENT_RPC_INVALID_REQUEST",
+                    "--since exceeds the supported range",
+                )
+            seen.add(option)
             index += 2
 
     def _authorize_environmental_capability_projection_argv(
