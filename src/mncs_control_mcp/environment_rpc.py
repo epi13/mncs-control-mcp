@@ -47,7 +47,7 @@ MAX_ENVIRONMENTAL_PROJECTION_EVIDENCE_PAGE = 32
 MAX_ENVIRONMENTAL_PROJECTION_SESSION_EVENT_PAGE = 256
 MAX_CONTEXT_RESPONSE_SUMMARY_BYTES = 128 * 1024
 MAX_CONTEXT_RESPONSE_CAPABILITY_LIST = 20
-CONTEXT_RESPONSE_SUMMARY_SCHEMA = "mncs.environment.context-response-summary/1"
+CONTEXT_RESPONSE_SUMMARY_SCHEMA = "mncs.environment.context-response-summary/2"
 ALLOWED_INVOKE_CAPABILITIES = frozenset({
     "mncs-environment:ambient-projection-coherence",
     "mncs-environment:projection-evidence-inspection",
@@ -722,6 +722,8 @@ class EnvironmentRPCServer:
             "capabilities_truncated": None,
             "available_identity_digest": None,
             "identity_digest_status": "unavailable",
+            "available_binding_ids": None,
+            "binding_ids_status": "unavailable",
         }
 
         def unavailable(reason: str) -> dict[str, Any]:
@@ -771,10 +773,13 @@ class EnvironmentRPCServer:
             return partial("capability-summary-invalid")
 
         identities: list[dict[str, str]] = []
+        binding_ids: list[str] = []
         identity_complete = True
+        binding_ids_complete = True
         for item in available:
             if not isinstance(item, dict):
                 identity_complete = False
+                binding_ids_complete = False
                 continue
             capability = item.get("capability")
             provider = item.get("provider")
@@ -792,6 +797,12 @@ class EnvironmentRPCServer:
                 "provider": provider,
                 "contract_revision": contract_revision,
             })
+            binding_id = item.get("binding_id")
+            if (not isinstance(binding_id, str)
+                    or re.fullmatch(r"cap_[0-9a-f]{64}", binding_id) is None):
+                binding_ids_complete = False
+            else:
+                binding_ids.append(binding_id)
         if identity_complete and not truncated:
             identities.sort(key=lambda item: (
                 item["capability"], item["provider"], item["contract_revision"],
@@ -804,6 +815,13 @@ class EnvironmentRPCServer:
         else:
             identity_digest = None
             identity_digest_status = "partial"
+        unique_binding_ids = sorted(set(binding_ids))
+        binding_ids_status = (
+            "complete"
+            if binding_ids_complete and not truncated
+            and len(unique_binding_ids) == len(available)
+            else "partial"
+        )
         return {
             "schema_version": CONTEXT_RESPONSE_SUMMARY_SCHEMA,
             "capture_status": "captured",
@@ -816,6 +834,8 @@ class EnvironmentRPCServer:
             "capabilities_truncated": truncated,
             "available_identity_digest": identity_digest,
             "identity_digest_status": identity_digest_status,
+            "available_binding_ids": unique_binding_ids,
+            "binding_ids_status": binding_ids_status,
         }
 
     def _record_read_operation_activity(

@@ -39,8 +39,9 @@ _CAMPAIGN_CAPSULE_EVIDENCE_MAX = 32
 _CAMPAIGN_CHARTER_EVIDENCE_SEARCH_MAX = 16
 _GIT_OBJECT_ID = re.compile(r"^(?:[a-f0-9]{40}|[a-f0-9]{64})$")
 _SHA256 = re.compile(r"^[a-f0-9]{64}$")
-_CONTEXT_RESPONSE_SUMMARY_SCHEMA = "mncs.environment.context-response-summary/1"
+_CONTEXT_RESPONSE_SUMMARY_SCHEMA = "mncs.environment.context-response-summary/2"
 _CONTEXT_RESPONSE_SCHEMA_VERSION = "mncs.environment.entry-context/1"
+_CONTEXT_BINDING_ID = re.compile(r"^cap_[0-9a-f]{64}$")
 _CONTEXT_RESPONSE_UNAVAILABLE_REASONS = frozenset({
     "operation-failed", "stdout-unavailable", "response-too-large",
     "invalid-json", "invalid-context-schema",
@@ -68,6 +69,7 @@ def _valid_context_response_summary(value: Any) -> bool:
         "context_schema_version", "available_count", "listed_available_count",
         "unavailable_count", "unknown_count", "capabilities_truncated",
         "available_identity_digest", "identity_digest_status",
+        "available_binding_ids", "binding_ids_status",
     }
     if (not isinstance(value, dict) or set(value) != expected
             or value.get("schema_version") != _CONTEXT_RESPONSE_SUMMARY_SCHEMA):
@@ -82,6 +84,8 @@ def _valid_context_response_summary(value: Any) -> bool:
     truncated = value.get("capabilities_truncated")
     identity_digest = value.get("available_identity_digest")
     digest_status = value.get("identity_digest_status")
+    binding_ids = value.get("available_binding_ids")
+    binding_ids_status = value.get("binding_ids_status")
     if status == "unavailable":
         return (
             isinstance(reason, str)
@@ -89,6 +93,7 @@ def _valid_context_response_summary(value: Any) -> bool:
             and context_version is None and all(item is None for item in counts)
             and truncated is None and identity_digest is None
             and digest_status == "unavailable"
+            and binding_ids is None and binding_ids_status == "unavailable"
         )
     if status == "partial":
         return (
@@ -97,6 +102,7 @@ def _valid_context_response_summary(value: Any) -> bool:
             and context_version == _CONTEXT_RESPONSE_SCHEMA_VERSION
             and all(item is None for item in counts) and truncated is None
             and identity_digest is None and digest_status == "unavailable"
+            and binding_ids is None and binding_ids_status == "unavailable"
         )
     if (status != "captured" or reason is not None
             or context_version != _CONTEXT_RESPONSE_SCHEMA_VERSION
@@ -107,13 +113,31 @@ def _valid_context_response_summary(value: Any) -> bool:
             or (not truncated and counts[0] != counts[1])):
         return False
     if digest_status == "complete":
-        return (
+        digest_valid = (
             not truncated
             and counts[0] == counts[1]
             and isinstance(identity_digest, str)
             and _SHA256.fullmatch(identity_digest) is not None
         )
-    return digest_status == "partial" and identity_digest is None
+    else:
+        digest_valid = digest_status == "partial" and identity_digest is None
+    if not digest_valid:
+        return False
+    if binding_ids_status == "unavailable":
+        return binding_ids is None
+    if (binding_ids_status not in {"complete", "partial"}
+            or not isinstance(binding_ids, list) or len(binding_ids) > 20
+            or any(not isinstance(item, str)
+                   or _CONTEXT_BINDING_ID.fullmatch(item) is None
+                   for item in binding_ids)
+            or len(set(binding_ids)) != len(binding_ids)):
+        return False
+    if binding_ids_status == "complete":
+        return (
+            not truncated and counts[0] == counts[1]
+            and len(binding_ids) == counts[1]
+        )
+    return len(binding_ids) <= counts[1]
 
 
 def _resolve_environment_source_checkout(

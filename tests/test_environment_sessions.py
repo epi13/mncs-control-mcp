@@ -160,7 +160,7 @@ def test_control_read_activity_binds_to_authenticated_session_context(
     assert captured["request_id"] == "req_control_activity_denied_read"
 
     context_summary = {
-        "schema_version": "mncs.environment.context-response-summary/1",
+        "schema_version": "mncs.environment.context-response-summary/2",
         "capture_status": "captured",
         "capture_reason": None,
         "context_schema_version": "mncs.environment.entry-context/1",
@@ -171,6 +171,8 @@ def test_control_read_activity_binds_to_authenticated_session_context(
         "capabilities_truncated": False,
         "available_identity_digest": "f" * 64,
         "identity_digest_status": "complete",
+        "available_binding_ids": ["cap_" + "a" * 64],
+        "binding_ids_status": "complete",
     }
     context_result = service.record_read_operation_activity(
         session_id="ses_activity_control",
@@ -209,6 +211,23 @@ def test_control_read_activity_binds_to_authenticated_session_context(
             control_grant_id="d" * 32,
             process_identity=None,
             context_response_summary={**context_summary, "available_count": 2},
+        )
+    with pytest.raises(ControlError, match="read-operation activity fields are malformed"):
+        service.record_read_operation_activity(
+            session_id="ses_activity_control",
+            repository="mncs-control-mcp",
+            operation="session.context",
+            outcome_status="succeeded",
+            exit_code=0,
+            failure_code=None,
+            operation_elapsed_ms=15.0,
+            request_id="req_control_context_bad_binding_id",
+            operation_digest="4" * 64,
+            control_grant_id="d" * 32,
+            process_identity=None,
+            context_response_summary={
+                **context_summary, "available_binding_ids": ["bad-id"],
+            },
         )
     assert captured["request_id"] == "req_control_context_summary"
 

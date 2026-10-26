@@ -233,6 +233,7 @@ def test_dispatch_records_only_redacted_read_only_operation_outcomes(
         "schema_version": "mncs.environment.entry-context/1",
         "capabilities": {
             "available": [{
+                "binding_id": "cap_" + "a" * 64,
                 "capability": "mncs-test:run",
                 "provider": "mncs-test",
                 "contract_revision": "r1",
@@ -264,8 +265,23 @@ def test_dispatch_records_only_redacted_read_only_operation_outcomes(
     assert summary["available_count"] == 1
     assert summary["listed_available_count"] == 1
     assert summary["identity_digest_status"] == "complete"
+    assert summary["schema_version"] == (
+        "mncs.environment.context-response-summary/2"
+    )
+    assert summary["available_binding_ids"] == ["cap_" + "a" * 64]
+    assert summary["binding_ids_status"] == "complete"
     assert "mncs-test:run" not in json.dumps(context_record)
     assert json.dumps(context["capabilities"]) not in json.dumps(context_record)
+
+    missing_binding_id = json.loads(json.dumps(context))
+    missing_binding_id["capabilities"]["available"][0].pop("binding_id")
+    partial_binding_capture = server._context_response_summary(
+        {"stdout": json.dumps(missing_binding_id)}, succeeded=True,
+    )
+    assert partial_binding_capture["capture_status"] == "captured"
+    assert partial_binding_capture["identity_digest_status"] == "complete"
+    assert partial_binding_capture["available_binding_ids"] == []
+    assert partial_binding_capture["binding_ids_status"] == "partial"
 
 
 def test_claim_worktree_path_can_name_an_exact_checkout_in_the_workspace(
