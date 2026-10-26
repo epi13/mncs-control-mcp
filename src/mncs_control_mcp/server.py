@@ -361,7 +361,7 @@ def build_server(config: ControlConfig | None = None) -> Any:
     def git_worktree_list(repository: str) -> dict[str, object]:
         return invoke("git_worktree_list", git.worktree_list, repository)  # type: ignore[return-value]
 
-    @server.tool(name="git_worktree_add", description="Create a new managed worktree from an explicit ref without changing existing checkouts.", annotations=mutate, structured_output=True)
+    @server.tool(name="git_worktree_add", description="Create a new managed worktree for a short local branch name; do not prefix the branch with refs/heads/. start_point may be an explicit ref.", annotations=mutate, structured_output=True)
     def git_worktree_add(
         repository: str,
         branch: str,
@@ -382,7 +382,7 @@ def build_server(config: ControlConfig | None = None) -> Any:
             },
         )  # type: ignore[return-value]
 
-    @server.tool(name="git_worktree_prepare", description="Select a clean worktree at an exact authoritative ref, or safely create it through Control.", annotations=mutate, structured_output=True)
+    @server.tool(name="git_worktree_prepare", description="Select or create a clean worktree. branch must be a short branch name, while source_ref may be an authoritative ref such as origin/main.", annotations=mutate, structured_output=True)
     def git_worktree_prepare(
         repository: str,
         name: str,
@@ -445,7 +445,7 @@ def build_server(config: ControlConfig | None = None) -> Any:
     def git_fetch(repository: str, remote: str = "origin", prune: bool = False) -> dict[str, object]:
         return invoke("git_fetch", git.fetch, repository, remote, prune=prune, audit_metadata={"repository": repository, "remote": remote, "network": True})  # type: ignore[return-value]
 
-    @server.tool(name="git_pull", description="Fetch and integrate a remote branch without forced reset.", annotations=network_mutate, structured_output=True)
+    @server.tool(name="git_pull", description="Fetch and integrate a remote branch without forced reset; branch, when supplied, must be a short branch name, not refs/heads/....", annotations=network_mutate, structured_output=True)
     def git_pull(repository: str, remote: str = "origin", branch: str | None = None, rebase: bool = False) -> dict[str, object]:
         return invoke("git_pull", git.pull, repository, remote, branch, rebase=rebase, audit_metadata={"repository": repository, "remote": remote, "network": True})  # type: ignore[return-value]
 

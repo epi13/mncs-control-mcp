@@ -178,6 +178,12 @@ environment_rpc_socket = {str(environment_rpc_socket)!r}
             item for item in tools if item["name"] == "workspace_storage_inventory"
         )
         assert "Btrfs allocation and device counters" in storage_inventory["description"]
+        tool_by_name = {item["name"]: item for item in tools}
+        for tool_name in (
+            "git_worktree_add", "git_worktree_prepare", "git_create_branch",
+            "git_checkout", "git_merge", "git_pull", "git_push",
+        ):
+            assert "short" in tool_by_name[tool_name]["description"], tool_name
         binding_tool = next(item for item in tools if item["name"] == "env_campaign_task_bind")
         assert binding_tool["inputSchema"]["required"] == [
             "repository", "campaign_id", "session_id", "task_identity",
