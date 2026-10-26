@@ -105,6 +105,37 @@ def test_git_merge_conflict_aborts_and_preserves_clean_target(config) -> None:
     assert source.read_text(encoding="utf-8") == "main value\n"
 
 
+def test_branch_operations_reject_fully_qualified_ref_names(config, monkeypatch) -> None:
+    policy = WorkspacePolicy(config)
+    git = GitService(config, policy, Sandbox(config, policy))
+
+    def unexpected_git_call(*args, **kwargs):
+        pytest.fail("invalid branch name reached Git")
+
+    monkeypatch.setattr(git, "_run", unexpected_git_call)
+    attempts = {
+        "create": lambda: git.create_branch("missing", "refs/heads/main"),
+        "checkout": lambda: git.checkout("missing", "refs/heads/main"),
+        "merge": lambda: git.merge("missing", "refs/heads/main"),
+        "push": lambda: git.push("missing", branch="refs/heads/main"),
+        "pull": lambda: git.pull("missing", branch="refs/heads/main"),
+        "worktree-add": lambda: git.worktree_add(
+            "missing", "refs/heads/main", "proof",
+        ),
+        "worktree-prepare": lambda: git.worktree_prepare(
+            "missing", name="proof", branch="refs/heads/main",
+        ),
+    }
+
+    for operation, attempt in attempts.items():
+        with pytest.raises(ControlError) as rejected:
+            attempt()
+        assert rejected.value.code == "INVALID_GIT_REF", operation
+        assert "short branch name" in rejected.value.message, operation
+
+    assert GitService._branch("campaign/short-name") == "campaign/short-name"
+
+
 def test_tool_inventory_has_no_environment_dump(config, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("VERY_SECRET_TOKEN", "never-return-this")
     result = ToolInventory(config).inventory()

@@ -181,7 +181,7 @@ class GitService:
         existing checkout.
         """
         slug = self._worktree_slug(name)
-        branch = self._ref(branch, "branch")
+        branch = self._branch(branch, "branch")
         source_ref = self._ref(source_ref, "source_ref")
         repo_root, _, _ = self._repository(repository)
         self._refresh_remote_source(repository, repo_root, source_ref)
@@ -297,7 +297,7 @@ class GitService:
         start_point: str | None = None,
     ) -> dict[str, object]:
         """Create a new managed worktree without touching an existing checkout."""
-        branch = self._ref(branch, "branch")
+        branch = self._branch(branch, "branch")
         slug = self._worktree_slug(name or branch)
         if start_point is not None:
             start_point = self._ref(start_point, "start_point")
@@ -362,6 +362,23 @@ class GitService:
         if not isinstance(value, str) or not _REF.fullmatch(value) or value.startswith("-"):
             raise ControlError("INVALID_GIT_REF", f"{field} is not a safe Git reference")
         return value
+
+    @staticmethod
+    def _branch(value: str, field: str = "branch") -> str:
+        """Accept a branch name, not a fully qualified ref that Git may DWIM-match.
+
+        Passing ``refs/heads/main`` to a branch-oriented command is ambiguous
+        when a local branch named ``refs/heads/main`` also exists. Keep the
+        public branch interface consistently short so create, merge, checkout,
+        and push cannot create or select that namespace collision by accident.
+        """
+        branch = GitService._ref(value, field)
+        if branch.startswith("refs/"):
+            raise ControlError(
+                "INVALID_GIT_REF",
+                f"{field} must be a short branch name such as 'main', not a fully qualified ref",
+            )
+        return branch
 
     def status(self, repository: str) -> dict[str, object]:
         result = self._run(repository, ["status", "--porcelain=v1", "--branch", "--untracked-files=all"])
@@ -562,13 +579,13 @@ class GitService:
         return {"repository": repository, "branches": branches, **self._output(result)}
 
     def create_branch(self, repository: str, branch: str, *, checkout: bool = True) -> dict[str, object]:
-        branch = self._ref(branch, "branch")
+        branch = self._branch(branch, "branch")
         self._run(repository, ["check-ref-format", "--branch", branch])
         result = self._run(repository, ["switch", "-c", branch] if checkout else ["branch", branch])
         return {"repository": repository, "branch": branch, "checked_out": checkout, **self._output(result)}
 
     def checkout(self, repository: str, branch: str) -> dict[str, object]:
-        branch = self._ref(branch, "branch")
+        branch = self._branch(branch, "branch")
         result = self._run(repository, ["switch", branch])
         return {"repository": repository, "branch": branch, **self._output(result)}
 
@@ -580,7 +597,7 @@ class GitService:
         the merge stops on conflicts, abort only the merge started by this
         call and report whether the original clean tree was restored.
         """
-        source_branch = self._ref(source_branch, "source_branch")
+        source_branch = self._branch(source_branch, "source_branch")
         self._run(repository, ["check-ref-format", "--branch", source_branch])
         current_branch = self._run(repository, ["branch", "--show-current"]).stdout.strip()
         if not current_branch:
@@ -699,7 +716,7 @@ class GitService:
             raise ControlError("INVALID_INPUT", "remote name is invalid")
         args = ["pull", "--rebase" if rebase else "--no-rebase", remote]
         if branch:
-            args.append(self._ref(branch, "branch"))
+            args.append(self._branch(branch, "branch"))
         result = self._run(repository, args, network=True)
         return {"repository": repository, "remote": remote, "branch": branch, **self._output(result)}
 
@@ -720,7 +737,7 @@ class GitService:
             args.append("--set-upstream")
         args.append(remote)
         if branch:
-            args.append(self._ref(branch, "branch"))
+            args.append(self._branch(branch, "branch"))
         result = self._run(repository, args, network=True)
         return {"repository": repository, "remote": remote, "branch": branch, "force": False, **self._output(result)}
 

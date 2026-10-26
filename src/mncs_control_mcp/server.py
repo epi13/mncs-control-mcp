@@ -420,15 +420,15 @@ def build_server(config: ControlConfig | None = None) -> Any:
     def git_branches(repository: str, all_branches: bool = True) -> dict[str, object]:
         return invoke("git_branches", git.branches, repository, all_branches=all_branches)  # type: ignore[return-value]
 
-    @server.tool(name="git_create_branch", description="Create a non-forced Git branch, optionally checking it out.", annotations=mutate, structured_output=True)
+    @server.tool(name="git_create_branch", description="Create a non-forced Git branch from a short branch name such as campaign/fix; do not prefix branch names with refs/heads/.", annotations=mutate, structured_output=True)
     def git_create_branch(repository: str, branch: str, checkout: bool = True) -> dict[str, object]:
         return invoke("git_create_branch", git.create_branch, repository, branch, checkout=checkout, audit_metadata={"repository": repository, "branch": branch})  # type: ignore[return-value]
 
-    @server.tool(name="git_checkout", description="Switch to an existing Git branch; refuses to overwrite conflicting work.", annotations=mutate, structured_output=True)
+    @server.tool(name="git_checkout", description="Switch to an existing Git branch using its short name; refuses to overwrite conflicting work. Do not prefix branch names with refs/heads/.", annotations=mutate, structured_output=True)
     def git_checkout(repository: str, branch: str) -> dict[str, object]:
         return invoke("git_checkout", git.checkout, repository, branch, audit_metadata={"repository": repository, "branch": branch})  # type: ignore[return-value]
 
-    @server.tool(name="git_merge", description="Merge one local branch into the checked out branch. Requires a clean worktree and aborts merge conflicts; never resets or force-updates.", annotations=mutate, structured_output=True)
+    @server.tool(name="git_merge", description="Merge one local branch (use its short name, not refs/heads/...) into the checked out branch. Requires a clean worktree and aborts merge conflicts; never resets or force-updates.", annotations=mutate, structured_output=True)
     def git_merge(repository: str, source_branch: str) -> dict[str, object]:
         project = selected.repositories.get(repository, repository).split("/", 1)[0]
         return invoke("git_merge", git.merge, repository, source_branch, audit_metadata={"repository": repository, "project": project, "source_branch": source_branch})  # type: ignore[return-value]
@@ -449,7 +449,7 @@ def build_server(config: ControlConfig | None = None) -> Any:
     def git_pull(repository: str, remote: str = "origin", branch: str | None = None, rebase: bool = False) -> dict[str, object]:
         return invoke("git_pull", git.pull, repository, remote, branch, rebase=rebase, audit_metadata={"repository": repository, "remote": remote, "network": True})  # type: ignore[return-value]
 
-    @server.tool(name="git_push", description="Push normally through the sandbox and SSH agent; force push is not exposed.", annotations=network_mutate, structured_output=True)
+    @server.tool(name="git_push", description="Push normally through the sandbox and SSH agent; branch must be a short name such as main, not refs/heads/main. Force push is not exposed.", annotations=network_mutate, structured_output=True)
     def git_push(repository: str, remote: str = "origin", branch: str | None = None, set_upstream: bool = False) -> dict[str, object]:
         project = selected.repositories.get(repository, repository).split("/", 1)[0]
         return invoke("git_push", git.push, repository, remote, branch, set_upstream=set_upstream, audit_metadata={"repository": repository, "project": project, "remote": remote, "branch": branch, "network": True})  # type: ignore[return-value]
