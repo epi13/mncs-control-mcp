@@ -277,6 +277,10 @@ def _build_argv(
                 "--request-file", request_file,
             ], True
         if capability == "mncs-forge:native-application-execution":
+            if project not in {"mncs-environment", "mncs-compiler"}:
+                raise ValueError(
+                    "Forge native application execution is available only from an Environment or Compiler session"
+                )
             artifact = values.get("input_artifact")
             if (not isinstance(artifact, dict)
                     or set(artifact) != {"name", "capability", "binding_id", "path"}
@@ -292,6 +296,7 @@ def _build_argv(
                 raise ValueError(f"Forge execution call is invalid: {error}") from error
             return [
                 "invoke", session_id, capability,
+                "--effect-repository", "mncs-compiler",
                 "--input-artifact", artifact["name"], artifact["capability"],
                 artifact["binding_id"], artifact["path"],
                 "--", "--call-json", encoded_call,

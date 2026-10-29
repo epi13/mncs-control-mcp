@@ -2338,10 +2338,11 @@ class EnvironmentRPCServer:
         prefix = [
             "invoke", argv[1] if len(argv) > 1 else "",
             "mncs-forge:native-application-execution",
+            "--effect-repository", compiler_project,
             "--input-artifact", "native-application-build",
             "mncs-compiler:native-application-build",
         ]
-        encoded_call = argv[10] if len(argv) > 10 else ""
+        encoded_call = argv[12] if len(argv) > 12 else ""
         canonical_call = False
         if len(encoded_call.encode("utf-8")) <= 32768:
             try:
@@ -2356,11 +2357,11 @@ class EnvironmentRPCServer:
                 environment_project, compiler_project,
             }
             and record.bound_session_id == argv[1]
-            and len(argv) == 11
-            and argv[:6] == prefix
-            and re.fullmatch(r"cap_[0-9a-f]{16}", argv[6]) is not None
-            and argv[7] == "native-application-build.json"
-            and argv[8:10] == ["--", "--call-json"]
+            and len(argv) == 13
+            and argv[:8] == prefix
+            and re.fullmatch(r"cap_[0-9a-f]{16}", argv[8]) is not None
+            and argv[9] == "native-application-build.json"
+            and argv[10:12] == ["--", "--call-json"]
             and canonical_call
         )
         if not allowed:

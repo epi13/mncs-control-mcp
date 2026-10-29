@@ -738,13 +738,14 @@ def test_native_application_invocations_map_to_fixed_typed_contracts() -> None:
         "mncs-environment",
     )
     assert selected is True
-    assert execution[:9] == [
+    assert execution[:11] == [
         "invoke", "ses_selected", "mncs-forge:native-application-execution",
+        "--effect-repository", "mncs-compiler",
         "--input-artifact", "native-application-build",
         "mncs-compiler:native-application-build", "cap_0123456789abcdef",
         "native-application-build.json", "--",
     ]
-    assert execution[9] == "--call-json"
+    assert execution[11] == "--call-json"
     forwarded_call = {"arguments": [{
         "record": {
             "type_identity": (
@@ -759,7 +760,7 @@ def test_native_application_invocations_map_to_fixed_typed_contracts() -> None:
             ],
         },
     }]}
-    assert json.loads(execution[10]) == forwarded_call
+    assert json.loads(execution[12]) == forwarded_call
 
     structured_provider = {
         "schema_version": "mncs.forge.structured-file-capability/1",
@@ -789,7 +790,7 @@ def test_native_application_invocations_map_to_fixed_typed_contracts() -> None:
         "mncs-environment",
     )
     assert selected is True
-    assert json.loads(provider_execution[10]) == {
+    assert json.loads(provider_execution[12]) == {
         **forwarded_call,
         "capability_providers": [structured_provider],
     }
@@ -839,6 +840,23 @@ def test_native_application_invocations_map_to_fixed_typed_contracts() -> None:
     ):
         with pytest.raises(ValueError):
             _build_argv("invoke", arguments, context, "mncs-environment")
+
+    with pytest.raises(ValueError, match="Environment or Compiler session"):
+        _build_argv(
+            "invoke",
+            {
+                "capability": "mncs-forge:native-application-execution",
+                "input_artifact": {
+                    "name": "native-application-build",
+                    "capability": "mncs-compiler:native-application-build",
+                    "binding_id": "cap_0123456789abcdef",
+                    "path": "native-application-build.json",
+                },
+                "call": {"arguments": []},
+            },
+            context,
+            "mncs-test",
+        )
 
 
 def test_control_worktree_prepare_invocation_is_typed_and_effect_scoped(

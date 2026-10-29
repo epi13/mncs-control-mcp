@@ -6207,6 +6207,7 @@ def test_environment_project_rpc_admits_typed_native_application_flow(
     }}]}, sort_keys=True, separators=(",", ":"))
     execution_argv = [
         "invoke", "ses_gatec", "mncs-forge:native-application-execution",
+        "--effect-repository", "mncs-compiler",
         "--input-artifact", "native-application-build",
         "mncs-compiler:native-application-build", "cap_0123456789abcdef",
         "native-application-build.json", "--", "--call-json",
@@ -6277,6 +6278,15 @@ def test_environment_project_rpc_admits_typed_native_application_flow(
         [*build_argv, "--timeout-seconds", "900"],
         [*execution_argv[:-2], "--call-json", '{"callable":"arbitrary"}'],
         ["invoke", "ses_other", *build_argv[2:]],
+        [
+            "invoke", "ses_gatec", "mncs-forge:native-application-execution",
+            "--effect-repository", "mncs-forge",
+            *execution_argv[5:],
+        ],
+        [
+            "invoke", "ses_gatec", "mncs-forge:native-application-execution",
+            *execution_argv[5:],
+        ],
         ["invoke", "ses_gatec", "mncs-forge:native-application-execution",
          "--input-artifact", "other", "mncs-compiler:native-application-build",
          "cap_0123456789abcdef", "native-application-build.json", "--",
