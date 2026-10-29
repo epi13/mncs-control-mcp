@@ -6072,12 +6072,20 @@ class EnvironmentRPCServer:
                 "project Environment definition must be an object",
             )
         scope = definition.get("workspace_scope")
-        if (not isinstance(scope, dict)
-                or scope.get("repositories") != [repository]
+        repositories = scope.get("repositories") if isinstance(scope, dict) else None
+        scope_authorized = (
+            self._project_entry_scope_is_authorized(
+                definition, definition_path, repositories, record,
+            )
+            if record.scope == "project"
+            else isinstance(scope, dict) and repositories == [repository]
+        )
+        if (not scope_authorized
                 or definition.get("workspace_root", ".") not in (None, "", ".")):
             raise ControlError(
                 "ENVIRONMENT_AUTHORITY_DENIED",
-                "project continuation definition must remain limited to its granted repository",
+                "continuation definition may select only its granted repository "
+                "and declared protected toolchains",
                 details={"repository": repository},
             )
 

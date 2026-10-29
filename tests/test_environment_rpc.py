@@ -8340,6 +8340,43 @@ def test_registered_nested_worktree_drives_project_profile_selection(
         record, "mncs-environment", working_checkout=root_checkout,
     ) == ("env_root", str(workspace.resolve()))
 
+    manifest_path = project / ".mncs" / "project.json"
+    manifest_path.write_text(json.dumps({
+        "contracts": {"provides": [{"invocation": {
+            "toolchain": {"repository": "mncs-compiler", "path": "."},
+        }}]},
+    }), encoding="utf-8")
+    environment_definition = project / ".mncs" / "environment.json"
+    environment_definition.write_text(json.dumps({
+        "name": "root-with-protected-toolchain",
+        "workspace_scope": {"kind": "workspace", "repositories": [
+            "mncs-environment", "mncs-compiler",
+        ]},
+        "intent": {
+            "repositories": ["mncs-environment"],
+            "protected_repositories": ["mncs-compiler"],
+        },
+    }), encoding="utf-8")
+    assert server._project_environment_identity(
+        record, "mncs-environment", working_checkout=root_checkout,
+    ) == ("env_root-with-protected-toolchain", str(workspace.resolve()))
+
+    environment_definition.write_text(json.dumps({
+        "name": "root-with-undeclared-protected-toolchain",
+        "workspace_scope": {"kind": "workspace", "repositories": [
+            "mncs-environment", "mncs-vm",
+        ]},
+        "intent": {
+            "repositories": ["mncs-environment"],
+            "protected_repositories": ["mncs-vm"],
+        },
+    }), encoding="utf-8")
+    with pytest.raises(ControlError, match="declared protected toolchains") as rejected_toolchain:
+        server._project_environment_identity(
+            record, "mncs-environment", working_checkout=root_checkout,
+        )
+    assert rejected_toolchain.value.code == "ENVIRONMENT_AUTHORITY_DENIED"
+
     unrelated = project / "lookalike" / "mncs-environment"
     unrelated.mkdir(parents=True)
     subprocess.run(["git", "init", "--quiet", str(unrelated)], check=True)
