@@ -36,7 +36,7 @@ MAX_REQUEST_BYTES = 256 * 1024
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 MAX_ARGUMENT_BYTES = 48 * 1024
 ALLOWED_COMMANDS = frozenset({
-    "enter", "inspect", "context", "resume", "health", "capabilities", "checkpoint", "handoff", "accept", "claims",
+    "enter", "inspect", "context", "resume", "reconcile", "health", "capabilities", "checkpoint", "handoff", "accept", "claims",
     "complete", "store", "invoke", "artifact-read", "campaign-state",
     "projections", "updates", "retire", "continuation", "campaign-bind", "scope-grant",
     "claim-recover",
@@ -80,7 +80,7 @@ def _requires_selected_session_for_mutation(command: str, argv: list[Any]) -> bo
     if not isinstance(argv, list):
         return False
     if command in {
-        "resume", "checkpoint", "handoff", "complete", "scope-grant", "invoke",
+        "resume", "reconcile", "checkpoint", "handoff", "complete", "scope-grant", "invoke",
         "claim-recover",
     }:
         return True
@@ -131,6 +131,7 @@ _SESSION_POSITIONAL_VALUE_OPTIONS: dict[str, dict[str, int | None]] = {
         "--execution-root": 1, "--sandbox-root": 1, "--request-id": 1,
     },
     "resume": {"--consumer": 1, "--consumer-kind": 1, "--workspace": 1},
+    "reconcile": {"--consumer": 1, "--consumer-kind": 1},
     "authority": {"--consumer": 1, "--consumer-kind": 1, "--action": 1, "--target": 1},
     "invoke": {
         "--consumer": 1, "--consumer-kind": 1, "--effect-repository": 1,
@@ -617,7 +618,7 @@ class EnvironmentRPCServer:
             return None
         command = argv[0]
         if command not in {
-            "inspect", "context", "resume", "health", "capabilities", "continuation",
+            "inspect", "context", "resume", "reconcile", "health", "capabilities", "continuation",
             "checkpoint", "handoff", "accept", "claims", "claim-recover",
             "invoke", "retire", "store", "scope-grant", "complete",
             "campaign-bind", "campaign-state", "projections", "updates", "artifact-read",
@@ -1409,6 +1410,11 @@ class EnvironmentRPCServer:
                     "next": "use an exposed Environment operation or extend the Control operation contract",
                 },
             )
+        if command == "reconcile" and (
+            len(argv) != 2 or not re.fullmatch(r"ses_[A-Za-z0-9_-]{1,120}", argv[1])
+        ):
+            raise ControlError("ENVIRONMENT_RPC_INVALID_REQUEST",
+                               "reconcile requires exactly one selected session")
         if command == "store":
             if (len(argv) != 4 or argv[1] != "--session"
                     or not argv[2].startswith("ses_")
@@ -5276,7 +5282,7 @@ class EnvironmentRPCServer:
                 "--execution-root", str(repository),
                 "--sandbox-root", str(sandbox_repository),
             ])
-        if command in {"inspect", "context", "resume", "health", "capabilities", "checkpoint", "handoff", "accept", "claims", "claim-recover", "complete", "retire", "store", "scope-grant", "invoke", "artifact-read", "campaign-state"}:
+        if command in {"inspect", "context", "resume", "reconcile", "health", "capabilities", "checkpoint", "handoff", "accept", "claims", "claim-recover", "complete", "retire", "store", "scope-grant", "invoke", "artifact-read", "campaign-state"}:
             try:
                 command_index = argv.index(command)
                 if command == "store":

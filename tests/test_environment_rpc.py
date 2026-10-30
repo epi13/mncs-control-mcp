@@ -9118,3 +9118,24 @@ def test_project_root_resolves_unique_verified_nested_continuation(
     assert inactive_only["project_selection"]["reason"] == (
         "no-session-matches-registered-checkout"
     )
+
+
+def test_reconcile_route_uses_selected_session_mutation_contract(tmp_path, monkeypatch):
+    root = tmp_path / "mncs-environment"
+    root.mkdir()
+    server = EnvironmentRPCServer(
+        ControlConfig(workspace_root=tmp_path, environment_rpc_socket=tmp_path / "rpc.sock"),
+        environment_service=SimpleNamespace(state_dir=tmp_path / "state", environment_path=root),
+        policy=object(),
+    )
+    grant = _GrantRecord(
+        grant_id="reconcile-test", principal_id="fresh-principal", host_root=root,
+        sandbox_root="/workspace/mncs-environment", scope="project", uid=0,
+        expires_at=time.monotonic() + 60, token_file=tmp_path / "grant",
+        bound_session_id="ses_fresh",
+    )
+    assert server._translate_argv(["reconcile", "ses_fresh"], root, grant) == ["reconcile", "ses_fresh"]
+    assert environment_rpc_module._requires_selected_session_for_mutation("reconcile", ["reconcile", "ses_fresh"])
+    assert server._request_session(["reconcile", "ses_fresh"]) == "ses_fresh"
+    with pytest.raises(ControlError, match="exactly one"):
+        server._translate_argv(["reconcile", "ses_fresh", "--workspace", "/tmp"], root, grant)

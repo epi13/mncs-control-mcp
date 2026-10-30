@@ -1609,3 +1609,12 @@ def test_compact_context_keeps_bounded_checkout_composition_diagnostics() -> Non
             }],
         },
     }
+
+
+def test_reconcile_maps_only_the_selected_session():
+    context = _ProjectContext("secret", "/workspace/mncs-test", "ses_fresh")
+    assert _build_argv("reconcile", {}, context, "mncs-test") == (["reconcile", "ses_fresh"], True)
+    with pytest.raises(ValueError, match="unsupported arguments"):
+        _build_argv("reconcile", {"workspace": "/tmp"}, context, "mncs-test")
+    with pytest.raises(ValueError, match="not the session selected"):
+        _build_argv("reconcile", {"session_id": "ses_other"}, context, "mncs-test")

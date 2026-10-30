@@ -24,12 +24,12 @@ SESSION_RE = re.compile(r"ses_[A-Za-z0-9_-]{1,120}")
 TOKEN_RE = re.compile(r"[A-Za-z0-9_-]{32,128}")
 OPERATIONS = frozenset({
     "enter", "continuation", "inspect", "context", "health", "capabilities",
-    "resume", "verify", "invoke", "checkpoint", "handoff", "complete", "claims",
+    "resume", "reconcile", "verify", "invoke", "checkpoint", "handoff", "complete", "claims",
     "campaign_state", "environmental_capability", "session_updates", "artifact_read",
     "store_generation", "scope_grant",
 })
 SESSION_OPERATIONS = frozenset({
-    "inspect", "context", "health", "capabilities", "resume", "verify", "invoke",
+    "inspect", "context", "health", "capabilities", "resume", "reconcile", "verify", "invoke",
     "checkpoint", "handoff", "complete", "claims", "campaign_state",
     "environmental_capability", "session_updates", "artifact_read", "store_generation", "scope_grant",
 })
@@ -173,7 +173,7 @@ def _build_argv(
         "continuation": {"campaign_id", "task_identity", "session_id"},
         "inspect": {"session_id"}, "context": {"session_id"},
         "health": {"session_id", "live"}, "capabilities": {"session_id"},
-        "resume": {"session_id"},
+        "resume": {"session_id"}, "reconcile": {"session_id"},
         "verify": {"session_id", "capability"},
         "invoke": {
             "session_id", "capability", "request_file", "input_artifact", "call",
@@ -242,7 +242,7 @@ def _build_argv(
         return argv, False
 
     session_id = _session_argument(values, context)
-    if operation in {"inspect", "context", "capabilities"}:
+    if operation in {"inspect", "context", "capabilities", "reconcile"}:
         return [operation, session_id], True
     if operation == "resume":
         # Revalidate on every explicit resume so a fresh agent sees current
