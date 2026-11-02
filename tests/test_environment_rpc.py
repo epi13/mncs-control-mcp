@@ -9184,3 +9184,24 @@ def test_worktree_prepare_routes_exact_typed_contract_and_keeps_boundary(tmp_pat
     ):
         with pytest.raises(ControlError):
             server._translate_argv(changed, project, grant)
+
+
+def test_compiler_bootstrap_rpc_requires_selected_project_and_fixed_arguments(tmp_path):
+    workspace = tmp_path / "workspace"
+    project = workspace / "mncs-compiler"
+    (project / ".git").mkdir(parents=True)
+    server = EnvironmentRPCServer(
+        ControlConfig(workspace_root=workspace, sandbox_home=tmp_path / "home",
+                      environment_rpc_socket=tmp_path / "rpc.sock"),
+        environment_service=SimpleNamespace(state_dir=tmp_path / "state",
+                                            environment_path=tmp_path / "environment"), policy=object(),
+    )
+    grant = _GrantRecord(grant_id="bootstrap", principal_id="principal", host_root=project,
+                         sandbox_root="/workspace/mncs-compiler", scope="project", uid=0,
+                         expires_at=time.monotonic()+60, token_file=tmp_path / "grant",
+                         bound_session_id="ses_selected")
+    argv = ["invoke", "ses_selected", "mncs-compiler:compiler-build"]
+    assert server._translate_argv(argv, project, grant) == argv
+    for changed in ([*argv, "--arbitrary"], [argv[0], "ses_foreign", argv[2]]):
+        with pytest.raises(ControlError):
+            server._translate_argv(changed, project, grant)

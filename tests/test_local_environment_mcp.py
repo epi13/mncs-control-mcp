@@ -1618,3 +1618,17 @@ def test_reconcile_maps_only_the_selected_session():
         _build_argv("reconcile", {"workspace": "/tmp"}, context, "mncs-test")
     with pytest.raises(ValueError, match="not the session selected"):
         _build_argv("reconcile", {"session_id": "ses_other"}, context, "mncs-test")
+
+
+def test_compiler_bootstrap_has_a_fixed_canonical_route():
+    context = _ProjectContext("secret", "/workspace/mncs-compiler")
+    context.selected_session_id = "ses_selected"
+    argv, selected = _build_argv("invoke", {"capability": "mncs-compiler:compiler-build"},
+                                 context, "mncs-compiler")
+    assert selected and argv == ["invoke", "ses_selected", "mncs-compiler:compiler-build"]
+    for project, arguments in [
+        ("mncs-stdlib", {"capability": "mncs-compiler:compiler-build"}),
+        ("mncs-compiler", {"capability": "mncs-compiler:compiler-build", "request_file": "anything.json"}),
+    ]:
+        with pytest.raises(ValueError):
+            _build_argv("invoke", arguments, context, project)

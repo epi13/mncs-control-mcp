@@ -1526,6 +1526,7 @@ class EnvironmentRPCServer:
                 argv, record,
             )
             worktree_prepare = argv[2] == "mncs-control-mcp:workspace.worktree.prepare"
+            compiler_bootstrap = argv[2] == "mncs-compiler:compiler-build"
             native_application_build = (
                 argv[2] == "mncs-compiler:native-application-build"
             )
@@ -1546,7 +1547,15 @@ class EnvironmentRPCServer:
             resource_evaluation = (
                 argv[2] == "mncs-automation:automation-resource-headroom-evaluation"
             )
-            if worktree_prepare:
+            if compiler_bootstrap:
+                if (len(argv) != 3 or record.scope != "project"
+                        or record.bound_session_id != argv[1]
+                        or self._project_repository(record) not in {"mncs-compiler", "mncs-environment"}):
+                    raise ControlError(
+                        "ENVIRONMENT_AUTHORITY_DENIED",
+                        "Compiler bootstrap requires its selected project session and fixed invocation",
+                    )
+            elif worktree_prepare:
                 self._authorize_worktree_prepare_invocation(argv, record)
             elif resource_evaluation:
                 self._authorize_resource_headroom_invocation(argv, record)
@@ -1577,7 +1586,8 @@ class EnvironmentRPCServer:
                     details={"next": "run project continuation and use its selected session"},
                 )
             if (not project_verification and not native_application_build
-                    and not native_application_execution and not worktree_prepare):
+                    and not native_application_execution and not worktree_prepare
+                    and not compiler_bootstrap):
                 environment_project = self.config.repositories.get(
                     "environment", "mncs-environment"
                 )

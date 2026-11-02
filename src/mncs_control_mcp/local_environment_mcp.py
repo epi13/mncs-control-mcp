@@ -266,6 +266,10 @@ def _build_argv(
         return ["invoke", session_id, capability], True
     if operation == "invoke":
         capability = _string(values.get("capability"), "capability", max_length=256)
+        if capability == "mncs-compiler:compiler-build":
+            if project not in {"mncs-compiler", "mncs-environment"} or set(values) - {"session_id", "capability"}:
+                raise ValueError("Compiler bootstrap accepts only its selected project session")
+            return ["invoke", session_id, capability], True
         if capability == "mncs-compiler:native-application-build":
             if set(values) - {"session_id", "capability", "request_file"}:
                 raise ValueError("Compiler application build accepts one request_file")
@@ -348,7 +352,7 @@ def _build_argv(
                 "--requests-json", requests_json,
             ], True
         raise ValueError(
-            "invoke supports only native-application-build, native-application-execution, "
+            "invoke supports only compiler-build, native-application-build, native-application-execution, "
             "and the typed Control worktree-prepare contract"
         )
     if operation == "scope_grant":
