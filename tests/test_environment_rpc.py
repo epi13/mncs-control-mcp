@@ -9150,3 +9150,37 @@ def test_reconcile_route_uses_selected_session_mutation_contract(tmp_path, monke
     assert server._request_session(["reconcile", "ses_fresh"]) == "ses_fresh"
     with pytest.raises(ControlError, match="exactly one"):
         server._translate_argv(["reconcile", "ses_fresh", "--workspace", "/tmp"], root, grant)
+
+
+def test_worktree_prepare_routes_exact_typed_contract_and_keeps_boundary(tmp_path):
+    workspace = tmp_path / "workspace"
+    project = workspace / "mncs-control-mcp"
+    (project / ".git").mkdir(parents=True)
+    server = EnvironmentRPCServer(
+        ControlConfig(workspace_root=workspace, sandbox_home=tmp_path / "home",
+                      environment_rpc_socket=tmp_path / "rpc.sock"),
+        environment_service=SimpleNamespace(state_dir=tmp_path / "state",
+                                            environment_path=tmp_path / "environment"),
+        policy=object(),
+    )
+    grant = _GrantRecord(
+        grant_id="worktree-route", principal_id="principal", host_root=project,
+        sandbox_root="/workspace/mncs-control-mcp", scope="project", uid=0,
+        expires_at=time.monotonic() + 60, token_file=tmp_path / "grant",
+        bound_session_id="ses_selected",
+    )
+    request = [{"repository": "mncs-control-mcp", "name": "bounded",
+                "branch": "campaign/bounded", "source_ref": "origin/main"}]
+    argv = ["invoke", "ses_selected", "mncs-control-mcp:workspace.worktree.prepare",
+            "--effect-repository", "mncs-control-mcp", "--", "prepare",
+            "--workspace-root", str(workspace), "--requests-json", json.dumps(request)]
+    assert server._translate_argv(argv, project, grant) == argv
+    for changed in (
+        [*argv, "--arbitrary"],
+        [*argv[:8], str(tmp_path), *argv[9:]],
+        [*argv[:4], "mncs-doctor", *argv[5:]],
+        [argv[0], "ses_foreign", *argv[2:]],
+        [*argv[:10], json.dumps(request * 2)],
+    ):
+        with pytest.raises(ControlError):
+            server._translate_argv(changed, project, grant)

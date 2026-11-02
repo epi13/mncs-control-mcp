@@ -49,6 +49,7 @@ MAX_CONTEXT_RESPONSE_SUMMARY_BYTES = 128 * 1024
 MAX_CONTEXT_RESPONSE_CAPABILITY_LIST = 20
 CONTEXT_RESPONSE_SUMMARY_SCHEMA = "mncs.environment.context-response-summary/2"
 ALLOWED_INVOKE_CAPABILITIES = frozenset({
+    "mncs-control-mcp:workspace.worktree.prepare",
     "mncs-environment:ambient-projection-coherence",
     "mncs-environment:projection-evidence-inspection",
     "mncs-environment:campaign-state-inspection",
@@ -1524,6 +1525,7 @@ class EnvironmentRPCServer:
             project_verification = self._authorize_project_verification_invocation(
                 argv, record,
             )
+            worktree_prepare = argv[2] == "mncs-control-mcp:workspace.worktree.prepare"
             native_application_build = (
                 argv[2] == "mncs-compiler:native-application-build"
             )
@@ -1544,7 +1546,9 @@ class EnvironmentRPCServer:
             resource_evaluation = (
                 argv[2] == "mncs-automation:automation-resource-headroom-evaluation"
             )
-            if resource_evaluation:
+            if worktree_prepare:
+                self._authorize_worktree_prepare_invocation(argv, record)
+            elif resource_evaluation:
                 self._authorize_resource_headroom_invocation(argv, record)
             elif native_application_build:
                 self._authorize_native_application_build_invocation(argv, record)
@@ -1573,7 +1577,7 @@ class EnvironmentRPCServer:
                     details={"next": "run project continuation and use its selected session"},
                 )
             if (not project_verification and not native_application_build
-                    and not native_application_execution):
+                    and not native_application_execution and not worktree_prepare):
                 environment_project = self.config.repositories.get(
                     "environment", "mncs-environment"
                 )
@@ -2193,6 +2197,44 @@ class EnvironmentRPCServer:
             # that successful entry into an ambiguous tool result.
             return None
         return definition_id, workspace_root
+
+    def _authorize_worktree_prepare_invocation(
+        self, argv: list[str], record: _GrantRecord,
+    ) -> None:
+        """Route the already exposed typed provider contract, without shell argv.
+
+        Environment checks effect-repository rights before dispatch; GitService
+        owns registered-checkout, branch, cleanliness and ref safety.
+        """
+        if (record.scope != "project"
+                or self._project_repository(record) != "mncs-control-mcp"
+                or record.bound_session_id != argv[1]):
+            raise ControlError(
+                "ENVIRONMENT_AUTHORITY_DENIED",
+                "worktree preparation requires the selected Control project session",
+            )
+        if (len(argv) != 11 or argv[3] != "--effect-repository"
+                or argv[5:8] != ["--", "prepare", "--workspace-root"]
+                or argv[9] != "--requests-json"
+                or argv[8] != str(self.config.workspace_root.expanduser().resolve())):
+            raise ControlError(
+                "ENVIRONMENT_AUTHORITY_DENIED",
+                "worktree preparation requires its fixed workspace and typed request",
+            )
+        try:
+            requests = json.loads(argv[10])
+        except (TypeError, ValueError) as error:
+            raise ControlError("ENVIRONMENT_RPC_INVALID_REQUEST", "invalid worktree request") from error
+        if (not isinstance(requests, list) or len(requests) != 1
+                or not isinstance(requests[0], dict)
+                or set(requests[0]) != {"repository", "name", "branch", "source_ref"}
+                or any(not isinstance(value, str) or not value or len(value) > 256
+                       for value in requests[0].values())
+                or requests[0]["repository"] != argv[4]
+                or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", argv[4]) is None):
+            raise ControlError(
+                "ENVIRONMENT_AUTHORITY_DENIED", "worktree request must match its exact effect repository",
+            )
 
     def _authorize_project_verification_invocation(
         self, argv: list[str], record: _GrantRecord,
