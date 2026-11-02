@@ -5444,6 +5444,11 @@ class EnvironmentRPCServer:
             ),
             "MNCS_ENV_AUTH_PRINCIPAL_ID": record.principal_id,
             "MNCS_ENV_RPC_REQUEST_ID": request_id,
+            # Derived native artifacts belong to the existing owner runtime,
+            # not the protected canonical Environment state parent.
+            "MNCS_NATIVE_APPLICATION_CACHE_DIR": str(
+                self.socket_path.parent / "native-applications"
+            ),
         }
         # A ``-c`` process normally prepends its working directory to
         # ``sys.path``. That directory is the caller's project checkout and
@@ -5456,7 +5461,10 @@ class EnvironmentRPCServer:
         try:
             completed = subprocess.run(
                 host_argv, cwd=cwd, env=process_env, capture_output=True,
-                text=True, timeout=240, check=False,
+                text=True,
+                timeout=(1830 if command == "invoke"
+                         and argv[2] == "mncs-compiler:compiler-build" else 240),
+                check=False,
             )
         except subprocess.TimeoutExpired as error:
             raise ControlError("ENVIRONMENT_PUBLICATION_AMBIGUOUS",

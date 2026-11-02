@@ -66,7 +66,10 @@ def _rpc(socket_path: Path, request: dict[str, Any]) -> dict[str, Any]:
     if len(payload) > MAX_FRAME:
         raise ValueError("Environment request exceeds the bounded local IPC frame")
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
-        connection.settimeout(300.0)
+        argv = request.get("argv", [])
+        bootstrap = (isinstance(argv, list) and len(argv) == 3
+                     and argv[0] == "invoke" and argv[2] == "mncs-compiler:compiler-build")
+        connection.settimeout(1860.0 if bootstrap else 300.0)
         connection.connect(str(socket_path))
         connection.sendall(struct.pack("!I", len(payload)) + payload)
         size = struct.unpack("!I", _frame_read(connection, 4))[0]
