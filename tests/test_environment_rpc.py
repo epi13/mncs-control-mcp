@@ -446,6 +446,17 @@ def test_scope_grant_rpc_requires_exact_campaign_approval_and_selected_project_g
             server._translate_argv(changed, environment, grant)
         assert raised.value.code == "ENVIRONMENT_AUTHORITY_DENIED"
 
+    # A denied expansion is not a campaign-wide authority denial. The caller
+    # can request an independent, normally authorized target-project intent.
+    independent = args[:5] + ["mncs-compiler"] + args[6:-2]
+    with pytest.raises(ControlError) as denied_expansion:
+        server._translate_argv(independent, environment, grant)
+    assert denied_expansion.value.code == "ENVIRONMENT_AUTHORITY_DENIED"
+    assert denied_expansion.value.details["next_operation"] == {
+        "operation": "enter", "project": "mncs-compiler",
+        "arguments": {"campaign_id": "cmp_scope_test"},
+    }
+
     authorized_sessions: list[str] = []
     monkeypatch.setattr(server, "_grant", lambda _request, _peer: grant)
     monkeypatch.setattr(

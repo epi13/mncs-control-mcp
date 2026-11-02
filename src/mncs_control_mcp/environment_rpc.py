@@ -3230,8 +3230,18 @@ class EnvironmentRPCServer:
             if repository_name != caller_repository or not has_checkout_selector:
                 raise ControlError(
                     "ENVIRONMENT_AUTHORITY_DENIED",
-                    "a new repository scope still needs an exact owner grant; checkout selection without one is limited to the authenticated project repository",
-                    details={"campaign_id": campaign_id, "repository": repository_name},
+                    "expanding this session needs an exact owner grant; independent repository work uses project entry with its own Work Intent",
+                    details={
+                        "campaign_id": campaign_id, "repository": repository_name,
+                        "next_operation": {
+                            "operation": "enter", "project": repository_name,
+                            "arguments": {"campaign_id": campaign_id},
+                        },
+                        "next": (
+                            "enter the target project's owner-controlled Environment definition; "
+                            "entry independently validates its authority, rights, checkout and claims"
+                        ),
+                    },
                 )
             # This marker is only accepted when Environment independently
             # proves the repository is already writable in the selected
