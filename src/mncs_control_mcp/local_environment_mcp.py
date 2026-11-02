@@ -247,7 +247,7 @@ def _build_argv(
     if operation == "resume":
         # Revalidate on every explicit resume so a fresh agent sees current
         # checkout/toolchain readiness through this stable gateway.
-        return ["resume", session_id, "--revalidate"], True
+        return ["resume", session_id, "--revalidate", "--context"], True
     if operation == "verify":
         capability = _string(values.get("capability"), "capability", max_length=256)
         prefixes = (

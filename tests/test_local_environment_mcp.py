@@ -418,7 +418,7 @@ def test_resume_revalidates_the_selected_session() -> None:
     )
 
     assert selected is True
-    assert argv == ["resume", "ses_selected", "--revalidate"]
+    assert argv == ["resume", "ses_selected", "--revalidate", "--context"]
 
 
 def test_verify_maps_a_project_capability_to_its_fixed_invocation() -> None:
@@ -1190,7 +1190,7 @@ def test_session_operation_can_reselect_an_exact_session_after_context_reset(
     assert response["ok"] is True
     assert response["result"]["session_id"] == "ses_selected"
     assert requests[0]["argv"] == ["continuation", "--session-id", "ses_selected"]
-    assert requests[1]["argv"] == ["resume", "ses_selected", "--revalidate"]
+    assert requests[1]["argv"] == ["resume", "ses_selected", "--revalidate", "--context"]
 
 
 def test_campaign_selection_refreshes_a_stale_local_grant(
@@ -1255,7 +1255,7 @@ def test_campaign_selection_refreshes_a_stale_local_grant(
     assert requests[2]["grant"] == "f" * 40
     assert requests[2]["argv"] == requests[0]["argv"]
     assert requests[3]["grant"] == "f" * 40
-    assert requests[3]["argv"] == ["resume", "ses_selected", "--revalidate"]
+    assert requests[3]["argv"] == ["resume", "ses_selected", "--revalidate", "--context"]
 
 
 def test_campaign_and_task_identity_jointly_reselect_exact_session(
@@ -1282,7 +1282,7 @@ def test_campaign_and_task_identity_jointly_reselect_exact_session(
                 }),
                 "stderr": "", "exit_code": 0,
             }}
-        if argv == ["resume", "ses_exact", "--revalidate"]:
+        if argv == ["resume", "ses_exact", "--revalidate", "--context"]:
             return {"ok": True, "result": {
                 "stdout": json.dumps({
                     "session_id": "ses_exact", "lifecycle": "active",
@@ -1303,7 +1303,7 @@ def test_campaign_and_task_identity_jointly_reselect_exact_session(
     assert [request["argv"] for request in requests] == [
         ["continuation", "--campaign-id", "cmp_compiler",
          "--task-identity", "int_compiler_task"],
-        ["resume", "ses_exact", "--revalidate"],
+        ["resume", "ses_exact", "--revalidate", "--context"],
     ]
 
 
