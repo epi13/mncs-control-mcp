@@ -2644,3 +2644,61 @@ def test_task_binding_survives_a_fresh_environment_service(tmp_path: Path) -> No
     assert capsule["task_selector"]["status"] == "resolved"
     assert capsule["task_selector"]["session_id"] == session_id
     assert capsule["task_selector"]["campaign_id"] == campaign_id
+
+
+@needs_environment
+def test_declared_worktree_provider_checks_effect_rights_before_execution(tmp_path):
+    """Consume the real provider descriptor through real Environment/Store."""
+    config = _config(tmp_path)
+    service = EnvironmentService(config)
+    pkg = service._pkg()
+    workspace = config.workspace_root
+    control = workspace / "mncs-control-mcp"
+    doctor = workspace / "mncs-doctor"
+    for root in (control, doctor):
+        root.mkdir()
+        (root / ".mncs").mkdir()
+        (root / ".mncs/project.json").write_text(json.dumps({"repository": root.name}))
+        subprocess.run(["git", "init", "-b", "main", str(root)], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(root), "add", "."], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(root), "-c", "user.name=Fixture", "-c",
+                        "user.email=fixture@example.invalid", "commit", "-m", "fixture"],
+                       check=True, capture_output=True)
+    descriptor = json.loads((Path(__file__).resolve().parents[1] /
+                             "family-semantic-contracts-v1.json").read_text())
+    (control / "family-semantic-contracts-v1.json").write_text(json.dumps(descriptor))
+    provider = control / "src/mncs_control_mcp/worktree_cli.py"
+    provider.parent.mkdir(parents=True)
+    marker = control / "provider-executed"
+    provider.write_text('from pathlib import Path\nPath("provider-executed").write_text("ran")\n')
+    definition = {
+        "name": "effect-rights-regression",
+        "workspace_scope": {"kind": "workspace", "repositories": [control.name, doctor.name]},
+        "intent": {"goal": "bounded provider effect proof", "repositories": [control.name]},
+    }
+    context = pkg.entry.enter(
+        definition=definition, definition_path=None, workspace_root=str(workspace),
+        state_dir=service.state_dir, backend="store", consumer_id="fixture", consumer_kind="agent",
+        authenticated_principal_id="fixture-owner", campaign_id="cmp_effect_rights",
+    )
+    session = pkg.sessions.Session.open(state_dir=service.state_dir, session_id=context["session_id"])
+    try:
+        try:
+            denied = session.invoke("mncs-control-mcp:workspace.worktree.prepare", [],
+                                    effect_target={"repository": doctor.name})
+        except pkg.sessions.AuthorityDenied as error:
+            assert "outside this session" in str(error)
+        else:
+            assert denied["status"] == "denied", denied
+        assert not marker.exists()
+        session.acquire_claim(
+            control.name, reason="fixture-owned checkout", basis="explicit-adoption",
+            scope={"kind": "worktree", "checkout": str(control), "branch": "main"},
+        )
+        allowed = session.invoke("mncs-control-mcp:workspace.worktree.prepare", [],
+                                 effect_target={"repository": control.name})
+        assert allowed["status"] == "ok", allowed
+        assert marker.is_file()
+        session.complete(outcome="verified", summary="effect rights regression")
+    finally:
+        session.close()

@@ -10,7 +10,10 @@
       "invocation": {
         "kind": "python",
         "path": "src/mncs_control_mcp/worktree_cli.py"
-      }
+      },
+      "effects": [
+        "execute"
+      ]
     }
   ]
 }

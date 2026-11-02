@@ -16,6 +16,9 @@
     "fingerprint_sources": [
      "src/mncs_control_mcp/",
      "family-semantic-contracts-v1.json"
+    ],
+    "effects": [
+     "execute"
     ]
    },
    {
