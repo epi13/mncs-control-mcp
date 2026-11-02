@@ -6401,6 +6401,8 @@ def test_compiler_project_rpc_admits_only_its_typed_native_application_build(
     assert built["ok"] is True
     assert json.loads(built["result"]["stdout"]) == {"status": "stored"}
     assert calls[0][0][-len(build_argv):] == build_argv
+    # Fixed file/argv requests never consume the live MCP transport's stdin.
+    assert calls[0][1]["stdin"] == subprocess.DEVNULL
     assert calls[0][1]["env"]["MNCS_ENV_AUTH_PRINCIPAL_ID"] == "principal-agent"
 
     rejected_argv = (

@@ -5461,6 +5461,7 @@ class EnvironmentRPCServer:
         try:
             completed = subprocess.run(
                 host_argv, cwd=cwd, env=process_env, capture_output=True,
+                stdin=subprocess.DEVNULL,
                 text=True,
                 timeout=(1830 if command == "invoke"
                          and argv[2] == "mncs-compiler:compiler-build" else 240),
