@@ -925,19 +925,13 @@ class EnvironmentService:
                 requested_campaign_id = selected_campaign_id
 
             scope_grants_cache: dict[str, list[dict[str, Any]]] = {}
-            scope_grants_lookup_count = 0
 
             def scope_grants_for_session(session_id: str) -> list[dict[str, Any]]:
-                nonlocal scope_grants_lookup_count
                 if session_id in scope_grants_cache:
                     return scope_grants_cache[session_id]
-                scope_grants_lookup_count += 1
-                if scope_grants_lookup_count > 128:
-                    raise ControlError(
-                        "ENVIRONMENT_LOOKUP_LIMIT",
-                        "scope-grant continuation search exceeds the bounded same-context session limit",
-                        details={"session_count": scope_grants_lookup_count, "limit": 128},
-                    )
+                # The canonical session inventory is already bounded below.
+                # A second, smaller bound on historical grant reads made a
+                # valid task selector fail merely as completed work accumulated.
                 session_type = getattr(pkg.sessions, "Session", None)
                 opener = getattr(session_type, "open", None)
                 if not callable(opener):

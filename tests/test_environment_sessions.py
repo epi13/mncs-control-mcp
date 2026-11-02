@@ -948,8 +948,9 @@ def test_campaign_continuation_returns_project_scoped_duplicate_capsules(tmp_pat
     assert "new campaign_id and task_identity" in next_step
 
 
+@pytest.mark.parametrize("unrelated_sessions", [0, 129])
 def test_owner_scope_grant_links_only_its_exact_campaign_worktree(
-    tmp_path: Path,
+    tmp_path: Path, unrelated_sessions: int,
 ) -> None:
     repository = "mncs-language"
     config = _config(tmp_path)
@@ -1001,6 +1002,9 @@ def test_owner_scope_grant_links_only_its_exact_campaign_worktree(
             "ses-language-forged", checkout_b, branch="campaign/other-branch",
         )],
     }
+    # Existing same-context work must not exhaust a smaller grant-read quota.
+    # These sessions have no grant to the requested checkout and confer no rights.
+    grants = {**{f"ses-unrelated-{i}": [] for i in range(unrelated_sessions)}, **grants}
     snapshots = {
         session_id: {
             "session_id": session_id,
