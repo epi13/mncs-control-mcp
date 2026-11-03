@@ -109,6 +109,31 @@ Start a new Codex process after registration. Call `mncs_environment` with a
 workspace `project`, a named `operation` such as `enter`, `continuation`,
 `resume`, `verify`, `checkpoint`, `claims`, or `complete`, and operation-specific
 `arguments`.
+
+If a running consumer's local MCP connection closes, Control's RPC can remain
+ready: it is a separate transport. Do not kill the client-owned MCP provider to
+refresh code. A provider termination closes that client's captured tool connection;
+Control cannot rebind the consumer runtime's tools. The same running local agent
+with terminal access can open a fresh **canonical MCP** connection with:
+
+```bash
+/path/to/mncs-control-mcp/.venv/bin/python -B -m mncs_control_mcp.environment_mcp_client <<'JSON'
+{"project":"mncs-control-mcp","cwd":".worktrees/example","operation":"context","arguments":{"session_id":"ses_exact"}}
+JSON
+```
+
+Use the exact real project, checkout, and session (or campaign/task selectors).
+This supported client starts the normal stdio provider, initializes MCP, calls
+only `mncs_environment`, and closes its own provider. Each subsequent call opens
+a fresh connection and reads current published source. It does not restart shared
+services, restore the runtime's captured tool binding, read the Store, transfer
+ownership, or supply permissions. Control issues a new process-bound grant and
+rechecks current authority and conflicts. Campaign identity is durable; provider
+process identity changes. There is no automatic mutation replay after a lost
+response: inspect durable state first. `environment_persistence.agent_mcp` in
+Control status explicitly reports client readiness as unobserved and names this
+recovery path. A consumer without terminal access needs its runtime to reconnect;
+Control cannot repair that external client limitation.
 The optional `cwd` selects a directory relative to that project, including an
 existing worktree. Control admits an immediate Git checkout under the workspace,
 issues its grant over the existing private Environment socket, binds the grant

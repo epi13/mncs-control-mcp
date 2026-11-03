@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -7700,6 +7701,16 @@ def test_grant_files_live_outside_shared_sandbox_home(tmp_path: Path) -> None:
             "authorization": "per-execution-grant-and-peer-credentials",
             "principal_id": server.principal_id,
             "store_mutation": {"state": "store-missing", "code": "store-missing"},
+            "agent_mcp": {
+                "state": "unobserved",
+                "owner": "consumer-runtime",
+                "backend_readiness_implies_client_readiness": False,
+                "recovery": "fresh-canonical-mcp-connection",
+                "command": shlex.join([
+                    sys.executable, "-B", "-m", "mncs_control_mcp.environment_mcp_client",
+                ]),
+                "runtime_tool_rebind": "not-provided-by-control",
+            },
         }
         resolution = SimpleNamespace(
             scope="project", project="alpha", host_root=tmp_path / "projects" / "alpha"

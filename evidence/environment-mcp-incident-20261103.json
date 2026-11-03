@@ -1,0 +1,90 @@
+{
+  "incident_source": "/home/epi13/.codex/sessions/2026/11/02/rollout-2026-11-02T20-58-48-01a19ffd-1dd4-7d60-8413-4ea2293b788a.jsonl",
+  "incident_sha256": "7ea510135f7fd1f3119ebaafe5c887eb934670a61ec88341684ac0d9ecac99c3",
+  "events": [
+    {
+      "timestamp": "2026-11-03T11:27:44.746Z",
+      "ordinal": 12521,
+      "kind": "completed",
+      "duration": {
+        "secs": 11,
+        "nanos": 384397599
+      },
+      "arguments": {
+        "operation": "verify",
+        "project": "MNCS-Commons",
+        "cwd": ".worktrees/native-remediation-policy-20261103",
+        "arguments": {
+          "session_id": "ses_8053c86d34ea8dad",
+          "campaign_id": "cmp_luna_max_native_self_consumption_20261102",
+          "capability": "mncs-commons:test/commons-tests"
+        }
+      },
+      "error": null,
+      "result": {
+        "ok": false,
+        "error": {
+          "code": "ENVIRONMENT_LOCAL_BRIDGE_FAILED",
+          "message": "verify accepts only a declared verification or test capability for the selected project"
+        }
+      }
+    },
+    {
+      "timestamp": "2026-11-03T11:28:45.189Z",
+      "ordinal": 12581,
+      "kind": "explicit-provider-termination",
+      "command": "kill -TERM 2346823"
+    },
+    {
+      "timestamp": "2026-11-03T11:28:52.092Z",
+      "ordinal": 12596,
+      "kind": "failed",
+      "duration": {
+        "secs": 0,
+        "nanos": 132805
+      },
+      "arguments": {
+        "operation": "verify",
+        "project": "MNCS-Commons",
+        "cwd": ".worktrees/native-remediation-policy-20261103",
+        "arguments": {
+          "session_id": "ses_8053c86d34ea8dad",
+          "campaign_id": "cmp_luna_max_native_self_consumption_20261102",
+          "capability": "mncs-commons:test/commons-tests"
+        }
+      },
+      "error": {
+        "message": "tool call error: tool call failed for `mncs-environment/mncs_environment`\n\nCaused by:\n    Transport closed"
+      },
+      "result": null
+    }
+  ],
+  "root_cause": "The active agent explicitly terminated its own client-owned stdio MCP provider to refresh stale imported bridge code. Its runtime retained a closed tool connection. Control RPC is a separate owner-managed Unix socket and remained usable.",
+  "boundaries": {
+    "stdio_provider": "Codex-managed child PID 2346823, parent 9866",
+    "owner_rpc": "Control systemd service; separate process and transport",
+    "source_refresh": "New provider loads current bridge source; Control restart alone does not reload existing client-owned bridge",
+    "runtime_rebind": "No exposed reconnect/rebind tool in this runtime; not repaired or claimed"
+  },
+  "excluded_claims": "No evidence that Work Intent completion, idle cleanup, OOM, or a Control restart killed this provider. Last call before SIGTERM returned a structured bridge validation error, not a transport error.",
+  "preserved_checkpoint": "chk_883a2d643026300c",
+  "prior_deliveries": {
+    "Commons": "c53ae0b864046b8fef6c899de8fad5f882a68ecb",
+    "Doctor": "39ef688c08529b2aa482d2ca2822991cbe258321",
+    "Control": "f64babdd20e3a182780598ad054ccf3df0231111"
+  },
+  "preservation_observation": {
+    "canonical_store_checkpoint_chunk": "/home/epi13/.local/share/mncs-environment/store/chunks/5a8b397d8799eb619aca99c53c34f34e6afae664db06968cec76dd466a483f52.chunk",
+    "sha256": "5a8b397d8799eb619aca99c53c34f34e6afae664db06968cec76dd466a483f52",
+    "mode": "read-only inspection; checkpoint and Luna campaign never mutated",
+    "previous_heads_verified_equal_origin_main": true
+  },
+  "verification": {
+    "focused": "152 passed in 5.57s; test_local_environment_mcp.py, test_environment_rpc.py, test_environment_mcp_client.py",
+    "downstream": "test_mcp_server.py: 2 passed, 1 skipped in 4.91s; skipped persistent Fabric test requires sibling source checkout",
+    "lint": "ruff checks and git diff --check passed",
+    "limits": "No claim of captured Codex MCP tool rebinding, new consumer without terminal access, idle/OOM remediation, or destructive shared-service fault injection."
+  },
+  "acceptance_consumer_pid": 2672828,
+  "acceptance_harness": "import asyncio,json,sys,os\nfrom pathlib import Path\nfrom datetime import datetime,timezone\nfrom test_environment_mcp_client import EnvironmentClient\nfrom mncs_control_mcp.environment_mcp_client import call_environment\nroot=Path.cwd(); evidence=root/'evidence/environment-mcp-transport-recovery-20261103.json'\nrows=[]\ndef record(label,value):\n rows.append({'step':label,'at':datetime.now(timezone.utc).isoformat(),'result':value})\n evidence.write_text(json.dumps(rows,indent=2)+'\\n')\n print(label, json.dumps(value)[:500],flush=True)\ndef compact(r):\n p=r.get('result',{})\n return {'ok':r.get('ok'),'error':r.get('error'),'session_id':p.get('session_id'),'authority':p.get('authority'),'writable_repositories':p.get('writable_repositories'),'work_intent':p.get('work_intent'),'lifecycle':p.get('lifecycle')}\ndef call(c,args):\n return c.request('tools/call',{'name':'mncs_environment','arguments':args},timeout=300)['structuredContent']\ndef fresh(args):return asyncio.run(call_environment(args))['structuredContent']\nargs={'project':'mncs-control-mcp','operation':'context','arguments':{'session_id':'ses_2a76074439e1e51d','campaign_id':'cmp_sol_transport_repair_20261103'}}\nc=EnvironmentClient(root)\ntry:\n before=call(c,args); assert before['ok']; record('active_consumer_context_before',compact(before))\n pid=c.process.pid;c.process.terminate();c.process.wait(timeout=10)\n try:call(c,args);raise AssertionError('dead provider unexpectedly usable')\n except (BrokenPipeError,AssertionError) as e:record('controlled_provider_termination',{'pid':pid,'exit_code':c.process.returncode,'old_connection_error':str(e)[:300]})\n after=fresh(args);assert after['ok'];assert before['result']['authority']==after['result']['authority'];assert before['result']['session_id']==after['result']['session_id'];record('same_agent_fresh_mcp_recovered',compact(after))\n bad=fresh({'project':'mncs-control-mcp','operation':'context','arguments':{'session_id':'ses_305381d54bab4b51'}});assert not bad['ok'];record('foreign_project_session_denied',compact(bad))\n new=fresh({'project':'mncs-environment','operation':'enter','arguments':{'campaign_id':'cmp_sol_transport_repair_20261103','task_identity':'transport-recovery-acceptance-environment'}});assert new['ok'];record('second_repository_work_intent',compact(new))\n sid=new['result']['session_id']\n try:\n  second=fresh({'project':'mncs-environment','operation':'context','arguments':{'session_id':sid,'campaign_id':'cmp_sol_transport_repair_20261103'}});assert second['ok'];record('second_harmless_operation',compact(second))\n finally:\n  done=fresh({'project':'mncs-environment','operation':'complete','arguments':{'session_id':sid,'outcome':'success','summary':'Isolated MCP recovery acceptance read-only intent complete'}});record('test_intent_released',compact(done));assert done['ok']\n again=fresh(args);assert again['ok'];record('original_repository_continues',compact(again))\nfinally:c.close()\n"
+}

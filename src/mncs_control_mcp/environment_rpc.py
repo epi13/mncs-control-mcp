@@ -319,6 +319,16 @@ class EnvironmentRPCServer:
             "authorization": "per-execution-grant-and-peer-credentials",
             "principal_id": self.principal_id,
             "store_mutation": self._store_mutation_status(),
+            "agent_mcp": {
+                "state": "unobserved",
+                "owner": "consumer-runtime",
+                "backend_readiness_implies_client_readiness": False,
+                "recovery": "fresh-canonical-mcp-connection",
+                "command": shlex.join([
+                    sys.executable, "-B", "-m", "mncs_control_mcp.environment_mcp_client",
+                ]),
+                "runtime_tool_rebind": "not-provided-by-control",
+            },
         }
 
     def _store_mutation_status(self) -> dict[str, str]:

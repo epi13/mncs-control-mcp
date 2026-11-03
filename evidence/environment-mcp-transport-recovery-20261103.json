@@ -1,0 +1,195 @@
+[
+  {
+    "step": "active_consumer_context_before",
+    "at": "2026-11-03T15:14:53.138808+00:00",
+    "result": {
+      "ok": true,
+      "error": null,
+      "session_id": "ses_2a76074439e1e51d",
+      "authority": {
+        "readable": [
+          "workspace"
+        ],
+        "writable": [
+          "mncs-control-mcp"
+        ],
+        "protected_repositories": [],
+        "escalation_required": [],
+        "revision": "5939414b8cef343366d25227d00a3b8f9704c0cb404bb2ca7ed93c8d2b6485d8"
+      },
+      "writable_repositories": [
+        "mncs-control-mcp"
+      ],
+      "work_intent": {
+        "goal": "repair authenticated Environment continuation selection for registered worktrees",
+        "identity": "int_6b1318897bb4e434"
+      },
+      "lifecycle": "active"
+    }
+  },
+  {
+    "step": "controlled_provider_termination",
+    "at": "2026-11-03T15:14:53.142185+00:00",
+    "result": {
+      "pid": 2672832,
+      "exit_code": -15,
+      "old_connection_error": "[Errno 32] Broken pipe"
+    }
+  },
+  {
+    "step": "same_agent_fresh_mcp_recovered",
+    "at": "2026-11-03T15:15:24.545364+00:00",
+    "result": {
+      "ok": true,
+      "error": null,
+      "session_id": "ses_2a76074439e1e51d",
+      "authority": {
+        "readable": [
+          "workspace"
+        ],
+        "writable": [
+          "mncs-control-mcp"
+        ],
+        "protected_repositories": [],
+        "escalation_required": [],
+        "revision": "5939414b8cef343366d25227d00a3b8f9704c0cb404bb2ca7ed93c8d2b6485d8"
+      },
+      "writable_repositories": [
+        "mncs-control-mcp"
+      ],
+      "work_intent": {
+        "goal": "repair authenticated Environment continuation selection for registered worktrees",
+        "identity": "int_6b1318897bb4e434"
+      },
+      "lifecycle": "active"
+    }
+  },
+  {
+    "step": "foreign_project_session_denied",
+    "at": "2026-11-03T15:15:36.561467+00:00",
+    "result": {
+      "ok": false,
+      "error": {
+        "code": "ENVIRONMENT_SESSION_SELECTION_REQUIRED",
+        "message": "Environment continuation did not select one session for this project directory",
+        "details": {
+          "schema_version": "mncs.control.campaign-continuation/2",
+          "status": "not-found",
+          "repository": "mncs-control-mcp",
+          "campaigns_count": 1,
+          "continuations_count": 0,
+          "next": "verify the campaign identity and that this repository belongs to its recorded work intent",
+          "campaign_statuses": [
+            {
+              "campaign_id": "cmp_luna_max_native_self_consumption_20261102",
+              "status": "not-found"
+            }
+          ],
+          "continuations": []
+        }
+      },
+      "session_id": null,
+      "authority": null,
+      "writable_repositories": null,
+      "work_intent": null,
+      "lifecycle": null
+    }
+  },
+  {
+    "step": "second_repository_work_intent",
+    "at": "2026-11-03T15:17:04.495227+00:00",
+    "result": {
+      "ok": true,
+      "error": null,
+      "session_id": "ses_21d514a594b298e3",
+      "authority": {
+        "readable": [
+          "workspace"
+        ],
+        "writable": [
+          "mncs-environment"
+        ],
+        "protected_repositories": [],
+        "escalation_required": [],
+        "revision": "70607197cd9834b69e0010d7b40b7e3ccb45fc7ae3d270e17fa307a5fcf30dc7"
+      },
+      "writable_repositories": [
+        "mncs-environment"
+      ],
+      "work_intent": {
+        "goal": "exercise canonical Environment persistence through the Control socket",
+        "identity": "int_8475157f281c835f"
+      },
+      "lifecycle": "active"
+    }
+  },
+  {
+    "step": "second_harmless_operation",
+    "at": "2026-11-03T15:17:32.448948+00:00",
+    "result": {
+      "ok": true,
+      "error": null,
+      "session_id": "ses_21d514a594b298e3",
+      "authority": {
+        "readable": [
+          "workspace"
+        ],
+        "writable": [
+          "mncs-environment"
+        ],
+        "protected_repositories": [],
+        "escalation_required": [],
+        "revision": "70607197cd9834b69e0010d7b40b7e3ccb45fc7ae3d270e17fa307a5fcf30dc7"
+      },
+      "writable_repositories": [
+        "mncs-environment"
+      ],
+      "work_intent": {
+        "goal": "exercise canonical Environment persistence through the Control socket",
+        "identity": "int_8475157f281c835f"
+      },
+      "lifecycle": "active"
+    }
+  },
+  {
+    "step": "test_intent_released",
+    "at": "2026-11-03T15:17:59.650999+00:00",
+    "result": {
+      "ok": true,
+      "error": null,
+      "session_id": null,
+      "authority": null,
+      "writable_repositories": null,
+      "work_intent": null,
+      "lifecycle": null
+    }
+  },
+  {
+    "step": "original_repository_continues",
+    "at": "2026-11-03T15:18:30.731034+00:00",
+    "result": {
+      "ok": true,
+      "error": null,
+      "session_id": "ses_2a76074439e1e51d",
+      "authority": {
+        "readable": [
+          "workspace"
+        ],
+        "writable": [
+          "mncs-control-mcp"
+        ],
+        "protected_repositories": [],
+        "escalation_required": [],
+        "revision": "5939414b8cef343366d25227d00a3b8f9704c0cb404bb2ca7ed93c8d2b6485d8"
+      },
+      "writable_repositories": [
+        "mncs-control-mcp"
+      ],
+      "work_intent": {
+        "goal": "repair authenticated Environment continuation selection for registered worktrees",
+        "identity": "int_6b1318897bb4e434"
+      },
+      "lifecycle": "active"
+    }
+  }
+]
