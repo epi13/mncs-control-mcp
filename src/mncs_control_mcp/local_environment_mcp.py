@@ -865,7 +865,7 @@ class LocalEnvironmentMCP:
         keys = (
             "schema_version", "session_id", "lifecycle", "environment_id",
             "work_intent", "workspace_root", "persistence", "toolchain",
-            "writable_repositories", "protected_repositories",
+            "writable_repositories", "protected_repositories", "development_entry",
         )
         compact = {key: payload[key] for key in keys if key in payload}
         # Environment already supplies a bounded, authoritative Rights

@@ -286,3 +286,12 @@ doctor.
 The automated tests exercise direct `..` and absolute paths, direct and nested symlink escapes, write-through-symlink refusal, root deletion, project sibling redirection, real-home and SSH-key probes from Bash and Python, subprocess inheritance, workspace-scope cross-project writes, asynchronous process groups, and the actual Bubblewrap backend when available.
 
 `/etc/passwd` may be read because `/etc` is deliberately mounted read-only for normal tooling. `/tmp` is writable but ephemeral and outside the host filesystem. Network isolation is namespace-level only.
+
+
+Standalone project orientation uses the same durable session and exact-session
+continuation contract as development entry. The Environment-owned
+`development_entry` diagnostic distinguishes a missing project development
+definition from a writable Work Intent. The local MCP bridge retains that
+bounded diagnostic. Recovering a session or entering another validated workspace
+under the same authenticated campaign does not copy writable scope; each Work
+Intent resolves its own project definition, rights and checkout eligibility.
