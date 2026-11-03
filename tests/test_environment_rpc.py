@@ -7378,6 +7378,180 @@ def test_workspace_project_resolution_uses_git_common_directory(tmp_path: Path) 
     assert nested.value.code == "ENVIRONMENT_WORKSPACE_ESCAPE"
 
 
+def test_project_resolution_uses_manifest_identity_for_case_variant_root(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "projects"
+    project = workspace / "MNCS-Commons"
+    metadata = project / ".mncs"
+    metadata.mkdir(parents=True)
+    manifest_path = metadata / "project.json"
+    manifest_path.write_text(json.dumps({
+        "schema_version": "mncs-family.repository-manifest/v0alpha1",
+        "repository": "mncs-commons",
+    }), encoding="utf-8")
+    subprocess.run(["git", "init", "--quiet", str(project)], check=True)
+    (project / "README.md").write_text("fixture\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(project), "add", "."], check=True)
+    subprocess.run(
+        ["git", "-C", str(project), "-c", "user.name=MNCS Test",
+         "-c", "user.email=mncs-test@example.invalid", "commit", "--quiet", "-m", "fixture"],
+        check=True,
+    )
+
+    server = EnvironmentRPCServer(
+        ControlConfig(
+            workspace_root=workspace,
+            sandbox_home=tmp_path / "home",
+            environment_rpc_socket=tmp_path / "rpc" / "environment.sock",
+        ),
+        environment_service=SimpleNamespace(state_dir=tmp_path / "state"),
+        policy=object(),
+    )
+    project_grant = _GrantRecord(
+        grant_id="case-variant-project-grant",
+        principal_id="principal-test",
+        host_root=project,
+        sandbox_root="/workspace/MNCS-Commons",
+        scope="project",
+        uid=0,
+        expires_at=time.monotonic() + 60,
+        token_file=tmp_path / "project-grant",
+    )
+    workspace_grant = _GrantRecord(
+        grant_id="case-variant-workspace-grant",
+        principal_id="principal-test",
+        host_root=workspace,
+        sandbox_root="/workspace",
+        scope="workspace",
+        uid=0,
+        expires_at=time.monotonic() + 60,
+        token_file=tmp_path / "workspace-grant",
+    )
+
+    assert server._project_repository(project_grant) == "mncs-commons"
+    assert server._project_repository(workspace_grant, cwd=project) == "mncs-commons"
+
+    manifest_path.write_text(json.dumps({"repository": "mncs-language"}), encoding="utf-8")
+    with pytest.raises(ControlError) as mismatch:
+        server._project_repository(project_grant)
+    assert mismatch.value.code == "ENVIRONMENT_WORKSPACE_ESCAPE"
+
+
+def test_case_variant_project_grant_validates_native_worktree_with_manifest_identity(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "projects"
+    project = workspace / "MNCS-Commons"
+    metadata = project / ".mncs"
+    metadata.mkdir(parents=True)
+    (metadata / "project.json").write_text(json.dumps({
+        "schema_version": "mncs-family.repository-manifest/v0alpha1",
+        "repository": "mncs-commons",
+    }), encoding="utf-8")
+    (metadata / "environment.json").write_text(json.dumps({
+        "name": "commons",
+        "workspace_scope": {"kind": "workspace", "repositories": ["mncs-commons"]},
+    }), encoding="utf-8")
+    (project / "README.md").write_text("fixture\n", encoding="utf-8")
+    subprocess.run(["git", "init", "--quiet", str(project)], check=True)
+    subprocess.run(["git", "-C", str(project), "add", "."], check=True)
+    subprocess.run(
+        ["git", "-C", str(project), "-c", "user.name=MNCS Test",
+         "-c", "user.email=mncs-test@example.invalid", "commit", "--quiet", "-m", "fixture"],
+        check=True,
+    )
+    nested = project / ".worktrees" / "case-variant"
+    nested.parent.mkdir(parents=True)
+    subprocess.run(
+        ["git", "-C", str(project), "worktree", "add", "--quiet", "--detach",
+         str(nested), "HEAD"],
+        check=True,
+    )
+    (nested / "src").mkdir()
+
+    def verify_registered_checkout(
+        checkout: Path, *, repository: str, workspace_root: Path,
+        expected_repository_root: Path,
+    ) -> dict[str, str]:
+        assert repository == "mncs-commons"
+        assert workspace_root == workspace
+        assert expected_repository_root == project
+        assert checkout.resolve() == nested.resolve()
+        return {
+            "repository": repository,
+            "path": str(nested.resolve()),
+            "workspace_root": str(workspace.resolve()),
+            "repository_root": str(project.resolve()),
+            "branch": "case-variant",
+            "head": "fixture-head",
+        }
+
+    class Environment:
+        state_dir = tmp_path / "state"
+
+        @staticmethod
+        def _pkg():
+            return SimpleNamespace(
+                workspace=SimpleNamespace(
+                    verify_registered_checkout=verify_registered_checkout,
+                ),
+                identity=SimpleNamespace(
+                    environment_id=lambda definition: f"env_{definition['name']}",
+                ),
+            )
+
+    server = EnvironmentRPCServer(
+        ControlConfig(
+            workspace_root=workspace,
+            sandbox_home=tmp_path / "home",
+            environment_rpc_socket=tmp_path / "rpc" / "environment.sock",
+        ),
+        environment_service=Environment(),
+        policy=object(),
+    )
+    grant = _GrantRecord(
+        grant_id="case-variant-project-grant",
+        principal_id="principal-test",
+        host_root=project,
+        sandbox_root="/workspace/MNCS-Commons",
+        scope="project",
+        uid=0,
+        expires_at=time.monotonic() + 60,
+        token_file=tmp_path / "grant",
+    )
+
+    checkout = server._registered_project_checkout(
+        grant, "mncs-commons", nested / "src",
+    )
+    assert checkout is not None
+    assert checkout["repository"] == "mncs-commons"
+    assert server._configured_project_root(
+        workspace.resolve(), "mncs-commons",
+    ) == project.resolve()
+    assert server._project_environment_identity(
+        grant, "mncs-commons", working_checkout=checkout,
+    ) == ("env_commons", str(workspace.resolve()))
+
+    workspace_grant = _GrantRecord(
+        grant_id="case-variant-workspace-grant",
+        principal_id="principal-test",
+        host_root=workspace,
+        sandbox_root="/workspace",
+        scope="workspace",
+        uid=0,
+        expires_at=time.monotonic() + 60,
+        token_file=tmp_path / "workspace-grant",
+    )
+    workspace_checkout = server._registered_project_checkout(
+        workspace_grant, "mncs-commons", nested / "src",
+    )
+    assert workspace_checkout is not None
+    assert server._project_environment_identity(
+        workspace_grant, "mncs-commons", working_checkout=workspace_checkout,
+    ) == ("env_commons", str(workspace.resolve()))
+
+
 def test_workspace_entry_attaches_capsule_after_readiness_block(tmp_path: Path, monkeypatch) -> None:
     workspace = tmp_path / "projects"
     project = workspace / "mncs-environment"

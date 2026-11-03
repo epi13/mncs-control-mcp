@@ -35,6 +35,7 @@ from .native_application_contract import canonical_native_application_call
 MAX_REQUEST_BYTES = 256 * 1024
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 MAX_ARGUMENT_BYTES = 48 * 1024
+MAX_PROJECT_MANIFEST_BYTES = 512 * 1024
 ALLOWED_COMMANDS = frozenset({
     "enter", "inspect", "context", "resume", "reconcile", "health", "capabilities", "checkpoint", "handoff", "accept", "claims",
     "complete", "store", "invoke", "artifact-read", "campaign-state",
@@ -1666,7 +1667,7 @@ class EnvironmentRPCServer:
                 # definition. Keep that choice owner-controlled and explicit
                 # when invoking Environment, so its default discovery cannot
                 # fall through to the broader workspace definition.
-                repository = record.host_root.name
+                repository = self._project_repository_identity(record.host_root)
                 selected_checkout = self._registered_project_checkout(
                     record, repository, cwd,
                 )
@@ -2001,7 +2002,12 @@ class EnvironmentRPCServer:
         marks every one protected. Explicit campaign roots inside the granted
         checkout are allowed only when they contain that checkout alone.
         """
-        repository = record.host_root.name
+        try:
+            repository = EnvironmentRPCServer._project_repository_identity(
+                record.host_root,
+            )
+        except ControlError:
+            return False
         if (not isinstance(definition, dict)
                 or not isinstance(definition_path, Path)):
             return False
@@ -5549,7 +5555,7 @@ class EnvironmentRPCServer:
                     "ENVIRONMENT_WORKSPACE_ESCAPE",
                     "project-scoped continuation grant does not identify an immediate configured project",
                 )
-            return project_root.name
+            return self._project_repository_identity(project_root)
 
         if record.scope != "workspace" or cwd is None:
             raise ControlError(
@@ -5619,7 +5625,134 @@ class EnvironmentRPCServer:
                 "ENVIRONMENT_WORKSPACE_ESCAPE",
                 "workspace checkout is outside its configured project Git common directory",
             )
-        return project_root.name
+        return self._project_repository_identity(project_root)
+
+    @staticmethod
+    def _project_repository_identity(project_root: Path) -> str:
+        """Return the manifest identity while retaining the physical checkout path."""
+        try:
+            root = project_root.expanduser().resolve(strict=True)
+        except OSError as error:
+            raise ControlError(
+                "ENVIRONMENT_PROJECT_UNKNOWN",
+                "project repository root is unavailable",
+            ) from error
+        if not root.is_dir():
+            raise ControlError(
+                "ENVIRONMENT_PROJECT_UNKNOWN",
+                "project repository root is not a directory",
+            )
+
+        metadata_directory = root / ".mncs"
+        try:
+            metadata = metadata_directory.lstat()
+        except FileNotFoundError:
+            return root.name
+        except OSError as error:
+            raise ControlError(
+                "ENVIRONMENT_PROJECT_UNKNOWN",
+                "project repository metadata could not be inspected",
+            ) from error
+        if not stat.S_ISDIR(metadata.st_mode):
+            raise ControlError(
+                "ENVIRONMENT_WORKSPACE_ESCAPE",
+                "project metadata must be a regular directory",
+            )
+
+        manifest_path = metadata_directory / "project.json"
+        try:
+            observed = manifest_path.lstat()
+        except FileNotFoundError:
+            return root.name
+        except OSError as error:
+            raise ControlError(
+                "ENVIRONMENT_PROJECT_UNKNOWN",
+                "project manifest could not be inspected",
+            ) from error
+        if not stat.S_ISREG(observed.st_mode):
+            raise ControlError(
+                "ENVIRONMENT_WORKSPACE_ESCAPE",
+                "project manifest must be a regular file",
+            )
+        if observed.st_size > MAX_PROJECT_MANIFEST_BYTES:
+            raise ControlError(
+                "ENVIRONMENT_DEFINITION_INVALID",
+                "project manifest exceeds the bounded identity read limit",
+            )
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise ControlError(
+                "ENVIRONMENT_DEFINITION_INVALID",
+                "project manifest is not readable JSON",
+            ) from error
+        if not isinstance(manifest, dict):
+            raise ControlError(
+                "ENVIRONMENT_DEFINITION_INVALID",
+                "project manifest must be an object",
+            )
+        # Older project fixtures may omit this field. They retain exact
+        # directory-name identity; a declared identity is never guessed.
+        if "repository" not in manifest:
+            return root.name
+        repository = manifest["repository"]
+        if (not isinstance(repository, str)
+                or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,119}", repository)):
+            raise ControlError(
+                "ENVIRONMENT_DEFINITION_INVALID",
+                "project manifest repository identity is invalid",
+            )
+        if root.name.casefold() != repository.casefold():
+            raise ControlError(
+                "ENVIRONMENT_WORKSPACE_ESCAPE",
+                "project directory does not match its declared repository identity",
+                details={"repository": repository, "path": str(root)},
+            )
+        return repository
+
+    @classmethod
+    def _configured_project_root(
+        cls, workspace_root: Path, repository: str,
+    ) -> Path:
+        """Resolve one immediate project directory by its canonical identity."""
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,119}", repository):
+            raise ControlError(
+                "ENVIRONMENT_PROJECT_UNKNOWN",
+                "configured repository identity is invalid",
+            )
+        try:
+            candidates = [
+                child for child in workspace_root.iterdir()
+                if child.name.casefold() == repository.casefold()
+                and not child.is_symlink()
+                and child.is_dir()
+            ]
+        except OSError as error:
+            raise ControlError(
+                "ENVIRONMENT_WORKSPACE_MISSING",
+                "configured project directories could not be inspected",
+            ) from error
+        if len(candidates) != 1:
+            raise ControlError(
+                "ENVIRONMENT_PROJECT_UNKNOWN",
+                "repository identity does not select exactly one configured project directory",
+                details={"repository": repository, "matches": len(candidates)},
+            )
+        try:
+            root = candidates[0].resolve(strict=True)
+        except OSError as error:
+            raise ControlError(
+                "ENVIRONMENT_PROJECT_UNKNOWN",
+                "configured project directory is unavailable",
+            ) from error
+        if (root.parent != workspace_root
+                or cls._project_repository_identity(root) != repository):
+            raise ControlError(
+                "ENVIRONMENT_WORKSPACE_ESCAPE",
+                "configured project directory does not match its canonical repository identity",
+                details={"repository": repository, "path": str(root)},
+            )
+        return root
 
     def _attach_project_continuation(
         self, record: _GrantRecord, stdout: str, *,
@@ -5971,10 +6104,11 @@ class EnvironmentRPCServer:
             grant_root = record.host_root.expanduser().resolve(strict=True)
             project_root = (
                 grant_root if record.scope == "project"
-                else workspace_root / repository
+                else self._configured_project_root(workspace_root, repository)
             )
             if (project_root.parent != workspace_root
-                    or project_root.name != repository):
+                    or project_root.name.casefold() != repository.casefold()
+                    or self._project_repository_identity(project_root) != repository):
                 if record.scope == "project":
                     return None
                 raise ControlError(
@@ -6080,9 +6214,12 @@ class EnvironmentRPCServer:
                     "ENVIRONMENT_AUTHORITY_DENIED",
                     "workspace continuation must use the configured workspace root",
                 )
-            repository_root = workspace_root / repository
+            repository_root = self._configured_project_root(
+                workspace_root, repository,
+            )
         if (repository_root.parent != workspace_root
-                or repository_root.name != repository):
+                or repository_root.name.casefold() != repository.casefold()
+                or self._project_repository_identity(repository_root) != repository):
             raise ControlError(
                 "ENVIRONMENT_WORKSPACE_ESCAPE",
                 "project continuation is outside its configured immediate workspace",
