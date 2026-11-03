@@ -2706,3 +2706,55 @@ def test_declared_worktree_provider_checks_effect_rights_before_execution(tmp_pa
         session.complete(outcome="verified", summary="effect rights regression")
     finally:
         session.close()
+
+
+def test_repository_selector_resolves_case_variant_directory_by_manifest_identity(
+    tmp_path: Path,
+) -> None:
+    service = EnvironmentService(_config(tmp_path))
+    project = service._config.workspace_root / "MNCS-Commons"
+    metadata = project / ".mncs"
+    metadata.mkdir(parents=True)
+    (metadata / "project.json").write_text(json.dumps({
+        "schema_version": "mncs-family.repository-manifest/v0alpha1",
+        "repository": "mncs-commons",
+    }), encoding="utf-8")
+
+    assert service._validate_repository_selector("mncs-commons") == "mncs-commons"
+    assert service._validate_repository_selector("MNCS-Commons") == "mncs-commons"
+
+    (metadata / "project.json").write_text(json.dumps({
+        "repository": "mncs-language",
+    }), encoding="utf-8")
+    with pytest.raises(ControlError) as mismatch:
+        service._validate_repository_selector("mncs-commons")
+    assert mismatch.value.code == "ENVIRONMENT_WORKSPACE_ESCAPE"
+
+
+def test_repository_selector_rejects_ambiguous_casefold_matches(
+    tmp_path: Path,
+) -> None:
+    service = EnvironmentService(_config(tmp_path))
+    workspace = service._config.workspace_root
+    for name in ("mncs-commons", "MNCS-Commons"):
+        project = workspace / name
+        metadata = project / ".mncs"
+        metadata.mkdir(parents=True)
+        (metadata / "project.json").write_text(json.dumps({
+            "repository": "mncs-commons",
+        }), encoding="utf-8")
+
+    with pytest.raises(ControlError) as ambiguous:
+        service._validate_repository_selector("mncs-commons")
+    assert ambiguous.value.code == "ENVIRONMENT_PROJECT_UNKNOWN"
+
+
+def test_repository_selector_requires_manifest_for_case_variant_directory(
+    tmp_path: Path,
+) -> None:
+    service = EnvironmentService(_config(tmp_path))
+    (service._config.workspace_root / "MNCS-Commons").mkdir()
+
+    with pytest.raises(ControlError) as missing_identity:
+        service._validate_repository_selector("mncs-commons")
+    assert missing_identity.value.code == "ENVIRONMENT_WORKSPACE_ESCAPE"

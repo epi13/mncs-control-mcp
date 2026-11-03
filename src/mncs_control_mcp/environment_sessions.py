@@ -19,6 +19,7 @@ import importlib
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 import threading
@@ -39,6 +40,7 @@ _CAMPAIGN_CAPSULE_EVIDENCE_MAX = 32
 _CAMPAIGN_CHARTER_EVIDENCE_SEARCH_MAX = 16
 _GIT_OBJECT_ID = re.compile(r"^(?:[a-f0-9]{40}|[a-f0-9]{64})$")
 _SHA256 = re.compile(r"^[a-f0-9]{64}$")
+_PROJECT_MANIFEST_IDENTITY_MAX_BYTES = 512 * 1024
 _CONTEXT_RESPONSE_SUMMARY_SCHEMA = "mncs.environment.context-response-summary/2"
 _CONTEXT_RESPONSE_SCHEMA_VERSION = "mncs.environment.entry-context/1"
 _CONTEXT_BINDING_ID = re.compile(r"^cap_[0-9a-f]{64}$")
@@ -1701,7 +1703,21 @@ class EnvironmentService:
             raise ControlError("ENVIRONMENT_PROJECT_INVALID",
                                "repository selector must name one immediate project")
         root = self._config.workspace_root.expanduser().resolve()
-        candidate = root / repository
+        try:
+            candidates = [
+                child for child in root.iterdir()
+                if child.name.casefold() == repository.casefold()
+                and not child.is_symlink()
+                and child.is_dir()
+            ]
+        except OSError as exc:
+            raise ControlError("ENVIRONMENT_PROJECT_UNKNOWN",
+                               "configured workspace projects could not be inspected") from exc
+        if len(candidates) != 1:
+            raise ControlError("ENVIRONMENT_PROJECT_UNKNOWN",
+                               "repository selector must resolve to one immediate project directory",
+                               details={"repository": repository, "matches": len(candidates)})
+        candidate = candidates[0]
         try:
             resolved = candidate.resolve(strict=True)
         except OSError as exc:
@@ -1711,7 +1727,76 @@ class EnvironmentService:
                 or resolved.parent != root):
             raise ControlError("ENVIRONMENT_PROJECT_UNKNOWN",
                                "repository selector is not an immediate real project directory")
-        return repository
+
+        # The physical folder can differ in case from its canonical project
+        # identity. Only the bounded manifest can authorize that mapping.
+        metadata = resolved / ".mncs"
+        try:
+            metadata_stat = metadata.lstat()
+        except FileNotFoundError:
+            return self._physical_repository_identity(resolved, repository)
+        except OSError as exc:
+            raise ControlError("ENVIRONMENT_PROJECT_UNKNOWN",
+                               "project metadata could not be inspected") from exc
+        if not stat.S_ISDIR(metadata_stat.st_mode):
+            raise ControlError("ENVIRONMENT_WORKSPACE_ESCAPE",
+                               "project metadata must be a real directory")
+        manifest_path = metadata / "project.json"
+        try:
+            manifest_stat = manifest_path.lstat()
+        except FileNotFoundError:
+            return self._physical_repository_identity(resolved, repository)
+        except OSError as exc:
+            raise ControlError("ENVIRONMENT_PROJECT_UNKNOWN",
+                               "project identity manifest could not be inspected") from exc
+        if not stat.S_ISREG(manifest_stat.st_mode):
+            raise ControlError("ENVIRONMENT_WORKSPACE_ESCAPE",
+                               "project identity manifest must be a regular file")
+        if manifest_stat.st_size > _PROJECT_MANIFEST_IDENTITY_MAX_BYTES:
+            raise ControlError("ENVIRONMENT_DEFINITION_INVALID",
+                               "project identity manifest exceeds the bounded read limit")
+        try:
+            with manifest_path.open("rb") as handle:
+                manifest_bytes = handle.read(_PROJECT_MANIFEST_IDENTITY_MAX_BYTES + 1)
+            if len(manifest_bytes) > _PROJECT_MANIFEST_IDENTITY_MAX_BYTES:
+                raise ControlError("ENVIRONMENT_DEFINITION_INVALID",
+                                   "project identity manifest exceeds the bounded read limit")
+            manifest = json.loads(manifest_bytes.decode("utf-8"))
+        except ControlError:
+            raise
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ControlError("ENVIRONMENT_DEFINITION_INVALID",
+                               "project identity manifest is not readable JSON") from exc
+        if not isinstance(manifest, dict):
+            raise ControlError("ENVIRONMENT_DEFINITION_INVALID",
+                               "project identity manifest must be an object")
+        declared = manifest.get("repository")
+        if declared is None:
+            return self._physical_repository_identity(resolved, repository)
+        if (not isinstance(declared, str)
+                or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,119}", declared) is None):
+            raise ControlError("ENVIRONMENT_DEFINITION_INVALID",
+                               "project manifest repository identity is invalid")
+        if (resolved.name.casefold() != declared.casefold()
+                or declared.casefold() != repository.casefold()):
+            raise ControlError(
+                "ENVIRONMENT_WORKSPACE_ESCAPE",
+                "project directory does not match its declared repository identity",
+                details={"repository": repository, "declared_repository": declared,
+                         "path": str(resolved)},
+            )
+        return declared
+
+    @staticmethod
+    def _physical_repository_identity(project_root: Path, repository: str) -> str:
+        """Keep legacy exact-name projects while rejecting guessed case aliases."""
+        if project_root.name != repository:
+            raise ControlError(
+                "ENVIRONMENT_WORKSPACE_ESCAPE",
+                "a case-variant project selector requires a matching repository manifest",
+                details={"repository": repository, "path": str(project_root)},
+            )
+        return project_root.name
 
     @staticmethod
     def _snapshot_references_repository(
