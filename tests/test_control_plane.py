@@ -180,7 +180,15 @@ def test_external_capacity_recovers_after_timeout_and_restart_is_truthful(config
     ):
         time.sleep(0.01)
     assert manager.status(replacement["job_id"])["status"] == "completed"
-    incomplete = manager.submit_external("fabric_test", lambda: time.sleep(2), timeout_seconds=2)
+    incomplete = manager.submit_external("fabric_test", lambda: time.sleep(5), timeout_seconds=10)
+    deadline = time.monotonic() + 5
+    while (
+        incomplete["job_id"] not in manager._external_processes
+        and time.monotonic() < deadline
+    ):
+        time.sleep(0.01)
+    assert incomplete["job_id"] in manager._external_processes
+    assert manager.status(incomplete["job_id"])["status"] == "running"
     restarted = ProcessManager(config, policy, Sandbox(config, policy))
     assert restarted.status(incomplete["job_id"])["status"] == "upstream_detached"
     persisted = config.job_state_path.read_text(encoding="utf-8")
