@@ -42,6 +42,7 @@ class _ProjectContext:
     sandbox_cwd: str
     selected_session_id: str | None = None
     expires_at: float | None = None
+    repository_identity: str | None = None
 
 
 class _OwnerRPCError(Exception):
@@ -170,8 +171,12 @@ def _session_argument(arguments: dict[str, Any], context: _ProjectContext) -> st
 
 def _build_argv(
     operation: str, arguments: Any, context: _ProjectContext, project: str,
+    *, project_identity: str | None = None,
 ) -> tuple[list[str], bool]:
     """Map one named operation to its fixed CLI grammar and return session use."""
+    identity = project_identity or project
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", identity):
+        raise ValueError("project identity must be a valid repository identifier")
     values_by_operation: dict[str, set[str]] = {
         "enter": {"definition", "workspace", "campaign_id", "task_identity", "new_session"},
         "continuation": {"campaign_id", "task_identity", "session_id"},
@@ -215,7 +220,7 @@ def _build_argv(
     ):
         raise ValueError("claims mode must be list, acquire, or release")
     if operation == "claims" and claims_mode in {"list", "acquire"}:
-        repository = values.get("repository", project)
+        repository = values.get("repository", identity)
         if (not isinstance(repository, str)
                 or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", repository)):
             raise ValueError("repository must be a valid repository identifier")
@@ -255,8 +260,8 @@ def _build_argv(
     if operation == "verify":
         capability = _string(values.get("capability"), "capability", max_length=256)
         prefixes = (
-            f"{project}:verification-executor/",
-            f"{project}:test/",
+            f"{identity}:verification-executor/",
+            f"{identity}:test/",
         )
         name = next((capability[len(prefix):] for prefix in prefixes
                      if capability.startswith(prefix)), "")
@@ -278,7 +283,7 @@ def _build_argv(
             "mncs-language:reference-runtime": "mncs-language",
         }
         if capability in build_projects:
-            if project not in {build_projects[capability], "mncs-environment"} or set(values) - {"session_id", "capability"}:
+            if identity not in {build_projects[capability], "mncs-environment"} or set(values) - {"session_id", "capability"}:
                 raise ValueError("Toolchain build accepts only its selected project session")
             return ["invoke", session_id, capability], True
         if capability == "mncs-compiler:native-application-build":
@@ -292,7 +297,7 @@ def _build_argv(
                 "--request-file", request_file,
             ], True
         if capability == "mncs-forge:native-application-execution":
-            if project not in {"mncs-environment", "mncs-compiler"}:
+            if identity not in {"mncs-environment", "mncs-compiler"}:
                 raise ValueError(
                     "Forge native application execution is available only from an Environment or Compiler session"
                 )
@@ -317,7 +322,7 @@ def _build_argv(
                 "--", "--call-json", encoded_call,
             ], True
         if capability == "mncs-control-mcp:workspace.worktree.prepare":
-            if project != "mncs-control-mcp":
+            if identity != "mncs-control-mcp":
                 raise ValueError(
                     "workspace.worktree.prepare is available only in the Control project context"
                 )
@@ -478,7 +483,7 @@ def _build_argv(
         mode = claims_mode
         if mode not in {"list", "acquire", "release"}:
             raise ValueError("claims mode must be list, acquire, or release")
-        repository = values.get("repository", project)
+        repository = values.get("repository", identity)
         repository = _string(repository, "repository", max_length=128)
         argv = ["claims", session_id]
         if mode == "list":
@@ -537,7 +542,7 @@ def _build_argv(
                     r"^claim:([A-Za-z0-9][A-Za-z0-9._-]{0,127})(?::|$)",
                     claim_id,
                 )
-                repository = match.group(1) if match else project
+                repository = match.group(1) if match else identity
             if (not isinstance(repository, str)
                     or not re.fullmatch(
                         r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", repository
@@ -662,10 +667,16 @@ class LocalEnvironmentMCP:
         token = result.get("grant")
         sandbox_cwd = result.get("sandbox_cwd")
         expires_in_seconds = result.get("expires_in_seconds")
+        repository_identity = result.get("repository_identity")
         if (not isinstance(token, str) or not TOKEN_RE.fullmatch(token)
                 or not isinstance(sandbox_cwd, str)
                 or type(expires_in_seconds) is not int
-                or expires_in_seconds < 1 or expires_in_seconds > 86400):
+                or expires_in_seconds < 1 or expires_in_seconds > 86400
+                or (repository_identity is not None
+                    and (not isinstance(repository_identity, str)
+                         or not re.fullmatch(
+                             r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", repository_identity,
+                         )))):
             raise ValueError("Control returned an invalid local Environment capability")
         if context is None:
             context = _ProjectContext(token, sandbox_cwd)
@@ -675,6 +686,7 @@ class LocalEnvironmentMCP:
             # authorized by the new Control-issued grant.
             context.grant = token
             context.sandbox_cwd = sandbox_cwd
+        context.repository_identity = repository_identity
         context.expires_at = time.monotonic() + expires_in_seconds
         self._contexts[(project, cwd)] = context
         return context
@@ -1096,6 +1108,7 @@ class LocalEnvironmentMCP:
                 operation_values = values
             argv, uses_session = _build_argv(
                 operation, operation_values, context, project,
+                project_identity=context.repository_identity,
             )
             if uses_session and not context.selected_session_id:
                 raise ValueError("no authenticated session selected")
@@ -1130,6 +1143,7 @@ class LocalEnvironmentMCP:
                     request["request_id"] = "req_" + secrets.token_hex(16)
                     argv, uses_session = _build_argv(
                         operation, operation_values, context, project,
+                        project_identity=context.repository_identity,
                     )
                     request["argv"] = argv
                     response = _rpc(self.socket_path, request)

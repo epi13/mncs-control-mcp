@@ -31,11 +31,11 @@ from typing import Any
 from .environment_sessions import _claim_matches_working_checkout
 from .errors import ControlError
 from .native_application_contract import canonical_native_application_call
+from .project_identity import project_repository_identity
 
 MAX_REQUEST_BYTES = 256 * 1024
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 MAX_ARGUMENT_BYTES = 48 * 1024
-MAX_PROJECT_MANIFEST_BYTES = 512 * 1024
 ALLOWED_COMMANDS = frozenset({
     "enter", "inspect", "context", "resume", "reconcile", "health", "capabilities", "checkpoint", "handoff", "accept", "claims",
     "complete", "store", "invoke", "artifact-read", "campaign-state",
@@ -461,6 +461,7 @@ class EnvironmentRPCServer:
                 "ENVIRONMENT_WORKSPACE_ESCAPE",
                 "project must be one immediate workspace directory",
             )
+        repository_identity = self._project_repository_identity(project_root)
         git_marker = project_root / ".git"
         try:
             marker_stat = git_marker.lstat()
@@ -520,6 +521,7 @@ class EnvironmentRPCServer:
             "grant": token,
             "grant_id": grant.grant_id,
             "project": project,
+            "repository_identity": repository_identity,
             "working_directory": str(working_root),
             "sandbox_cwd": "/workspace/" + project + (
                 "" if working_root == project_root
@@ -5630,85 +5632,7 @@ class EnvironmentRPCServer:
     @staticmethod
     def _project_repository_identity(project_root: Path) -> str:
         """Return the manifest identity while retaining the physical checkout path."""
-        try:
-            root = project_root.expanduser().resolve(strict=True)
-        except OSError as error:
-            raise ControlError(
-                "ENVIRONMENT_PROJECT_UNKNOWN",
-                "project repository root is unavailable",
-            ) from error
-        if not root.is_dir():
-            raise ControlError(
-                "ENVIRONMENT_PROJECT_UNKNOWN",
-                "project repository root is not a directory",
-            )
-
-        metadata_directory = root / ".mncs"
-        try:
-            metadata = metadata_directory.lstat()
-        except FileNotFoundError:
-            return root.name
-        except OSError as error:
-            raise ControlError(
-                "ENVIRONMENT_PROJECT_UNKNOWN",
-                "project repository metadata could not be inspected",
-            ) from error
-        if not stat.S_ISDIR(metadata.st_mode):
-            raise ControlError(
-                "ENVIRONMENT_WORKSPACE_ESCAPE",
-                "project metadata must be a regular directory",
-            )
-
-        manifest_path = metadata_directory / "project.json"
-        try:
-            observed = manifest_path.lstat()
-        except FileNotFoundError:
-            return root.name
-        except OSError as error:
-            raise ControlError(
-                "ENVIRONMENT_PROJECT_UNKNOWN",
-                "project manifest could not be inspected",
-            ) from error
-        if not stat.S_ISREG(observed.st_mode):
-            raise ControlError(
-                "ENVIRONMENT_WORKSPACE_ESCAPE",
-                "project manifest must be a regular file",
-            )
-        if observed.st_size > MAX_PROJECT_MANIFEST_BYTES:
-            raise ControlError(
-                "ENVIRONMENT_DEFINITION_INVALID",
-                "project manifest exceeds the bounded identity read limit",
-            )
-        try:
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
-            raise ControlError(
-                "ENVIRONMENT_DEFINITION_INVALID",
-                "project manifest is not readable JSON",
-            ) from error
-        if not isinstance(manifest, dict):
-            raise ControlError(
-                "ENVIRONMENT_DEFINITION_INVALID",
-                "project manifest must be an object",
-            )
-        # Older project fixtures may omit this field. They retain exact
-        # directory-name identity; a declared identity is never guessed.
-        if "repository" not in manifest:
-            return root.name
-        repository = manifest["repository"]
-        if (not isinstance(repository, str)
-                or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,119}", repository)):
-            raise ControlError(
-                "ENVIRONMENT_DEFINITION_INVALID",
-                "project manifest repository identity is invalid",
-            )
-        if root.name.casefold() != repository.casefold():
-            raise ControlError(
-                "ENVIRONMENT_WORKSPACE_ESCAPE",
-                "project directory does not match its declared repository identity",
-                details={"repository": repository, "path": str(root)},
-            )
-        return repository
+        return project_repository_identity(project_root)
 
     @classmethod
     def _configured_project_root(

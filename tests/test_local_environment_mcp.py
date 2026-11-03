@@ -1529,6 +1529,58 @@ def test_local_bridge_uses_owner_resolved_context_without_leaking_grant(
         server.close()
 
 
+def test_case_variant_project_verification_uses_manifest_repository_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "projects"
+    project = workspace / "MNCS-Commons"
+    metadata = project / ".mncs"
+    metadata.mkdir(parents=True)
+    (metadata / "project.json").write_text(json.dumps({
+        "repository": "mncs-commons",
+    }), encoding="utf-8")
+    (project / ".git").mkdir()
+    server = EnvironmentRPCServer(
+        ControlConfig(
+            workspace_root=workspace,
+            sandbox_home=tmp_path / "home",
+            environment_rpc_socket=tmp_path / "rpc" / "environment.sock",
+            repositories={"commons": "MNCS-Commons"},
+        ),
+        environment_service=SimpleNamespace(state_dir=tmp_path / "canonical"),
+        policy=object(),
+    )
+    server.start()
+    monkeypatch.setattr(server, "_peer_process_cwd", lambda _pid: project)
+    bridge = LocalEnvironmentMCP()
+    monkeypatch.setattr(bridge, "socket_path", server.socket_path)
+    try:
+        context = bridge._context("MNCS-Commons", "")
+        assert context.repository_identity == "mncs-commons"
+        context.selected_session_id = "ses_selected"
+        requests: list[dict[str, object]] = []
+
+        def fake_rpc(_socket_path: Path, request: dict[str, object]) -> dict[str, object]:
+            requests.append(request)
+            return {"ok": True, "result": {
+                "exit_code": 0, "stdout": "{}", "stderr": "",
+            }}
+
+        monkeypatch.setattr(local_environment_mcp, "_rpc", fake_rpc)
+        response = bridge.invoke(
+            "MNCS-Commons",
+            "verify",
+            {"capability": "mncs-commons:test/commons-tests"},
+        )
+
+        assert response["ok"] is True
+        assert requests[0]["argv"] == [
+            "invoke", "ses_selected", "mncs-commons:test/commons-tests",
+        ]
+    finally:
+        server.close()
+
+
 def test_compact_context_preserves_the_environment_rights_projection() -> None:
     rights_context = {
         "schema_version": "mncs.rights-provenance.agent-context/1",
