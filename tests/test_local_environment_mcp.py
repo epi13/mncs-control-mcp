@@ -1624,6 +1624,8 @@ def test_reconcile_maps_only_the_selected_session():
     ("mncs-compiler", "mncs-compiler:compiler-build"),
     ("mncs-vm", "mncs-vm:vm-build"),
     ("mncs-language", "mncs-language:reference-build"),
+    ("mncs-vm", "mncs-vm:vm-runtime"),
+    ("mncs-language", "mncs-language:reference-runtime"),
 ])
 def test_compiler_bootstrap_has_a_fixed_canonical_route(project, capability):
     context = _ProjectContext("secret", f"/workspace/{project}")

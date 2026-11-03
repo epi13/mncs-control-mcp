@@ -57,6 +57,8 @@ ALLOWED_INVOKE_CAPABILITIES = frozenset({
     "mncs-compiler:compiler-build",
     "mncs-vm:vm-build",
     "mncs-language:reference-build",
+    "mncs-vm:vm-runtime",
+    "mncs-language:reference-runtime",
     "mncs-compiler:native-application-build",
     "mncs-forge:canonical-vm-work",
     "mncs-forge:provider-artifact-execution",
@@ -1532,6 +1534,8 @@ class EnvironmentRPCServer:
                 "mncs-compiler:compiler-build": "mncs-compiler",
                 "mncs-vm:vm-build": "mncs-vm",
                 "mncs-language:reference-build": "mncs-language",
+                "mncs-vm:vm-runtime": "mncs-vm",
+                "mncs-language:reference-runtime": "mncs-language",
             }
             compiler_bootstrap = argv[2] in build_projects
             native_application_build = (

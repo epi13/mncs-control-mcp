@@ -274,6 +274,8 @@ def _build_argv(
             "mncs-compiler:compiler-build": "mncs-compiler",
             "mncs-vm:vm-build": "mncs-vm",
             "mncs-language:reference-build": "mncs-language",
+            "mncs-vm:vm-runtime": "mncs-vm",
+            "mncs-language:reference-runtime": "mncs-language",
         }
         if capability in build_projects:
             if project not in {build_projects[capability], "mncs-environment"} or set(values) - {"session_id", "capability"}:
