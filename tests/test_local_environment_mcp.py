@@ -1620,15 +1620,20 @@ def test_reconcile_maps_only_the_selected_session():
         _build_argv("reconcile", {"session_id": "ses_other"}, context, "mncs-test")
 
 
-def test_compiler_bootstrap_has_a_fixed_canonical_route():
-    context = _ProjectContext("secret", "/workspace/mncs-compiler")
+@pytest.mark.parametrize("project,capability", [
+    ("mncs-compiler", "mncs-compiler:compiler-build"),
+    ("mncs-vm", "mncs-vm:vm-build"),
+    ("mncs-language", "mncs-language:reference-build"),
+])
+def test_compiler_bootstrap_has_a_fixed_canonical_route(project, capability):
+    context = _ProjectContext("secret", f"/workspace/{project}")
     context.selected_session_id = "ses_selected"
-    argv, selected = _build_argv("invoke", {"capability": "mncs-compiler:compiler-build"},
-                                 context, "mncs-compiler")
-    assert selected and argv == ["invoke", "ses_selected", "mncs-compiler:compiler-build"]
+    argv, selected = _build_argv("invoke", {"capability": capability},
+                                 context, project)
+    assert selected and argv == ["invoke", "ses_selected", capability]
     for project, arguments in [
-        ("mncs-stdlib", {"capability": "mncs-compiler:compiler-build"}),
-        ("mncs-compiler", {"capability": "mncs-compiler:compiler-build", "request_file": "anything.json"}),
+        ("mncs-stdlib", {"capability": capability}),
+        (project, {"capability": capability, "request_file": "anything.json"}),
     ]:
         with pytest.raises(ValueError):
             _build_argv("invoke", arguments, context, project)

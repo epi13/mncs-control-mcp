@@ -67,9 +67,10 @@ def _rpc(socket_path: Path, request: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("Environment request exceeds the bounded local IPC frame")
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
         argv = request.get("argv", [])
-        bootstrap = (isinstance(argv, list) and len(argv) == 3
-                     and argv[0] == "invoke" and argv[2] == "mncs-compiler:compiler-build")
-        connection.settimeout(1860.0 if bootstrap else 300.0)
+        # Provider deadlines are owner-declared (up to Environment's 86400s
+        # contract); the owner bounds each request to its selected descriptor.
+        invocation = isinstance(argv, list) and len(argv) >= 3 and argv[0] == "invoke"
+        connection.settimeout(86490.0 if invocation else 300.0)
         connection.connect(str(socket_path))
         connection.sendall(struct.pack("!I", len(payload)) + payload)
         size = struct.unpack("!I", _frame_read(connection, 4))[0]
@@ -269,9 +270,14 @@ def _build_argv(
         return ["invoke", session_id, capability], True
     if operation == "invoke":
         capability = _string(values.get("capability"), "capability", max_length=256)
-        if capability == "mncs-compiler:compiler-build":
-            if project not in {"mncs-compiler", "mncs-environment"} or set(values) - {"session_id", "capability"}:
-                raise ValueError("Compiler bootstrap accepts only its selected project session")
+        build_projects = {
+            "mncs-compiler:compiler-build": "mncs-compiler",
+            "mncs-vm:vm-build": "mncs-vm",
+            "mncs-language:reference-build": "mncs-language",
+        }
+        if capability in build_projects:
+            if project not in {build_projects[capability], "mncs-environment"} or set(values) - {"session_id", "capability"}:
+                raise ValueError("Toolchain build accepts only its selected project session")
             return ["invoke", session_id, capability], True
         if capability == "mncs-compiler:native-application-build":
             if set(values) - {"session_id", "capability", "request_file"}:

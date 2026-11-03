@@ -55,6 +55,8 @@ ALLOWED_INVOKE_CAPABILITIES = frozenset({
     "mncs-environment:campaign-state-inspection",
     "mncs-compiler:compiler-producer",
     "mncs-compiler:compiler-build",
+    "mncs-vm:vm-build",
+    "mncs-language:reference-build",
     "mncs-compiler:native-application-build",
     "mncs-forge:canonical-vm-work",
     "mncs-forge:provider-artifact-execution",
@@ -1526,7 +1528,12 @@ class EnvironmentRPCServer:
                 argv, record,
             )
             worktree_prepare = argv[2] == "mncs-control-mcp:workspace.worktree.prepare"
-            compiler_bootstrap = argv[2] == "mncs-compiler:compiler-build"
+            build_projects = {
+                "mncs-compiler:compiler-build": "mncs-compiler",
+                "mncs-vm:vm-build": "mncs-vm",
+                "mncs-language:reference-build": "mncs-language",
+            }
+            compiler_bootstrap = argv[2] in build_projects
             native_application_build = (
                 argv[2] == "mncs-compiler:native-application-build"
             )
@@ -1550,10 +1557,10 @@ class EnvironmentRPCServer:
             if compiler_bootstrap:
                 if (len(argv) != 3 or record.scope != "project"
                         or record.bound_session_id != argv[1]
-                        or self._project_repository(record) not in {"mncs-compiler", "mncs-environment"}):
+                        or self._project_repository(record) not in {build_projects[argv[2]], "mncs-environment"}):
                     raise ControlError(
                         "ENVIRONMENT_AUTHORITY_DENIED",
-                        "Compiler bootstrap requires its selected project session and fixed invocation",
+                        "Toolchain build requires its selected project session and fixed invocation",
                     )
             elif worktree_prepare:
                 self._authorize_worktree_prepare_invocation(argv, record)
@@ -2033,13 +2040,16 @@ class EnvironmentRPCServer:
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError):
             return False
-        contracts = manifest.get("contracts", {}).get("provides", []) \
-            if isinstance(manifest, dict) else []
-        if not isinstance(contracts, list):
+        contracts = manifest.get("contracts", {}) if isinstance(manifest, dict) else {}
+        if not isinstance(contracts, dict):
             return False
+        provides, tests = contracts.get("provides", []), contracts.get("tests", [])
+        if not isinstance(provides, list) or not isinstance(tests, list):
+            return False
+        invocations = [row.get("invocation") for row in provides if isinstance(row, dict)]
+        invocations.extend(row.get("command") for row in tests if isinstance(row, dict))
         declared_toolchains: set[str] = set()
-        for contract in contracts:
-            invocation = contract.get("invocation") if isinstance(contract, dict) else None
+        for invocation in invocations:
             if not isinstance(invocation, dict):
                 continue
             candidates: list[Any] = []
@@ -3446,7 +3456,7 @@ class EnvironmentRPCServer:
         if campaign_writable_checkout:
             argv.append("--campaign-writable-checkout")
 
-    def _authorize_session(self, session_id: str, principal_id: str) -> None:
+    def _authorize_session(self, session_id: str, principal_id: str) -> dict[str, Any]:
         pkg = self.environment_service._pkg()
         store = self.environment_service._store(pkg)
         try:
@@ -3460,6 +3470,8 @@ class EnvironmentRPCServer:
                                "session has no matching authenticated continuation principal",
                                details={"session_id": session_id,
                                         "next": "request an explicit handoff from the recorded owner"})
+
+        return snapshot
 
     @staticmethod
     def _proc_start_ticks(pid: int) -> str | None:
@@ -5344,6 +5356,7 @@ class EnvironmentRPCServer:
                 "--execution-root", str(repository),
                 "--sandbox-root", str(sandbox_repository),
             ])
+        authorized_snapshot = None
         if command in {"inspect", "context", "resume", "reconcile", "health", "capabilities", "checkpoint", "handoff", "accept", "claims", "claim-recover", "complete", "retire", "store", "scope-grant", "invoke", "artifact-read", "campaign-state"}:
             try:
                 command_index = argv.index(command)
@@ -5381,7 +5394,7 @@ class EnvironmentRPCServer:
                     consumer_id, consumer_kind,
                 )
             else:
-                self._authorize_session(session_id, record.principal_id)
+                authorized_snapshot = self._authorize_session(session_id, record.principal_id)
                 if (_requires_selected_session_for_mutation(command, argv)
                         and record.bound_session_id != session_id):
                     raise ControlError(
@@ -5458,13 +5471,20 @@ class EnvironmentRPCServer:
         # loads the verified source.
         host_argv = [sys.executable, "-P", "-c", program, "--state-dir",
                      str(self.environment_service.state_dir), "--persistence", "store", *argv]
+        response_timeout = 240
+        if command == "invoke" and isinstance(authorized_snapshot, dict):
+            matches = [binding for binding in authorized_snapshot.get("bindings", [])
+                       if isinstance(binding, dict) and binding.get("capability") == argv[2]]
+            if len(matches) == 1:
+                budget = matches[0].get("timeout_seconds") or 120
+                if type(budget) is int and 1 <= budget <= 86400:
+                    response_timeout = max(response_timeout, budget + 60)
         try:
             completed = subprocess.run(
                 host_argv, cwd=cwd, env=process_env, capture_output=True,
                 stdin=subprocess.DEVNULL,
                 text=True,
-                timeout=(1830 if command == "invoke"
-                         and argv[2] == "mncs-compiler:compiler-build" else 240),
+                timeout=response_timeout,
                 check=False,
             )
         except subprocess.TimeoutExpired as error:

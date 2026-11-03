@@ -6339,7 +6339,7 @@ def test_compiler_project_rpc_admits_only_its_typed_native_application_build(
 
     class Store:
         def load_snapshot(self, _session_id: str) -> dict[str, str]:
-            return {"authenticated_principal_id": "principal-agent"}
+            return {"authenticated_principal_id": "principal-agent", "bindings": [{"capability": "mncs-compiler:native-application-build", "timeout_seconds": 600}]}
 
         def close(self) -> None:
             pass
@@ -6403,6 +6403,7 @@ def test_compiler_project_rpc_admits_only_its_typed_native_application_build(
     assert calls[0][0][-len(build_argv):] == build_argv
     # Fixed file/argv requests never consume the live MCP transport's stdin.
     assert calls[0][1]["stdin"] == subprocess.DEVNULL
+    assert calls[0][1]["timeout"] == 660
     assert calls[0][1]["env"]["MNCS_ENV_AUTH_PRINCIPAL_ID"] == "principal-agent"
 
     rejected_argv = (
@@ -9207,3 +9208,21 @@ def test_compiler_bootstrap_rpc_requires_selected_project_and_fixed_arguments(tm
     for changed in ([*argv, "--arbitrary"], [argv[0], "ses_foreign", argv[2]]):
         with pytest.raises(ControlError):
             server._translate_argv(changed, project, grant)
+
+
+def test_project_entry_accepts_only_protected_declared_test_toolchains(tmp_path):
+    project = tmp_path / "mncs-language"
+    (project / ".mncs").mkdir(parents=True)
+    definition_path = project / ".mncs/environment.json"
+    (project / ".mncs/project.json").write_text(json.dumps({"contracts": {"tests": [{
+        "test": "language-native-tests", "command": {"argv": ["cargo", "test"],
+        "toolchains": {"MNCS_STDLIB_ROOT": {"repository": "mncs-stdlib", "path": "."}}}
+    }]}}))
+    record = SimpleNamespace(host_root=project)
+    definition = {"workspace_scope": {"kind": "workspace"}, "intent": {
+        "repositories": ["mncs-language"], "protected_repositories": ["mncs-stdlib"]}}
+    check = EnvironmentRPCServer._project_entry_scope_is_authorized
+    assert check(definition, definition_path, ["mncs-language", "mncs-stdlib"], record)
+    assert not check(definition, definition_path, ["mncs-language", "mncs-forge"], record)
+    definition["intent"]["protected_repositories"] = []
+    assert not check(definition, definition_path, ["mncs-language", "mncs-stdlib"], record)
