@@ -54,6 +54,14 @@ intentionally configured.
 
 The MCP registration layer is intentionally thin. `WorkspacePolicy` owns path authorization; `Sandbox` constructs the Linux namespace; `FileService`, `GitService`, `ProcessManager`, `ProjectService`, `ToolInventory`, and `AuditLog` own cohesive capabilities. Harness remains the agent/model layer, Fabric remains the distributed execution and routing authority, and Forge remains the evaluation/evidence authority.
 
+## Output capture evidence
+
+Tracked terminal-job responses now distinguish retained empty/content/truncated streams from
+restored unavailable capture and legacy unknown records. See
+[the bounded capture contract](docs/OUTPUT-CAPTURE.md). Metadata persistence does
+not imply output persistence, and a successful exit does not establish useful or
+independently verified work.
+
 ## Installation
 
 Fedora needs Bubblewrap and normal developer tools installed by the operator. No tool exposes `sudo` or `dnf`.

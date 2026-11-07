@@ -1,0 +1,33 @@
+{
+  "schema_version": "mncs.control.capture-verification/1",
+  "tested_parent": "f5915e679e9af969770aa23f4947225525422175",
+  "source_sha256": {
+    "src/mncs_control_mcp/processes.py": "71385c745a01453c80c65b5827009f310c08515a898e642e53370db6a4bd5c3c",
+    "tests/test_capture_availability.py": "910bb12573da648063d46943a763a9cee25757e131149436de7422562f29223b",
+    "schemas/output-capture.schema.json": "d8a1ab044f980f8393c4a3692c19001a11cf0fa00d95b534a6c181bcf13b0418"
+  },
+  "baseline": {
+    "command": "python3 -m pytest",
+    "summary": "363 passed, 5 skipped, 8 warnings in 165.71s"
+  },
+  "verification": {
+    "command": "python3 -m pytest",
+    "summary": "372 passed, 5 skipped, 8 warnings in 164.60s",
+    "stdout_sha256": "0ef178d1462f135d29552fa7582f4e43468f60117e04fb20765dd8339932f4cd"
+  },
+  "limitations": [
+    "Host-owned terminal capture lifecycle; no added model runtime or output retention.",
+    "Expired is supported only for an explicit owner removal record; no automatic full-capture expiry policy was added.",
+    "Mechanical correctness, not agent-burden reduction."
+  ],
+  "resource_measurements": {
+    "raw_capture_limit_bytes_per_stream_default": 1048576,
+    "persisted_job_rows_limit": 100,
+    "capture_metadata_json_bytes": {
+      "live_empty": 372,
+      "truncated_8byte_fixture": 367,
+      "unavailable_restored": 412
+    },
+    "scope": "compact JSON field size for controlled fixtures; not physical allocation, RSS or disk I/O"
+  }
+}

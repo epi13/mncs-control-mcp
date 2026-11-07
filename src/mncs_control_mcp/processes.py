@@ -65,12 +65,33 @@ class _LogBuffer:
                 self.start_offset += overflow
 
     def read(self, offset: int) -> tuple[str, int, bool]:
+        text, end, lost, _ = self.read_capture(offset)
+        return text, end, lost
+
+    def read_capture(self, offset: int) -> tuple[str, int, bool, dict[str, object]]:
         with self.lock:
             lost = offset < self.start_offset
             effective = max(offset, self.start_offset)
             index = effective - self.start_offset
             content = bytes(self.data[index:]).decode("utf-8", errors="replace")
-            return redact_text(content), self.total, lost
+            return redact_text(content), self.total, lost, self._capture_unlocked()
+
+    def capture(self) -> dict[str, object]:
+        """Describe retained raw byte ranges without returning their content."""
+        with self.lock:
+            return self._capture_unlocked()
+
+    def _capture_unlocked(self) -> dict[str, object]:
+        return {
+            "status": "truncated" if self.start_offset else (
+                "available-content" if self.total else "available-empty"
+            ),
+            "available": True,
+            "start_offset": self.start_offset,
+            "end_offset": self.total,
+            "retained_bytes": len(self.data),
+            "limit_bytes": self.maximum,
+        }
 
 
 @dataclass
@@ -98,6 +119,29 @@ class TerminalJob:
     result_summary: dict[str, object] | None = None
     artifacts: list[dict[str, object]] = field(default_factory=list)
     state_persistence: str = "persistent"
+    # Capture bytes are deliberately memory-only. Metadata persistence is not
+    # output persistence. Legacy records cannot establish a capture lifecycle.
+    capture_lifecycle: str = "unknown"
+
+    def output_capture(self) -> dict[str, object]:
+        def stream(buffer: _LogBuffer | None) -> dict[str, object]:
+            if buffer is not None:
+                return buffer.capture()
+            return {
+                "status": {"restored": "unavailable-restored", "expired": "expired"}.get(
+                    self.capture_lifecycle, "unknown"
+                ),
+                "available": False,
+                "start_offset": None, "end_offset": None,
+                "retained_bytes": None, "limit_bytes": None,
+            }
+        return {
+            "schema_version": "mncs.control.output-capture/1",
+            "retention": "bounded-memory-only",
+            "lifecycle": self.capture_lifecycle,
+            "process_complete": self.status in {"completed", "failed", "timed_out", "stopped"},
+            "stdout": stream(self.stdout), "stderr": stream(self.stderr),
+        }
 
     def public(self) -> dict[str, object]:
         return {
@@ -121,6 +165,7 @@ class TerminalJob:
             "result_summary": self.result_summary,
             "artifacts": self.artifacts,
             "state_persistence": self.state_persistence,
+            "output_capture": self.output_capture(),
         }
 
 
@@ -230,6 +275,7 @@ class ProcessManager:
                 result_summary=item.get("result_summary") if isinstance(item.get("result_summary"), dict) else None,
                 artifacts=item.get("artifacts") if isinstance(item.get("artifacts"), list) else [],
                 state_persistence=state_persistence,
+                capture_lifecycle=self._restored_capture_lifecycle(item),
             )
             if job.status == "upstream_detached" and job.result_summary is None:
                 job.result_summary = {"ownership": "upstream", "reconciliation": "local process manager restarted before completion"}
@@ -237,6 +283,16 @@ class ProcessManager:
             self._jobs[job.job_id] = job
         if changed:
             self._persist()
+
+    @staticmethod
+    def _restored_capture_lifecycle(item: dict[str, object]) -> str:
+        capture = item.get("output_capture")
+        if not isinstance(capture, dict) or capture.get("schema_version") != "mncs.control.output-capture/1":
+            return "unknown"
+        lifecycle = capture.get("lifecycle")
+        if lifecycle in {"live", "restored"}:
+            return "restored"
+        return "expired" if lifecycle == "expired" else "unknown"
 
     def _persist(self) -> None:
         with self._persist_lock:
@@ -400,6 +456,7 @@ class ProcessManager:
                 process=process,
                 stdout=_LogBuffer(self.config.max_output_bytes),
                 stderr=_LogBuffer(self.config.max_output_bytes),
+                capture_lifecycle="live",
             )
             self._jobs[job.job_id] = job
             if rpc_grant is not None:
@@ -479,12 +536,15 @@ class ProcessManager:
         job = self._get(job_id)
         if stdout_offset < 0 or stderr_offset < 0:
             raise ControlError("INVALID_INPUT", "output offsets must be non-negative")
-        stdout, stdout_next, stdout_lost = job.stdout.read(stdout_offset) if job.stdout else ("", 0, False)
-        stderr, stderr_next, stderr_lost = job.stderr.read(stderr_offset) if job.stderr else ("", 0, False)
+        capture = job.output_capture()
+        stdout, stdout_next, stdout_lost, stdout_capture = job.stdout.read_capture(stdout_offset) if job.stdout else ("", 0, False, capture["stdout"])
+        stderr, stderr_next, stderr_lost, stderr_capture = job.stderr.read_capture(stderr_offset) if job.stderr else ("", 0, False, capture["stderr"])
+        capture.update(stdout=stdout_capture, stderr=stderr_capture)
         return {
             **job.public(),
             "stdout": stdout,
             "stderr": stderr,
+            "output_capture": capture,
             "stdout_next_offset": stdout_next,
             "stderr_next_offset": stderr_next,
             "output_truncated": stdout_lost or stderr_lost,

@@ -1,0 +1,96 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Control bounded output capture metadata",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "retention",
+    "lifecycle",
+    "process_complete",
+    "stdout",
+    "stderr"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "mncs.control.output-capture/1"
+    },
+    "retention": {
+      "const": "bounded-memory-only"
+    },
+    "lifecycle": {
+      "enum": [
+        "live",
+        "restored",
+        "expired",
+        "unknown"
+      ]
+    },
+    "process_complete": {
+      "type": "boolean"
+    },
+    "stdout": {
+      "$ref": "#/$defs/stream"
+    },
+    "stderr": {
+      "$ref": "#/$defs/stream"
+    }
+  },
+  "$defs": {
+    "stream": {
+      "type": "object",
+      "required": [
+        "status",
+        "available",
+        "start_offset",
+        "end_offset",
+        "retained_bytes",
+        "limit_bytes"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "status": {
+          "enum": [
+            "available-empty",
+            "available-content",
+            "truncated",
+            "unavailable-restored",
+            "expired",
+            "unknown"
+          ]
+        },
+        "available": {
+          "type": "boolean"
+        },
+        "start_offset": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "end_offset": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "retained_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "limit_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        }
+      }
+    }
+  }
+}
