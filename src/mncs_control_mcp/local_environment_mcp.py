@@ -181,7 +181,8 @@ def _build_argv(
         "enter": {"definition", "workspace", "campaign_id", "task_identity", "new_session"},
         "continuation": {"campaign_id", "task_identity", "session_id"},
         "inspect": {"session_id"}, "context": {"session_id"},
-        "health": {"session_id", "live"}, "capabilities": {"session_id"},
+        "health": {"session_id", "live"},
+        "capabilities": {"session_id", "preflight", "effect_repository"},
         "resume": {"session_id"}, "reconcile": {"session_id"},
         "verify": {"session_id", "capability"},
         "invoke": {
@@ -251,7 +252,21 @@ def _build_argv(
         return argv, False
 
     session_id = _session_argument(values, context)
-    if operation in {"inspect", "context", "capabilities", "reconcile"}:
+    if operation == "capabilities":
+        argv = ["capabilities", session_id]
+        if "effect_repository" in values and "preflight" not in values:
+            raise ValueError("effect_repository requires preflight")
+        for field, pattern in (
+            ("preflight", r"[A-Za-z0-9][A-Za-z0-9._:/@-]{0,255}"),
+            ("effect_repository", r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}"),
+        ):
+            if field in values:
+                value = _string(values[field], field, max_length=256)
+                if not re.fullmatch(pattern, value):
+                    raise ValueError(f"{field} must be a bounded identity")
+                argv.extend(["--" + field.replace("_", "-"), value])
+        return argv, True
+    if operation in {"inspect", "context", "reconcile"}:
         return [operation, session_id], True
     if operation == "resume":
         # Revalidate on every explicit resume so a fresh agent sees current
@@ -1075,6 +1090,7 @@ class LocalEnvironmentMCP:
                     "history_pages", "evidence_offset", "evidence_limit",
                     "session_event_before_sequence", "session_event_limit",
                     "capability", "binding_id", "path",
+                    "preflight", "effect_repository",
                     "request_file", "input_artifact", "call",
                     *SESSION_SELECTOR_FIELDS,
                 })
@@ -1198,6 +1214,9 @@ def main() -> None:
             "campaign-writable-checkout:<campaign_id>:<repository>:<session_id> binding; "
             "this selects a checkout without adding repository authority. Environment "
             "revalidates the selected checkout, write scope, and claims. "
+            "Capabilities accepts preflight (one bound capability identity) and optional "
+            "effect_repository to expose advisory checkout/effect/claim requirements "
+            "without execution permission; live admission remains mandatory. "
             "No shell or arbitrary CLI arguments are accepted."
         ),
     )

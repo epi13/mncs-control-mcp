@@ -101,6 +101,15 @@ If typed `env_*` tools are absent from a caller's MCP snapshot, Environment work
 
 The stable `mncs_environment` tool also exposes `environmental_capability` for the selected session. It runs only the existing `projections --interpret environmental-capability` view, with at most four evidence pages and 32 references per page; Control requires the authenticated project grant to select the exact queried session.
 
+For one operation's requirements, use `operation: "capabilities"` with
+`arguments: {"preflight": "provider:capability"}` and, when declared,
+`"effect_repository": "selected-repository"`. Environment reports its provider
+and workspace roots, effects, exact target scope, availability and ordinary
+claim/authority evaluations. This advisory executes no provider and grants no
+permission. Because existing authority checks can append observations, Control
+requires the exact selected session and does not classify this form as a
+read-only inventory call. Invocation still performs all live admission checks.
+
 The same tool exposes `session_updates` as a read-only view of the selected session's classified event delta. It accepts an optional nonnegative `since` cursor, returns at most the Environment classifier's 30 items, and never acknowledges or changes the session. Control requires the authenticated project grant to select the exact queried session and records the read outcome, so coordination and authority events can be inspected through the normal agent interface.
 
 For local Codex CLI sessions, the same owner service also supports one stable

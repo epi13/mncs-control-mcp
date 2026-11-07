@@ -59,6 +59,39 @@ def test_stable_tool_maps_only_named_environment_operations() -> None:
         )
 
 
+def test_capability_preflight_is_typed_session_scoped_advice(monkeypatch) -> None:
+    from mncs_control_mcp.environment_rpc import _requires_selected_session_for_mutation
+    context = _ProjectContext("secret", "/workspace/mncs-environment")
+    context.selected_session_id = "ses_selected"
+    values = {"session_id": "ses_selected", "preflight": "provider:test/suite",
+              "effect_repository": "mncs-environment"}
+    argv, selected = _build_argv("capabilities", values, context, "mncs-environment")
+    assert selected is True
+    assert argv == ["capabilities", "ses_selected", "--preflight", "provider:test/suite",
+                    "--effect-repository", "mncs-environment"]
+    assert _requires_selected_session_for_mutation("capabilities", argv)
+    assert EnvironmentRPCServer._read_only_operation_identity(argv) is None
+    assert not _requires_selected_session_for_mutation("capabilities", argv[:2])
+    assert EnvironmentRPCServer._read_only_operation_identity(argv[:2]) == "session.capabilities"
+    for invalid in ({"effect_repository": "target"}, {"preflight": "--invoke"},
+                    {"preflight": "valid", "argv": ["arbitrary"]}):
+        with pytest.raises(ValueError):
+            _build_argv("capabilities", invalid, context, "mncs-environment")
+    bridge = LocalEnvironmentMCP()
+    monkeypatch.setattr(bridge, "_context", lambda _project, _cwd: context)
+    monkeypatch.setattr(bridge, "_select_session", lambda *_args, **_kwargs: None)
+    calls = []
+    def rpc(_socket, request):
+        calls.append(request)
+        return {"ok": True, "result": {"exit_code": 0,
+                "stdout": json.dumps({"status": "requirements-unmet", "authorizes_execution": False})}}
+    monkeypatch.setattr(local_environment_mcp, "_rpc", rpc)
+    response = bridge.invoke("mncs-environment", "capabilities", values)
+    assert response["ok"] is True
+    assert calls[0]["argv"] == argv
+    assert response["result"]["authorizes_execution"] is False
+
+
 def test_environmental_capability_maps_to_one_bounded_read_projection() -> None:
     context = _ProjectContext("secret", "/workspace/mncs-environment")
     context.selected_session_id = "ses_selected"

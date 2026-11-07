@@ -97,10 +97,13 @@ def _requires_selected_session_for_mutation(command: str, argv: list[Any]) -> bo
     if command == "retire":
         has_target = any(_has_option(argv, option) for option in ("--branch", "--worktree"))
         return has_target and not _has_option(argv, "--dry-run")
+    if command == "capabilities":
+        return _has_option(argv, "--preflight")
     return False
 
 
 _SESSION_POSITIONAL_VALUE_OPTIONS: dict[str, dict[str, int | None]] = {
+    "capabilities": {"--preflight": 1, "--effect-repository": 1},
     "campaign-state": {
         "--consumer": 1, "--consumer-kind": 1,
         "--evidence-offset": 1, "--evidence-limit": 1,
@@ -674,6 +677,9 @@ class EnvironmentRPCServer:
             return None
         command = argv[0]
         if command == "health" and _has_option(argv, "--live"):
+            return None
+        if command == "capabilities" and _has_option(argv, "--preflight"):
+            # Advice can append existing authority/preflight observations.
             return None
         simple = {
             "inspect": "session.inspect",
