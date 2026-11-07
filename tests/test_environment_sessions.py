@@ -2229,7 +2229,13 @@ def test_campaign_continuation_reads_real_isolated_store(tmp_path: Path) -> None
     assert selected["work_intent"]["goal"] == "prove authenticated campaign lookup"
     checkout_ref = selected["repositories"][0]
     assert checkout_ref["repository"] == repository
-    assert checkout_ref.get("observed_path", checkout_ref.get("path")) == str(checkout)
+    # Canonical campaign refs use workspace-relative paths; older seed refs
+    # can be absolute. The reader supports both. Assert the exact checkout
+    # relationship rather than relying on the former abbreviated seed shape.
+    recorded_path = Path(checkout_ref.get("observed_path", checkout_ref.get("path")))
+    if not recorded_path.is_absolute():
+        recorded_path = Path(selected["workspace_root"]) / recorded_path
+    assert recorded_path == checkout
     assert checkout_ref["branch"] in {"main", "master"}
     assert len(checkout_ref["head"]) == 40
     assert checkout_ref["head"] == recorded_head
