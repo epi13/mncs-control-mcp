@@ -180,9 +180,9 @@ def _build_argv(
     values_by_operation: dict[str, set[str]] = {
         "enter": {"definition", "workspace", "campaign_id", "task_identity", "new_session"},
         "continuation": {"campaign_id", "task_identity", "session_id"},
-        "inspect": {"session_id"}, "context": {"session_id"},
+        "inspect": {"session_id", "section", "compact"}, "context": {"session_id"},
         "health": {"session_id", "live"},
-        "capabilities": {"session_id", "preflight", "effect_repository"},
+        "capabilities": {"session_id", "preflight", "effect_repository", "capability", "summary", "limit", "offset"},
         "resume": {"session_id"}, "reconcile": {"session_id"},
         "verify": {"session_id", "capability"},
         "invoke": {
@@ -254,19 +254,51 @@ def _build_argv(
     session_id = _session_argument(values, context)
     if operation == "capabilities":
         argv = ["capabilities", session_id]
+        selectors = sum(bool(values.get(key)) for key in ("preflight", "capability", "summary"))
+        if selectors > 1:
+            raise ValueError("preflight, capability and summary are mutually exclusive")
+        if "summary" in values and type(values["summary"]) is not bool:
+            raise ValueError("summary must be a boolean")
+        if values.get("summary"):
+            argv.append("--summary")
+        for field, minimum, maximum in (("limit", 1, 100), ("offset", 0, 1_000_000)):
+            if field in values:
+                value = values[field]
+                if not values.get("summary") or type(value) is not int or not minimum <= value <= maximum:
+                    raise ValueError(f"{field} requires summary and a bounded integer")
+                argv.append("--" + field + "=" + str(value))
         if "effect_repository" in values and "preflight" not in values:
             raise ValueError("effect_repository requires preflight")
         for field, pattern in (
             ("preflight", r"[A-Za-z0-9][A-Za-z0-9._:/@-]{0,255}"),
+            ("capability", r"[A-Za-z0-9][A-Za-z0-9._:/@-]{0,255}"),
             ("effect_repository", r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}"),
         ):
             if field in values:
                 value = _string(values[field], field, max_length=256)
                 if not re.fullmatch(pattern, value):
                     raise ValueError(f"{field} must be a bounded identity")
-                argv.extend(["--" + field.replace("_", "-"), value])
+                if field == "capability":
+                    argv.append("--capability=" + value)
+                else:
+                    argv.extend(["--" + field.replace("_", "-"), value])
         return argv, True
-    if operation in {"inspect", "context", "reconcile"}:
+    if operation == "inspect":
+        argv = [operation, session_id]
+        if "section" in values:
+            section = values["section"]
+            if not isinstance(section, str) or section not in {"workspace", "bindings", "authority", "readiness", "events"}:
+                raise ValueError("unsupported inspection section")
+            # Equals form also binds correctly on older owner processes whose
+            # positional parser does not yet know this new value option.
+            argv.append("--section=" + section)
+        if "compact" in values:
+            if type(values["compact"]) is not bool:
+                raise ValueError("compact must be a boolean")
+            if values["compact"]:
+                argv.append("--compact")
+        return argv, True
+    if operation in {"context", "reconcile"}:
         return [operation, session_id], True
     if operation == "resume":
         # Revalidate on every explicit resume so a fresh agent sees current
@@ -881,6 +913,8 @@ class LocalEnvironmentMCP:
             "schema_version", "session_id", "lifecycle", "environment_id",
             "work_intent", "workspace_root", "persistence", "toolchain",
             "writable_repositories", "protected_repositories", "development_entry",
+            "configuration", "observation", "consumer_id", "continuation",
+            "actions", "next_commands", "project_count", "projects_truncated",
         )
         compact = {key: payload[key] for key in keys if key in payload}
         # Environment already supplies a bounded, authoritative Rights
@@ -896,6 +930,7 @@ class LocalEnvironmentMCP:
                 for key in (
                     "readable", "writable", "protected_repositories",
                     "escalation_required", "revision",
+                    "claim_required_actions", "invocable",
                 )
                 if key in authority
             }
@@ -910,13 +945,13 @@ class LocalEnvironmentMCP:
         doctor = payload.get("doctor")
         if isinstance(doctor, dict):
             compact["doctor"] = {
-                key: doctor[key] for key in ("readiness", "summary", "remaining") if key in doctor
+                key: doctor[key] for key in ("readiness", "summary", "remaining", "remaining_truncated", "unavailable", "epoch") if key in doctor
             }
         projects = payload.get("projects")
         if isinstance(projects, list):
             compact["projects"] = [
                 {key: item[key] for key in ("repository", "path", "branch", "dirty") if key in item}
-                for item in projects[:16] if isinstance(item, dict)
+                for item in projects[:20] if isinstance(item, dict)
             ]
         revalidation = payload.get("revalidation")
         if isinstance(revalidation, dict):
@@ -958,11 +993,17 @@ class LocalEnvironmentMCP:
                         if isinstance(item, dict) and isinstance(item.get("capability"), str)
                     ],
                     "count": len(available),
+                    "available_bindings": available[:20],
+                    **{key: capabilities[key] for key in (
+                        "available_count", "unavailable_count", "unknown_count", "truncated",
+                        "availability_attention", "unknown_provider_declaration_scan_complete",
+                    ) if key in capabilities},
                 }
         return compact
 
     @staticmethod
-    def _present(operation: str, response: dict[str, Any]) -> dict[str, Any]:
+    def _present(operation: str, response: dict[str, Any], *, detailed_inspection: bool = False,
+                 binding_detail: bool = False) -> dict[str, Any]:
         if response.get("ok") is not True:
             error = response.get("error")
             return {"ok": False, "operation": operation,
@@ -974,10 +1015,12 @@ class LocalEnvironmentMCP:
         if not isinstance(result, dict):
             return {"ok": True, "operation": operation, "result": result}
         payload = LocalEnvironmentMCP._payload(response)
-        if isinstance(payload, dict):
+        if isinstance(payload, dict) or (binding_detail and isinstance(payload, list)):
             if operation == "continuation":
                 payload = LocalEnvironmentMCP._compact_continuation(payload)
-            elif operation in {"enter", "context", "inspect", "resume"}:
+            elif operation in {"enter", "context", "inspect", "resume"} and not (
+                operation == "inspect" and detailed_inspection
+            ):
                 payload = LocalEnvironmentMCP._compact_context(payload)
             encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True,
                                  separators=(",", ":")).encode("utf-8")
@@ -1091,6 +1134,7 @@ class LocalEnvironmentMCP:
                     "session_event_before_sequence", "session_event_limit",
                     "capability", "binding_id", "path",
                     "preflight", "effect_repository",
+                    "section", "compact",
                     "request_file", "input_artifact", "call",
                     *SESSION_SELECTOR_FIELDS,
                 })
@@ -1163,7 +1207,9 @@ class LocalEnvironmentMCP:
                     )
                     request["argv"] = argv
                     response = _rpc(self.socket_path, request)
-            return self._present(operation, response)
+            return self._present(operation, response, detailed_inspection=(
+                operation == "inspect" and ("section" in operation_values or operation_values.get("compact") is True)
+            ), binding_detail=(operation == "capabilities" and "capability" in operation_values))
         except _OwnerRPCError as error:
             return self._response_error(error.response)
         except (ConnectionError, OSError, ValueError, TypeError) as error:
@@ -1217,6 +1263,13 @@ def main() -> None:
             "Capabilities accepts preflight (one bound capability identity) and optional "
             "effect_repository to expose advisory checkout/effect/claim requirements "
             "without execution permission; live admission remains mandatory. "
+            "For first contact use continuation for existing work or enter for new work; "
+            "Control assigns the authenticated consumer (do not supply consumer). "
+            "Capabilities accepts summary=true with limit/offset for a bounded availability page, "
+            "or capability for full detail of one identity. Inspect accepts section "
+            "(workspace, bindings, authority, readiness, events) and compact=true for lossless "
+            "shared JSON pointers. Context retains configuration, continuation, actions and "
+            "availability attention; it is recorded state, while health probes live readiness. "
             "No shell or arbitrary CLI arguments are accepted."
         ),
     )

@@ -103,7 +103,9 @@ def _requires_selected_session_for_mutation(command: str, argv: list[Any]) -> bo
 
 
 _SESSION_POSITIONAL_VALUE_OPTIONS: dict[str, dict[str, int | None]] = {
-    "capabilities": {"--preflight": 1, "--effect-repository": 1},
+    "capabilities": {"--preflight": 1, "--effect-repository": 1,
+                     "--capability": 1, "--limit": 1, "--offset": 1},
+    "inspect": {"--section": 1},
     "campaign-state": {
         "--consumer": 1, "--consumer-kind": 1,
         "--evidence-offset": 1, "--evidence-limit": 1,

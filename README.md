@@ -519,3 +519,28 @@ The suite uses temporary workspaces. Bubblewrap integration tests skip cleanly w
 - Forge local results do not establish independent evaluation, custody, certification, or promotion.
 
 See `docs/SECURITY.md` and `docs/UPSTREAM-INTERFACES.md` for the detailed boundaries.
+
+### Environment first-contact and detail views
+
+Use `mncs_environment` with `operation: continuation` to select existing
+project-scoped work, or `enter` for an independent Work Intent. Control assigns
+the authenticated consumer. The returned context retains Environment's selected
+configuration, workspace, continuation, actions, and unavailable/unknown reasons;
+context is recorded state, while `health` probes live readiness.
+
+`capabilities` accepts `summary: true` with `limit` (1..100) and `offset` for a
+bounded binding page, or `capability: ID` for the complete original binding.
+`preflight: ID` remains advisory effect/claim inspection with its existing
+admission requirements. `inspect` accepts `section` (`workspace`, `bindings`,
+`authority`, `readiness`, `events`) and `compact: true`. The compact form uses
+lossless RFC 6901 references within its response; omit it for expanded details.
+Explicit inspection views pass through without a second context compaction.
+The legacy string capability list and listed count remain, with separate total,
+omission, and availability counts. Session/principal/campaign selection is unchanged.
+
+These options require the matching Environment response-view implementation.
+Restart/reconnect the local Environment MCP bridge to load updated argument
+metadata and presentation code. The bridge emits new value options in equals
+form, preserving selected-session parsing on existing Control owner processes;
+the owner parser also supports split value options after its next normal restart.
+No running owner service needs to be interrupted to use the new bridge views.
