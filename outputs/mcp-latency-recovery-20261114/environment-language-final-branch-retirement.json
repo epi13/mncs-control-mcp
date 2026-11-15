@@ -1,0 +1,19 @@
+{
+  "canonical": "origin/main",
+  "completion_status": "completed",
+  "dry_run": false,
+  "exit_code": 0,
+  "mutation_performed": true,
+  "repository": "/home/epi13/Documents/Projects/mncs-language",
+  "request_id": "req_retire_714fd52337b64a649825179b4fa8342b43f44441f2cf764c",
+  "results": [
+    {
+      "dry_run": false,
+      "kind": "branch",
+      "reason": "merged into origin/main",
+      "retired": true,
+      "target": "fix/test-throughput-20261114"
+    }
+  ],
+  "session_id": "ses_913c5d49e3f672a7"
+}

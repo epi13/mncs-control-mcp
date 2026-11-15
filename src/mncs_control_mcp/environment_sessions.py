@@ -19,9 +19,11 @@ import importlib
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 import threading
+from collections import OrderedDict
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -61,6 +63,8 @@ _FOREIGN_CAMPAIGN_NEXT = (
 )
 _PACKAGE_LOAD_LOCK = threading.RLock()
 _PACKAGE_SOURCE_IDENTITIES: dict[str, tuple[str, str]] = {}
+_PACKAGE_SOURCE_FINGERPRINTS: OrderedDict[str, tuple[tuple[Any, ...], str]] = OrderedDict()
+_PACKAGE_SOURCE_FINGERPRINTS_MAX = 32
 
 
 def _valid_context_response_summary(value: Any) -> bool:
@@ -204,25 +208,26 @@ def _resolve_environment_source_checkout(
             ) from exc
         return completed.stdout.strip()
 
-    top_level = Path(git(root, "rev-parse", "--show-toplevel")).resolve(strict=True)
-    common_directory = Path(
-        git(root, "rev-parse", "--path-format=absolute", "--git-common-dir")
-    ).resolve(strict=True)
+    try:
+        identity = git(root, "rev-parse", "--path-format=absolute", "--show-toplevel",
+                       "--git-common-dir", "--verify", "refs/heads/main").splitlines()
+        if len(identity) != 3 or not _GIT_OBJECT_ID.fullmatch(identity[2]):
+            raise ControlError(ENVIRONMENT_UNAVAILABLE, "incomplete Environment Git identity")
+        top_level = Path(identity[0]).resolve(strict=True)
+        common_directory = Path(identity[1]).resolve(strict=True)
+        main_revision = identity[2]
+    except ControlError as exc:
+        raise ControlError(
+            ENVIRONMENT_UNAVAILABLE,
+            "mncs-environment has no verified repository and local main revision",
+            details={"path": str(root)},
+        ) from exc
     if top_level != root:
         raise ControlError(
             ENVIRONMENT_UNAVAILABLE,
             "configured mncs-environment path is not its Git repository root",
             details={"path": str(root), "git_top_level": str(top_level)},
         )
-    try:
-        main_revision = git(root, "rev-parse", "--verify", "refs/heads/main")
-    except ControlError as exc:
-        raise ControlError(
-            ENVIRONMENT_UNAVAILABLE,
-            "mncs-environment has no verified local main revision",
-            details={"path": str(root)},
-        ) from exc
-
     worktree_output = git(root, "worktree", "list", "--porcelain")
     entries: list[dict[str, str]] = []
     current: dict[str, str] = {}
@@ -250,12 +255,12 @@ def _resolve_environment_source_checkout(
         if candidate.is_symlink() or resolved != candidate or not resolved.is_dir():
             continue
         try:
-            candidate_top = Path(
-                git(resolved, "rev-parse", "--show-toplevel")
-            ).resolve(strict=True)
-            candidate_common = Path(
-                git(resolved, "rev-parse", "--path-format=absolute", "--git-common-dir")
-            ).resolve(strict=True)
+            candidate_identity = git(resolved, "rev-parse", "--path-format=absolute",
+                                     "--show-toplevel", "--git-common-dir").splitlines()
+            if len(candidate_identity) != 2:
+                continue
+            candidate_top = Path(candidate_identity[0]).resolve(strict=True)
+            candidate_common = Path(candidate_identity[1]).resolve(strict=True)
             dirty = git(resolved, "status", "--porcelain=v1", "--untracked-files=all")
         except ControlError:
             continue
@@ -352,22 +357,45 @@ def _package_source_identity(package_root: Path) -> str:
     """Fingerprint Python sources so long-lived Control can see sibling updates."""
     digest = hashlib.sha256()
     try:
-        sources = sorted(package_root.rglob("*.py"))
+        def inventory() -> tuple[tuple[Path, ...], tuple[Any, ...]]:
+            paths = []
+            metadata = []
+            for path in sorted(package_root.rglob("*.py")):
+                info = path.lstat()
+                if stat.S_ISLNK(info.st_mode):
+                    raise ControlError(
+                        ENVIRONMENT_UNAVAILABLE,
+                        "mncs_env source tree cannot contain symbolic links",
+                        details={"path": str(path)},
+                    )
+                if not stat.S_ISREG(info.st_mode):
+                    continue
+                paths.append(path)
+                metadata.append((str(path.relative_to(package_root)), info.st_dev,
+                                 info.st_ino, info.st_mode, info.st_size,
+                                 info.st_mtime_ns, info.st_ctime_ns))
+            return tuple(paths), tuple(metadata)
+
+        sources, fingerprint = inventory()
+        cache_key = str(package_root.resolve(strict=True))
+        with _PACKAGE_LOAD_LOCK:
+            cached = _PACKAGE_SOURCE_FINGERPRINTS.get(cache_key)
+            if cached is not None and cached[0] == fingerprint:
+                _PACKAGE_SOURCE_FINGERPRINTS.move_to_end(cache_key)
+                return cached[1]
         for path in sources:
-            if path.is_symlink():
-                raise ControlError(
-                    ENVIRONMENT_UNAVAILABLE,
-                    "mncs_env source tree cannot contain symbolic links",
-                    details={"path": str(path)},
-                )
-            if not path.is_file():
-                continue
             relative = path.relative_to(package_root).as_posix().encode("utf-8")
             source = path.read_bytes()
             digest.update(len(relative).to_bytes(4, "big"))
             digest.update(relative)
             digest.update(len(source).to_bytes(8, "big"))
             digest.update(source)
+        if inventory()[1] != fingerprint:
+            raise ControlError(
+                ENVIRONMENT_UNAVAILABLE,
+                "mncs_env source changed while fingerprinting; retry the operation",
+                details={"path": str(package_root)},
+            )
     except ControlError:
         raise
     except OSError as exc:
@@ -376,7 +404,13 @@ def _package_source_identity(package_root: Path) -> str:
             f"mncs_env source tree could not be inspected: {exc}",
             details={"path": str(package_root)},
         ) from exc
-    return digest.hexdigest()
+    identity = digest.hexdigest()
+    with _PACKAGE_LOAD_LOCK:
+        _PACKAGE_SOURCE_FINGERPRINTS[cache_key] = (fingerprint, identity)
+        _PACKAGE_SOURCE_FINGERPRINTS.move_to_end(cache_key)
+        while len(_PACKAGE_SOURCE_FINGERPRINTS) > _PACKAGE_SOURCE_FINGERPRINTS_MAX:
+            _PACKAGE_SOURCE_FINGERPRINTS.popitem(last=False)
+    return identity
 
 
 def _load_flat_package(package: str, root: Path, submodules: tuple[str, ...] = ()) -> Any:
@@ -441,6 +475,61 @@ def _load_flat_package(package: str, root: Path, submodules: tuple[str, ...] = (
     )
 
 
+_POOL_MAX_STORES = 4
+_SNAPSHOT_META_CACHE_MAX = 16384
+_SNAPSHOT_SCHEMA = b"mncs.environment.session-snapshot/1"
+
+
+class _BorrowedStore:
+    """Proxy returning a pooled StoreSessionStore to EnvironmentService on close()."""
+
+    def __init__(
+        self, service: EnvironmentService, pool_key: tuple[Any, str], store_obj: Any,
+    ) -> None:
+        self._service = service
+        self._pool_key: tuple[Any, str] | None = pool_key
+        self._wrapped_store = store_obj
+        self._closed = False
+        self._tainted = False
+
+    def invalidate(self) -> None:
+        self._tainted = True
+
+    def __getattr__(self, name: str) -> Any:
+        store_obj = self._wrapped_store
+        if self._closed or store_obj is None:
+            raise RuntimeError("borrowed Store handle is closed")
+        attr = getattr(store_obj, name)
+        if not callable(attr):
+            return attr
+
+        def _guarded(*args: Any, **kwargs: Any) -> Any:
+            try:
+                return attr(*args, **kwargs)
+            except BaseException as exc:
+                if not isinstance(exc, Exception) or isinstance(exc, OSError) or type(exc).__name__ in {
+                    "StoreIntegrityError", "StoreIntegrityFailure",
+                    "StoreUnavailable", "StoreError",
+                }:
+                    self._tainted = True
+                raise
+
+        return _guarded
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        store_obj = self._wrapped_store
+        self._wrapped_store = None
+        pool_key = self._pool_key
+        self._pool_key = None
+        assert pool_key is not None
+        self._service._release_pooled_store(
+            pool_key, store_obj, tainted=self._tainted,
+        )
+
+
 class EnvironmentService:
     """Thin control boundary over ``mncs_env.sessions`` and claims."""
 
@@ -448,6 +537,12 @@ class EnvironmentService:
         self._config = config
         self.authenticated_principal_id: str | None = None
         self._environment_path_cache: Path | None = None
+        self._store_pool_lock = threading.Lock()
+        self._store_pool: list[Any] = []
+        self._store_pool_key: tuple[Any, str] | None = None
+        self._closed = False
+        self._snapshot_meta_lock = threading.Lock()
+        self._snapshot_meta_cache: OrderedDict[tuple[str, str, int], dict[str, Any]] = OrderedDict()
 
     @property
     def environment_path(self) -> Path:
@@ -485,7 +580,78 @@ class EnvironmentService:
     def _sessions(self) -> Any:
         return self._pkg().sessions
 
+    @staticmethod
+    def _close_store_quietly(backend: Any) -> None:
+        close = getattr(backend, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:
+                pass
+
+    def _release_pooled_store(
+        self, pool_key: tuple[Any, str], backend: Any, *, tainted: bool = False,
+    ) -> None:
+        if backend is None:
+            return
+        raw_store = getattr(getattr(backend, "backend", None), "_store", None)
+        if tainted or getattr(raw_store, "_closed", False):
+            self._close_store_quietly(backend)
+            return
+        repool = False
+        with self._store_pool_lock:
+            if (not self._closed
+                    and self._store_pool_key == pool_key
+                    and len(self._store_pool) < _POOL_MAX_STORES):
+                self._store_pool.append(backend)
+                repool = True
+        if not repool:
+            self._close_store_quietly(backend)
+
+    def close(self) -> None:
+        with self._store_pool_lock:
+            self._closed = True
+            pooled = list(self._store_pool)
+            self._store_pool.clear()
+            self._store_pool_key = None
+        for backend in pooled:
+            self._close_store_quietly(backend)
+        with self._snapshot_meta_lock:
+            self._snapshot_meta_cache.clear()
+
     def _store(self, pkg: Any) -> Any:
+        if self._closed:
+            raise ControlError(ENVIRONMENT_UNAVAILABLE, "Environment service is closed")
+        open_store = getattr(getattr(pkg, "session_store", None), "open_store", None)
+        if (
+            callable(open_store)
+            and getattr(open_store, "__module__", None) == "mncs_env.session_store"
+        ):
+            state_key = str(self.state_dir.expanduser().resolve())
+            # Retain the module itself: integer object IDs can be reused after
+            # a reload while a loan from the old package is still outstanding.
+            pool_key = (pkg, state_key)
+            stale: list[Any] = []
+            key_changed = False
+            backend = None
+            with self._store_pool_lock:
+                if self._closed:
+                    raise ControlError(ENVIRONMENT_UNAVAILABLE, "Environment service is closed")
+                if self._store_pool_key != pool_key:
+                    key_changed = True
+                    stale = list(self._store_pool)
+                    self._store_pool.clear()
+                    self._store_pool_key = pool_key
+                elif self._store_pool:
+                    backend = self._store_pool.pop()
+            for old in stale:
+                self._close_store_quietly(old)
+            if key_changed:
+                with self._snapshot_meta_lock:
+                    self._snapshot_meta_cache.clear()
+            if backend is None:
+                backend = open_store(self.state_dir, "store")
+            return _BorrowedStore(self, pool_key, backend)
         return pkg.session_store.open_store(self.state_dir, "store")
 
     def _resolve_workspace(self, workspace: str | None) -> Path:
@@ -746,6 +912,116 @@ class EnvironmentService:
             close = getattr(store, "close", None)
             if callable(close):
                 close()
+
+    @staticmethod
+    def _session_snapshot_heads(store: Any) -> dict[str, int] | None:
+        generation_fn = getattr(store, "generation", None)
+        bindings_at = getattr(store, "domain_bindings_at", None)
+        if not callable(generation_fn) or not callable(bindings_at):
+            return None
+        try:
+            generation = generation_fn()
+            if type(generation) is not int or generation < 0:
+                return None
+            bindings = bindings_at(generation)
+        except Exception:
+            return None
+        heads: dict[str, int] = {}
+        for schema, identity in bindings:
+            if schema != _SNAPSHOT_SCHEMA:
+                continue
+            try:
+                text = identity.decode("utf-8")
+            except UnicodeDecodeError:
+                continue
+            sid, sep, rev_text = text.partition(":snap:")
+            if not sep:
+                continue
+            try:
+                rev = int(rev_text)
+            except ValueError:
+                continue
+            if rev > heads.get(sid, -1):
+                heads[sid] = rev
+        return heads
+
+    def _get_snapshot_meta(
+        self, state_key: str, session_id: str, head_revision: int,
+    ) -> dict[str, Any] | None:
+        key = (state_key, session_id, head_revision)
+        with self._snapshot_meta_lock:
+            cached = self._snapshot_meta_cache.get(key)
+            if cached is not None:
+                self._snapshot_meta_cache.move_to_end(key)
+            return cached
+
+    @staticmethod
+    def _snapshot_static_repositories(snapshot: dict[str, Any]) -> frozenset[str]:
+        repos: set[str] = set()
+        campaign = snapshot.get("campaign")
+        if isinstance(campaign, dict):
+            intent = campaign.get("work_intent")
+            if isinstance(intent, dict):
+                intent_repos = intent.get("repositories")
+                if isinstance(intent_repos, list):
+                    for item in intent_repos:
+                        if isinstance(item, str):
+                            repos.add(item)
+            ref_values = campaign.get("repository_refs")
+            if isinstance(ref_values, list):
+                for item in ref_values:
+                    if isinstance(item, dict) and isinstance(item.get("repository"), str):
+                        repos.add(item["repository"])
+        for field in ("selected_checkouts", "repo_facts"):
+            values = snapshot.get(field)
+            if isinstance(values, dict):
+                for key in values:
+                    if isinstance(key, str):
+                        repos.add(key)
+        return frozenset(repos)
+
+    def _record_snapshot_meta(
+        self, state_key: str, session_id: str, head_revision: int,
+        snapshot: dict[str, Any],
+    ) -> None:
+        if (type(head_revision) is not int or head_revision < 0
+                or type(snapshot.get("snapshot_sequence")) is not int
+                or snapshot["snapshot_sequence"] != head_revision):
+            return
+        campaign = snapshot.get("campaign")
+        provenance = snapshot.get("provenance")
+        workspace = snapshot.get("workspace")
+        meta = {
+            "campaign_identity": (
+                campaign.get("identity")
+                if isinstance(campaign, dict)
+                and isinstance(campaign.get("identity"), str)
+                else ""
+            ),
+            "lifecycle": snapshot.get("lifecycle"),
+            "principal_id": snapshot.get("authenticated_principal_id"),
+            "definition_id": (
+                provenance.get("definition_id")
+                if isinstance(provenance, dict)
+                and isinstance(provenance.get("definition_id"), str)
+                else ""
+            ),
+            "workspace_root": (
+                workspace.get("root")
+                if isinstance(workspace, dict)
+                and isinstance(workspace.get("root"), str)
+                else ""
+            ),
+            "static_repos": self._snapshot_static_repositories(snapshot),
+        }
+        key = (state_key, session_id, head_revision)
+        with self._snapshot_meta_lock:
+            if self._closed:
+                return
+            self._snapshot_meta_cache[key] = meta
+            self._snapshot_meta_cache.move_to_end(key)
+            while len(self._snapshot_meta_cache) > _SNAPSHOT_META_CACHE_MAX:
+                self._snapshot_meta_cache.popitem(last=False)
 
     def campaign_continuation(
         self, repository: str, campaign_id: str | None = None,
@@ -1053,48 +1329,70 @@ class EnvironmentService:
                     if isinstance(recovered_checkout, dict):
                         working_checkout = recovered_checkout
 
-            # An explicit campaign identity is already known before the
-            # continuation scan. Reuse Environment's recoverable selection
-            # projection to enumerate only that campaign's nonterminal
-            # snapshots. The projection is only an index: each returned
-            # snapshot is still loaded and checked against canonical Store
-            # state below, including principal, checkout, project-link, and
-            # claim ownership. This keeps exact continuation from reopening
-            # every historical session on each request. A task selector with
-            # no exact session retains the full scan because it must detect
-            # conflicting bindings across project-linked campaign contexts.
-            session_selection = getattr(pkg, "selection", None)
-            select_sessions = getattr(session_selection, "select", None)
-            if (campaign_id is not None
-                    and (task_identity is None or exact_session_id is not None)
-                    and callable(select_sessions)):
-                campaign_selector = {
-                    "control_campaign_continuation": 1,
-                    "campaign_identity": campaign_id,
-                    "lifecycle": "nonterminal",
-                }
+            state_key = str(self.state_dir.expanduser().resolve())
+            session_heads = self._session_snapshot_heads(store)
+            loaded_snapshots: dict[str, dict[str, Any] | None] = {}
 
-                def is_campaign_continuation(snapshot: dict[str, Any]) -> bool:
-                    campaign = snapshot.get("campaign")
-                    return bool(
-                        isinstance(campaign, dict)
-                        and campaign.get("identity") == campaign_id
-                        and snapshot.get("lifecycle") not in _TERMINAL_LIFECYCLES
-                    )
+            def load_snapshot_once(target_session_id: str) -> dict[str, Any] | None:
+                if target_session_id in loaded_snapshots:
+                    return loaded_snapshots[target_session_id]
+                loaded = store.load_snapshot(target_session_id)
+                normalized = loaded if isinstance(loaded, dict) else None
+                # Own active candidates may be needed again during selection.
+                # Do not retain every historical/foreign snapshot, or cache
+                # an unavailable read: both can be very large and a later read
+                # must still be able to observe recovery.
+                if (normalized is not None
+                        and normalized.get("authenticated_principal_id") == self.authenticated_principal_id
+                        and normalized.get("lifecycle") not in _TERMINAL_LIFECYCLES):
+                    loaded_snapshots[target_session_id] = normalized
+                if session_heads is not None and normalized is not None:
+                    head_revision = session_heads.get(target_session_id)
+                    if type(head_revision) is int:
+                        self._record_snapshot_meta(
+                            state_key, target_session_id, head_revision, normalized,
+                        )
+                return normalized
 
-                try:
-                    session_ids = select_sessions(
-                        store, campaign_selector, is_campaign_continuation,
-                    )
-                except ValueError as error:
-                    # The shared selection index has a bounded workspace
-                    # inventory. Preserve the existing continuation bound
-                    # and behavior when a larger workspace cannot use it.
-                    if str(error) != "session selection exceeds bounded index":
-                        raise
-                    session_ids = store.list_sessions()
+            # For real EmbeddedStore-backed backends, resolve session heads from
+            # verified generation bindings and skip unchanged terminal/non-matching
+            # snapshot revisions via an immutable-revision metadata cache without
+            # persisting selection projection writes on read paths.
+            if session_heads is not None:
+                session_ids = sorted(session_heads)
             else:
-                session_ids = store.list_sessions()
+                session_selection = getattr(pkg, "selection", None)
+                select_sessions = getattr(session_selection, "select", None)
+                if (campaign_id is not None
+                        and (task_identity is None or exact_session_id is not None)
+                        and callable(select_sessions)):
+                    campaign_selector = {
+                        "control_campaign_continuation": 1,
+                        "campaign_identity": campaign_id,
+                        "lifecycle": "nonterminal",
+                    }
+
+                    def is_campaign_continuation(snapshot: dict[str, Any]) -> bool:
+                        campaign = snapshot.get("campaign")
+                        return bool(
+                            isinstance(campaign, dict)
+                            and campaign.get("identity") == campaign_id
+                            and snapshot.get("lifecycle") not in _TERMINAL_LIFECYCLES
+                        )
+
+                    try:
+                        session_ids = select_sessions(
+                            store, campaign_selector, is_campaign_continuation,
+                        )
+                    except ValueError as error:
+                        # The shared selection index has a bounded workspace
+                        # inventory. Preserve the existing continuation bound
+                        # and behavior when a larger workspace cannot use it.
+                        if str(error) != "session selection exceeds bounded index":
+                            raise
+                        session_ids = store.list_sessions()
+                else:
+                    session_ids = store.list_sessions()
             if len(session_ids) > 10000:
                 raise ControlError(
                     "ENVIRONMENT_LOOKUP_LIMIT",
@@ -1115,11 +1413,40 @@ class EnvironmentService:
                         claims_by_session.setdefault(owner, []).append(claim)
 
             owned_by_campaign: dict[str, list[tuple[str, dict[str, Any]]]] = {}
+            deferred_owned: dict[str, list[str]] = {}
             project_campaigns: set[str] = set()
             foreign_campaigns: set[str] = set()
             foreign_owner = False
+            can_defer_unrelated = (
+                campaign_id is None
+                and task_identity is None
+                and not (isinstance(definition_id, str) and definition_id
+                         and isinstance(workspace_root, str) and workspace_root)
+            )
             for session_id in session_ids:
-                snapshot = store.load_snapshot(session_id)
+                meta = (
+                    self._get_snapshot_meta(state_key, session_id, session_heads[session_id])
+                    if session_heads is not None and session_id in session_heads
+                    else None
+                )
+                if meta is not None:
+                    if not meta["campaign_identity"]:
+                        continue
+                    if campaign_id is not None and meta["campaign_identity"] != campaign_id:
+                        continue
+                    if meta["lifecycle"] in _TERMINAL_LIFECYCLES:
+                        continue
+                    if (can_defer_unrelated
+                            and repository not in meta["static_repos"]
+                            and session_id not in claims_by_session):
+                        if meta["principal_id"] != self.authenticated_principal_id:
+                            foreign_campaigns.add(meta["campaign_identity"])
+                        else:
+                            deferred_owned.setdefault(meta["campaign_identity"], []).append(
+                                session_id
+                            )
+                        continue
+                snapshot = load_snapshot_once(session_id)
                 if not isinstance(snapshot, dict):
                     continue
                 campaign = snapshot.get("campaign")
@@ -1155,6 +1482,17 @@ class EnvironmentService:
                 if references_project and checkout_matches:
                     project_campaigns.add(identity)
 
+            for cid in project_campaigns:
+                extra_sids = deferred_owned.get(cid)
+                if not extra_sids:
+                    continue
+                entries = owned_by_campaign.setdefault(cid, [])
+                for deferred_sid in extra_sids:
+                    deferred_snapshot = load_snapshot_once(deferred_sid)
+                    if isinstance(deferred_snapshot, dict):
+                        entries.append((deferred_sid, deferred_snapshot))
+                entries.sort(key=lambda item: item[0])
+
             foreign_owner = foreign_owner or bool(project_campaigns & foreign_campaigns)
             if foreign_owner:
                 raise ControlError(
@@ -1188,7 +1526,21 @@ class EnvironmentService:
                 # but it must not hide a conflicting selector binding in a
                 # different campaign that is already linked to this project.
                 for candidate_session_id in session_ids:
-                    candidate_snapshot = store.load_snapshot(candidate_session_id)
+                    meta = (
+                        self._get_snapshot_meta(
+                            state_key, candidate_session_id,
+                            session_heads[candidate_session_id],
+                        )
+                        if session_heads is not None and candidate_session_id in session_heads
+                        else None
+                    )
+                    if meta is not None:
+                        if meta["principal_id"] != self.authenticated_principal_id:
+                            continue
+                        if (not meta["campaign_identity"]
+                                or meta["campaign_identity"] in relevant_campaigns):
+                            continue
+                    candidate_snapshot = load_snapshot_once(candidate_session_id)
                     if (not isinstance(candidate_snapshot, dict)
                             or candidate_snapshot.get("authenticated_principal_id")
                             != self.authenticated_principal_id):
@@ -1199,6 +1551,7 @@ class EnvironmentService:
                         if isinstance(candidate_campaign, dict) else None
                     )
                     if (isinstance(candidate_identity, str)
+                            and candidate_identity not in relevant_campaigns
                             and matches_working_checkout(
                                 candidate_snapshot, candidate_session_id,
                             )
@@ -1209,7 +1562,21 @@ class EnvironmentService:
                 if campaign_id is not None:
                     relevant_campaigns.add(campaign_id)
                 for session_id in session_ids:
-                    snapshot = store.load_snapshot(session_id)
+                    meta = (
+                        self._get_snapshot_meta(
+                            state_key, session_id, session_heads[session_id],
+                        )
+                        if session_heads is not None and session_id in session_heads
+                        else None
+                    )
+                    if meta is not None:
+                        if meta["campaign_identity"] not in relevant_campaigns:
+                            continue
+                        if meta["principal_id"] != self.authenticated_principal_id:
+                            continue
+                        if not meta["definition_id"] or not meta["workspace_root"]:
+                            continue
+                    snapshot = load_snapshot_once(session_id)
                     if not isinstance(snapshot, dict):
                         continue
                     campaign = snapshot.get("campaign")

@@ -1,0 +1,27 @@
+{
+  "canonical": "origin/main",
+  "completion_status": "pending",
+  "dry_run": false,
+  "exit_code": 3,
+  "mutation_performed": true,
+  "repository": "/home/epi13/Documents/Projects/mncs-store",
+  "request_id": "req_retire_db718a3c479eeccc425c342b7829a221140fd9258ef1d28f",
+  "results": [
+    {
+      "kind": "branch",
+      "reason": "branch became checked out after retirement intent",
+      "retired": false,
+      "status": "unknown",
+      "target": "fix/test-throughput-20261114"
+    },
+    {
+      "dry_run": false,
+      "kind": "worktree",
+      "reason": "clean and free of conflicting live claims",
+      "retired": true,
+      "status": "retired",
+      "target": "/home/epi13/Documents/Projects/mncs-store/.worktrees/test-throughput-20261114"
+    }
+  ],
+  "session_id": "ses_434790c4f0e730ab"
+}

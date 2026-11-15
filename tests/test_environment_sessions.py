@@ -2332,6 +2332,44 @@ print(json.dumps({
     finally:
         inventory.close()
 
+    # A different service advances the authoritative head while this reader
+    # retains its Store lease and immutable revision metadata.
+    peer = EnvironmentService(_config(tmp_path))
+    peer.authenticated_principal_id = service.authenticated_principal_id
+    peer_pkg = peer._pkg()
+    peer_store = peer._store(peer_pkg)
+    try:
+        peer._open_session(peer_pkg.sessions, peer_store, duplicate_session_id).complete(
+            outcome="verified", summary="external continuation completed",
+        )
+    finally:
+        peer_store.close()
+    try:
+        claim = peer.acquire_claim(entered["session_id"], repository)
+        inventory = peer._store(peer_pkg)
+        try:
+            generation = inventory.generation()
+        finally:
+            inventory.close()
+        for _ in range(2):
+            updated = service.campaign_continuation(repository, "cmp_isolated_test")
+            assert updated["status"] == "ready"
+            assert [item["session_id"] for item in updated["continuations"]] == [
+                entered["session_id"],
+            ]
+            assert claim["claim_id"] in updated["continuations"][0]["claim_ids"]
+        inventory = peer._store(peer_pkg)
+        try:
+            assert inventory.generation() == generation
+        finally:
+            inventory.close()
+        peer.release_claim(entered["session_id"], repository)
+        updated = service.campaign_continuation(repository, "cmp_isolated_test")
+        assert claim["claim_id"] not in updated["continuations"][0]["claim_ids"]
+    finally:
+        peer.close()
+        service.close()
+
 
 @pytest.mark.parametrize(
     ("claim_owners", "expected_status", "expected_session"),

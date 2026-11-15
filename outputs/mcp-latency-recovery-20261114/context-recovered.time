@@ -1,0 +1,23 @@
+	Command being timed: "/home/epi13/Documents/Projects/mncs-control-mcp/.venv/bin/python -u /tmp/mncs-mcp-latency-20261114/context_probe.py /home/epi13/Documents/Projects/mncs-control-mcp/.worktrees/mcp-latency-recovery-20261114 /tmp/mncs-mcp-latency-20261114/context-recovered.json"
+	User time (seconds): 70.47
+	System time (seconds): 3.41
+	Percent of CPU this job got: 99%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 1:14.28
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 1049300
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 0
+	Minor (reclaiming a frame) page faults: 533064
+	Voluntary context switches: 656
+	Involuntary context switches: 3798
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 320
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0

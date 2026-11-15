@@ -1,0 +1,17 @@
+{"progress_snapshot_loads": 100}
+{"progress_snapshot_loads": 200}
+{"progress_snapshot_loads": 300}
+{"progress_snapshot_loads": 400}
+{"progress_snapshot_loads": 500}
+{"progress_snapshot_loads": 600}
+{"progress_snapshot_loads": 700}
+{"iteration": 0, "seconds": 48.34563950600568, "user_cpu": 46.106477000000005, "system_cpu": 1.9533470000000004, "store_opens": 1, "store_closes": 1, "snapshot_loads": 762, "claims_reads": 2, "native_batches": 161, "git_processes": 7, "status": "ready", "selected_session_id": null, "continuations": 1, "response_bytes": 19033, "response_sha256": "2ed8baa3963d8d0c307fa0c14ec06e25566f163c7288059b2bea1c67621f9a65", "generation_after": 131789}
+{"progress_snapshot_loads": 800}
+{"progress_snapshot_loads": 900}
+{"progress_snapshot_loads": 1000}
+{"progress_snapshot_loads": 1100}
+{"progress_snapshot_loads": 1200}
+{"progress_snapshot_loads": 1300}
+{"progress_snapshot_loads": 1400}
+{"progress_snapshot_loads": 1500}
+{"iteration": 1, "seconds": 48.065971776959486, "user_cpu": 46.52237300000001, "system_cpu": 1.4142330000000003, "store_opens": 1, "store_closes": 1, "snapshot_loads": 762, "claims_reads": 2, "native_batches": 161, "git_processes": 7, "status": "ready", "selected_session_id": null, "continuations": 1, "response_bytes": 19033, "response_sha256": "7bfd324cd248b6cbae916fd66abc8cce3846ea95b02e234b4d02e323c74710de", "generation_after": 131789}

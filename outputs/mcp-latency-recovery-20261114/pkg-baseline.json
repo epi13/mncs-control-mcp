@@ -1,0 +1,50 @@
+{
+  "source": "/home/epi13/Documents/Projects/mncs-control-mcp",
+  "rows": [
+    {
+      "iteration": 0,
+      "seconds": 0.06899275601608679,
+      "git_processes": 7,
+      "python_source_reads": 112,
+      "source_bytes": 7584338
+    },
+    {
+      "iteration": 1,
+      "seconds": 0.03033805702580139,
+      "git_processes": 7,
+      "python_source_reads": 112,
+      "source_bytes": 7584338
+    },
+    {
+      "iteration": 2,
+      "seconds": 0.03141052497085184,
+      "git_processes": 7,
+      "python_source_reads": 112,
+      "source_bytes": 7584338
+    },
+    {
+      "iteration": 3,
+      "seconds": 0.0311656859703362,
+      "git_processes": 7,
+      "python_source_reads": 112,
+      "source_bytes": 7584338
+    },
+    {
+      "iteration": 4,
+      "seconds": 0.031762281025294214,
+      "git_processes": 7,
+      "python_source_reads": 112,
+      "source_bytes": 7584338
+    },
+    {
+      "iteration": 5,
+      "seconds": 0.03256937803234905,
+      "git_processes": 7,
+      "python_source_reads": 112,
+      "source_bytes": 7584338
+    }
+  ],
+  "user_cpu": 0.17149999999999999,
+  "system_cpu": 0.026687,
+  "max_rss_kib": 31696
+}

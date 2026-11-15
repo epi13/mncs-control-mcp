@@ -1,0 +1,62 @@
+{
+  "source": "/home/epi13/Documents/Projects/mncs-control-mcp",
+  "sessions": 615,
+  "initial_generation": 131795,
+  "rows": [
+    {
+      "iteration": 0,
+      "seconds": 49.2716847989941,
+      "user_cpu": 47.416616,
+      "system_cpu": 1.6040030000000003,
+      "store_opens": 1,
+      "store_closes": 1,
+      "snapshot_loads": 762,
+      "claims_reads": 2,
+      "native_batches": 161,
+      "git_processes": 7,
+      "status": "ready",
+      "selected_session_id": null,
+      "continuations": 1,
+      "response_bytes": 19033,
+      "response_sha256": "3e8bb9892fbcbc8d32544e8bfe53dcdacbe6edf03078f84b3950e7d2d87bbb35",
+      "generation_after": 131795,
+      "target_present": true,
+      "continuation_lifecycles": [
+        "active"
+      ],
+      "next": "resume the listed project-linked session by its exact session identity"
+    },
+    {
+      "iteration": 1,
+      "seconds": 49.587175583001226,
+      "user_cpu": 47.887290000000014,
+      "system_cpu": 1.537296,
+      "store_opens": 1,
+      "store_closes": 1,
+      "snapshot_loads": 762,
+      "claims_reads": 2,
+      "native_batches": 161,
+      "git_processes": 7,
+      "status": "ready",
+      "selected_session_id": null,
+      "continuations": 1,
+      "response_bytes": 19033,
+      "response_sha256": "2515b8d3870defaf9a7f5b960f67328cf2b35613edbe6567afdd7c92a992e454",
+      "generation_after": 131795,
+      "target_present": true,
+      "continuation_lifecycles": [
+        "active"
+      ],
+      "next": "resume the listed project-linked session by its exact session identity"
+    }
+  ],
+  "max_rss_kib": 548624,
+  "final_counts": {
+    "store_opens": 2,
+    "store_closes": 2,
+    "snapshot_loads": 1524,
+    "claims_reads": 4,
+    "native_batches": 322,
+    "git_processes": 14
+  }
+}

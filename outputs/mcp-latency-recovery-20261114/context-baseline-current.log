@@ -1,0 +1,17 @@
+{"progress_snapshot_loads": 100}
+{"progress_snapshot_loads": 200}
+{"progress_snapshot_loads": 300}
+{"progress_snapshot_loads": 400}
+{"progress_snapshot_loads": 500}
+{"progress_snapshot_loads": 600}
+{"progress_snapshot_loads": 700}
+{"iteration": 0, "seconds": 49.2716847989941, "user_cpu": 47.416616, "system_cpu": 1.6040030000000003, "store_opens": 1, "store_closes": 1, "snapshot_loads": 762, "claims_reads": 2, "native_batches": 161, "git_processes": 7, "status": "ready", "selected_session_id": null, "continuations": 1, "response_bytes": 19033, "response_sha256": "3e8bb9892fbcbc8d32544e8bfe53dcdacbe6edf03078f84b3950e7d2d87bbb35", "generation_after": 131795, "target_present": true, "continuation_lifecycles": ["active"], "next": "resume the listed project-linked session by its exact session identity"}
+{"progress_snapshot_loads": 800}
+{"progress_snapshot_loads": 900}
+{"progress_snapshot_loads": 1000}
+{"progress_snapshot_loads": 1100}
+{"progress_snapshot_loads": 1200}
+{"progress_snapshot_loads": 1300}
+{"progress_snapshot_loads": 1400}
+{"progress_snapshot_loads": 1500}
+{"iteration": 1, "seconds": 49.587175583001226, "user_cpu": 47.887290000000014, "system_cpu": 1.537296, "store_opens": 1, "store_closes": 1, "snapshot_loads": 762, "claims_reads": 2, "native_batches": 161, "git_processes": 7, "status": "ready", "selected_session_id": null, "continuations": 1, "response_bytes": 19033, "response_sha256": "2515b8d3870defaf9a7f5b960f67328cf2b35613edbe6567afdd7c92a992e454", "generation_after": 131795, "target_present": true, "continuation_lifecycles": ["active"], "next": "resume the listed project-linked session by its exact session identity"}

@@ -7629,3 +7629,6 @@ class EnvironmentRPCServer:
                 self.socket_path.unlink()
         except FileNotFoundError:
             pass
+        close_service = getattr(self.environment_service, "close", None)
+        if callable(close_service):
+            close_service()

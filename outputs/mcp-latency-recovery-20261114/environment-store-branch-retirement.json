@@ -1,0 +1,19 @@
+{
+  "canonical": "origin/main",
+  "completion_status": "completed",
+  "dry_run": false,
+  "exit_code": 0,
+  "mutation_performed": true,
+  "repository": "/home/epi13/Documents/Projects/mncs-store",
+  "request_id": "req_retire_03a25e19d7df0e9c1b8d61b6682c6a59bdb306c066437208",
+  "results": [
+    {
+      "dry_run": false,
+      "kind": "branch",
+      "reason": "merged into origin/main",
+      "retired": true,
+      "target": "fix/test-throughput-20261114"
+    }
+  ],
+  "session_id": "ses_434790c4f0e730ab"
+}

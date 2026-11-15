@@ -1,0 +1,50 @@
+{
+  "source": "/home/epi13/Documents/Projects/mncs-control-mcp/.worktrees/mcp-latency-recovery-20261114",
+  "rows": [
+    {
+      "iteration": 0,
+      "seconds": 0.055732376989908516,
+      "git_processes": 4,
+      "python_source_reads": 56,
+      "source_bytes": 3792169
+    },
+    {
+      "iteration": 1,
+      "seconds": 0.01150443300139159,
+      "git_processes": 4,
+      "python_source_reads": 0,
+      "source_bytes": 0
+    },
+    {
+      "iteration": 2,
+      "seconds": 0.01169833802850917,
+      "git_processes": 4,
+      "python_source_reads": 0,
+      "source_bytes": 0
+    },
+    {
+      "iteration": 3,
+      "seconds": 0.012070767988916487,
+      "git_processes": 4,
+      "python_source_reads": 0,
+      "source_bytes": 0
+    },
+    {
+      "iteration": 4,
+      "seconds": 0.011502850975375623,
+      "git_processes": 4,
+      "python_source_reads": 0,
+      "source_bytes": 0
+    },
+    {
+      "iteration": 5,
+      "seconds": 0.011979736969806254,
+      "git_processes": 4,
+      "python_source_reads": 0,
+      "source_bytes": 0
+    }
+  ],
+  "user_cpu": 0.09719699999999999,
+  "system_cpu": 0.008928,
+  "max_rss_kib": 30636
+}

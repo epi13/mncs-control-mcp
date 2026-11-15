@@ -1,0 +1,62 @@
+{
+  "source": "/home/epi13/Documents/Projects/mncs-control-mcp/.worktrees/mcp-latency-recovery-20261114",
+  "sessions": 615,
+  "initial_generation": 131789,
+  "rows": [
+    {
+      "iteration": 0,
+      "seconds": 47.63749103801092,
+      "user_cpu": 45.581386,
+      "system_cpu": 1.842354,
+      "store_opens": 1,
+      "store_closes": 0,
+      "snapshot_loads": 762,
+      "claims_reads": 2,
+      "native_batches": 161,
+      "git_processes": 7,
+      "status": "ready",
+      "selected_session_id": null,
+      "continuations": 1,
+      "response_bytes": 19033,
+      "response_sha256": "c5e6aa687b989cc83d8c80dd286835408cb0badff5dacca08ef170a600705e18",
+      "generation_after": 131789,
+      "target_present": true,
+      "continuation_lifecycles": [
+        "active"
+      ],
+      "next": "resume the listed project-linked session by its exact session identity"
+    },
+    {
+      "iteration": 1,
+      "seconds": 20.774791847041342,
+      "user_cpu": 19.999319,
+      "system_cpu": 0.6186079999999996,
+      "store_opens": 0,
+      "store_closes": 0,
+      "snapshot_loads": 318,
+      "claims_reads": 2,
+      "native_batches": 48,
+      "git_processes": 7,
+      "status": "ready",
+      "selected_session_id": null,
+      "continuations": 1,
+      "response_bytes": 19033,
+      "response_sha256": "9ebc06253ca4b9a21c0e2331dfaa41e65c2e265ff6589341ec7b00c809b51346",
+      "generation_after": 131789,
+      "target_present": true,
+      "continuation_lifecycles": [
+        "active"
+      ],
+      "next": "resume the listed project-linked session by its exact session identity"
+    }
+  ],
+  "max_rss_kib": 1049300,
+  "final_counts": {
+    "store_opens": 1,
+    "store_closes": 1,
+    "snapshot_loads": 1080,
+    "claims_reads": 4,
+    "native_batches": 209,
+    "git_processes": 14
+  }
+}

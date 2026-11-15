@@ -1,0 +1,20 @@
+.......s................................................................ [ 32%]
+........................................................................ [ 64%]
+........................................................................ [ 96%]
+.......                                                                  [100%]
+============================= slowest 12 durations =============================
+9.87s call     tests/test_environment_sessions.py::test_campaign_continuation_reads_real_isolated_store
+6.29s call     tests/test_environment_sessions.py::test_claim_conflict_across_sessions
+5.19s call     tests/test_environment_sessions.py::test_declared_worktree_provider_checks_effect_rights_before_execution
+5.15s call     tests/test_environment_sessions.py::test_task_binding_survives_a_fresh_environment_service
+4.39s call     tests/test_environment_sessions.py::test_enter_inspect_claim_release_round_trip
+3.82s call     tests/test_environment_sessions.py::test_projection_evidence_reads_owner_record_from_isolated_store
+1.31s call     tests/test_environment_mcp_client.py::test_real_mcp_provider_loss_and_fresh_connection_preserve_owner_boundary
+0.51s call     tests/test_local_environment_mcp.py::test_case_variant_project_verification_uses_manifest_repository_identity
+0.50s call     tests/test_local_environment_mcp.py::test_local_bridge_uses_owner_resolved_context_without_leaking_grant
+0.50s call     tests/test_local_environment_mcp.py::test_local_rpc_bootstrap_binds_capability_to_process_and_working_tree
+0.50s call     tests/test_environment_rpc.py::test_grant_files_live_outside_shared_sandbox_home
+0.14s call     tests/test_environment_rpc.py::test_approved_claim_recovery_excludes_only_its_exact_shell_launcher
+=========================== short test summary info ============================
+SKIPPED [1] tests/test_environment_sessions.py:597: rights library required for gate enforcement
+222 passed, 1 skipped in 40.11s
