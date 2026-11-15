@@ -1,0 +1,58 @@
+{
+  "workstream": "B — recovered MCP latency Slice A",
+  "source_commit": "03f47e297ce8c6179cd8316bb07787942915ab59",
+  "source_publication": {
+    "main": "03f47e297ce8c6179cd8316bb07787942915ab59",
+    "origin_main_readback": "03f47e297ce8c6179cd8316bb07787942915ab59",
+    "workflow": "Existing worktree committed, fast-forwarded into main and pushed; no force or foreign-state reset."
+  },
+  "verification": {
+    "passed": 222,
+    "skipped": 1,
+    "skip_reason": "Optional Rights library required for gate enforcement is unavailable",
+    "seconds": 40.11,
+    "scope": "six targeted Environment/Control suites; no full-Control-suite claim",
+    "ruff": "pass — four changed Python files",
+    "diff_check": "pass"
+  },
+  "metrics": {
+    "sessions": 615,
+    "generation_before_and_after": 131795,
+    "baseline_warm_seconds": 49.587175583001226,
+    "final_warm_seconds": 21.661836012965068,
+    "baseline_cold_seconds": 49.2716847989941,
+    "final_cold_seconds": 49.780570977018215,
+    "snapshot_loads_warm_before_after": [
+      762,
+      318
+    ],
+    "native_batches_warm_before_after": [
+      161,
+      48
+    ],
+    "response_bytes_before_after": [
+      19033,
+      19033
+    ],
+    "peak_rss_kib_before_after": [
+      548624,
+      545948
+    ]
+  },
+  "activation": {
+    "runtime_revision": "03f47e297ce8c6179cd8316bb07787942915ab59",
+    "source_revision": "03f47e297ce8c6179cd8316bb07787942915ab59",
+    "restart_required": false,
+    "mechanism": "Existing active mncs-control-update.path watcher recycled the service; connected system_status confirmed current code.",
+    "migration_required": false
+  },
+  "workstream_A": {
+    "language_source_commit": "f8742e905056f22c01c25a2ef404f8536006e036",
+    "language_origin_main": "ca71830cf64860525d74b21306c2ceb7413334f6",
+    "language_remote_note": "Remote badge-only successor contains f8742e9; ancestry verified. Local main remains at activated source commit.",
+    "store_source_commit": "0d08e35c37ff34368c5f1848a62edaab257d0f7a",
+    "store_origin_main": "5464f046bada699f54d5d6cf6f8ea3d83f82f6d1"
+  },
+  "store_indexing": "Deferred; measured residual is repeated per-session current-generation binding scans and full snapshot materialization. No migration/reclamation/index mutation.",
+  "foreign_project_view_sha256": "0e87ef563e47a8c60c3f1b3e72b67f2f65748dc41f899d00439dc1c45bd41d94"
+}
