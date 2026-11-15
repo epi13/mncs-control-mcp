@@ -23,6 +23,7 @@ import stat
 import subprocess
 import sys
 import threading
+import zlib
 from collections import OrderedDict
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
@@ -477,7 +478,9 @@ def _load_flat_package(package: str, root: Path, submodules: tuple[str, ...] = (
 
 _POOL_MAX_STORES = 4
 _SNAPSHOT_META_CACHE_MAX = 16384
+_SCOPE_GRANT_META_CACHE_MAX = 4096
 _SNAPSHOT_SCHEMA = b"mncs.environment.session-snapshot/1"
+_EVENT_SCHEMA = b"mncs.environment.session-event/1"
 
 
 class _BorrowedStore:
@@ -543,6 +546,9 @@ class EnvironmentService:
         self._closed = False
         self._snapshot_meta_lock = threading.Lock()
         self._snapshot_meta_cache: OrderedDict[tuple[str, str, int], dict[str, Any]] = OrderedDict()
+        self._scope_grant_meta_cache: OrderedDict[
+            tuple[str, str, tuple[int, int, int]], frozenset[str]
+        ] = OrderedDict()
 
     @property
     def environment_path(self) -> Path:
@@ -618,6 +624,7 @@ class EnvironmentService:
             self._close_store_quietly(backend)
         with self._snapshot_meta_lock:
             self._snapshot_meta_cache.clear()
+            self._scope_grant_meta_cache.clear()
 
     def _store(self, pkg: Any) -> Any:
         if self._closed:
@@ -649,10 +656,21 @@ class EnvironmentService:
             if key_changed:
                 with self._snapshot_meta_lock:
                     self._snapshot_meta_cache.clear()
+                    self._scope_grant_meta_cache.clear()
             if backend is None:
                 backend = open_store(self.state_dir, "store")
             return _BorrowedStore(self, pool_key, backend)
         return pkg.session_store.open_store(self.state_dir, "store")
+
+    @staticmethod
+    def _read_latest_claims(pkg: Any, store: Any) -> list[dict[str, Any]]:
+        read_latest = getattr(getattr(pkg, "claims", None), "read_latest_records", None)
+        if callable(read_latest):
+            return read_latest(store)
+        read_latest_store = getattr(store, "read_latest_claims", None)
+        if callable(read_latest_store):
+            return read_latest_store()
+        return store.read_claims()
 
     def _resolve_workspace(self, workspace: str | None) -> Path:
         if workspace is None:
@@ -808,7 +826,7 @@ class EnvironmentService:
                              "lifecycle": snapshot.get("lifecycle")},
                 )
 
-            all_claims = store.read_claims()
+            all_claims = self._read_latest_claims(pkg, store)
             active_claims = pkg.claims.active_claims(all_claims)
             session_claims = [
                 claim for claim in active_claims.values()
@@ -914,7 +932,9 @@ class EnvironmentService:
                 close()
 
     @staticmethod
-    def _session_snapshot_heads(store: Any) -> dict[str, int] | None:
+    def _session_binding_heads(
+        store: Any,
+    ) -> tuple[dict[str, int], dict[str, tuple[int, int, int]]] | None:
         generation_fn = getattr(store, "generation", None)
         bindings_at = getattr(store, "domain_bindings_at", None)
         if not callable(generation_fn) or not callable(bindings_at):
@@ -927,23 +947,66 @@ class EnvironmentService:
         except Exception:
             return None
         heads: dict[str, int] = {}
+        event_sigs: dict[str, tuple[int, int, int]] = {}
         for schema, identity in bindings:
-            if schema != _SNAPSHOT_SCHEMA:
-                continue
-            try:
-                text = identity.decode("utf-8")
-            except UnicodeDecodeError:
-                continue
-            sid, sep, rev_text = text.partition(":snap:")
-            if not sep:
-                continue
-            try:
-                rev = int(rev_text)
-            except ValueError:
-                continue
-            if rev > heads.get(sid, -1):
-                heads[sid] = rev
-        return heads
+            if schema == _SNAPSHOT_SCHEMA:
+                try:
+                    text = identity.decode("utf-8")
+                except UnicodeDecodeError:
+                    continue
+                sid, sep, rev_text = text.partition(":snap:")
+                if not sep:
+                    continue
+                try:
+                    rev = int(rev_text)
+                except ValueError:
+                    continue
+                if rev > heads.get(sid, -1):
+                    heads[sid] = rev
+            elif schema == _EVENT_SCHEMA:
+                try:
+                    text = identity.decode("utf-8")
+                except UnicodeDecodeError:
+                    continue
+                sid, sep, _ = text.partition(":ev:")
+                if not sep:
+                    continue
+                crc = zlib.crc32(identity) & 0xFFFFFFFF
+                count, xor_crc, sum_crc = event_sigs.get(sid, (0, 0, 0))
+                event_sigs[sid] = (
+                    count + 1,
+                    xor_crc ^ crc,
+                    (sum_crc + crc) & 0xFFFFFFFF,
+                )
+        return heads, event_sigs
+
+    @staticmethod
+    def _session_snapshot_heads(store: Any) -> dict[str, int] | None:
+        resolved = EnvironmentService._session_binding_heads(store)
+        return None if resolved is None else resolved[0]
+
+    def _get_scope_grant_repos(
+        self, state_key: str, session_id: str, event_sig: tuple[int, int, int],
+    ) -> frozenset[str] | None:
+        key = (state_key, session_id, event_sig)
+        with self._snapshot_meta_lock:
+            cached = self._scope_grant_meta_cache.get(key)
+            if cached is not None:
+                self._scope_grant_meta_cache.move_to_end(key)
+            return cached
+
+    def _record_scope_grant_repos(
+        self, state_key: str, session_id: str, event_sig: tuple[int, int, int],
+        repos: frozenset[str],
+    ) -> None:
+        key = (state_key, session_id, event_sig)
+        with self._snapshot_meta_lock:
+            if self._closed:
+                return
+            self._scope_grant_meta_cache[key] = repos
+            self._scope_grant_meta_cache.move_to_end(key)
+            while len(self._scope_grant_meta_cache) > _SCOPE_GRANT_META_CACHE_MAX:
+                self._scope_grant_meta_cache.popitem(last=False)
 
     def _get_snapshot_meta(
         self, state_key: str, session_id: str, head_revision: int,
@@ -1202,21 +1265,89 @@ class EnvironmentService:
                 requested_campaign_id = selected_campaign_id
 
             scope_grants_cache: dict[str, list[dict[str, Any]]] = {}
+            session_cls = getattr(getattr(pkg, "sessions", None), "Session", None)
+            is_real_session_cls = (
+                getattr(session_cls, "__module__", None) == "mncs_env.sessions"
+            )
+            use_fast_scope_grants = (
+                is_real_session_cls
+                and callable(getattr(store, "read_scope_grant_events", None))
+            )
+            state_key = str(self.state_dir.expanduser().resolve())
+            session_heads: dict[str, int] | None = None
+            event_sigs: dict[str, tuple[int, int, int]] | None = None
+            loaded_snapshots: dict[str, dict[str, Any] | None] = {}
+
+            def scope_grant_repos_for_session(target_session_id: str) -> frozenset[str]:
+                sig = (
+                    event_sigs.get(target_session_id, (0, 0, 0))
+                    if event_sigs is not None else None
+                )
+                if sig is not None:
+                    cached = self._get_scope_grant_repos(state_key, target_session_id, sig)
+                    if cached is not None:
+                        return cached
+                raw_events = store.read_scope_grant_events(target_session_id)
+                if not raw_events:
+                    repos: frozenset[str] = frozenset()
+                else:
+                    opener = getattr(session_cls, "open", None)
+                    snapshot_obj = loaded_snapshots.get(target_session_id)
+                    session_obj = (
+                        session_cls(
+                            store, target_session_id, _initial_snapshot=snapshot_obj,
+                        )
+                        if isinstance(snapshot_obj, dict)
+                        else opener(
+                            state_dir=Path("."),
+                            session_id=target_session_id,
+                            backend="store",
+                            store=store,
+                        )
+                    )
+                    grant_reader = getattr(session_obj, "authority_scope_grants", None)
+                    grants = grant_reader() if callable(grant_reader) else []
+                    repos = (
+                        frozenset(
+                            record["repository"]
+                            for record in grants
+                            if isinstance(record, dict)
+                            and isinstance(record.get("repository"), str)
+                        )
+                        if isinstance(grants, list)
+                        else frozenset()
+                    )
+                if sig is not None:
+                    self._record_scope_grant_repos(
+                        state_key, target_session_id, sig, repos,
+                    )
+                return repos
 
             def scope_grants_for_session(session_id: str) -> list[dict[str, Any]]:
                 if session_id in scope_grants_cache:
                     return scope_grants_cache[session_id]
+                if (use_fast_scope_grants
+                        and repository not in scope_grant_repos_for_session(session_id)):
+                    scope_grants_cache[session_id] = []
+                    return []
                 # The canonical session inventory is already bounded below.
                 # A second, smaller bound on historical grant reads made a
                 # valid task selector fail merely as completed work accumulated.
-                session_type = getattr(pkg.sessions, "Session", None)
+                session_type = getattr(getattr(pkg, "sessions", None), "Session", None)
                 opener = getattr(session_type, "open", None)
                 if not callable(opener):
                     records = []
                 else:
-                    session = opener(
-                        state_dir=Path("."), session_id=session_id,
-                        backend="store", store=store,
+                    snapshot_obj = loaded_snapshots.get(session_id)
+                    session = (
+                        session_type(
+                            store, session_id, _initial_snapshot=snapshot_obj,
+                        )
+                        if is_real_session_cls and isinstance(snapshot_obj, dict)
+                        else opener(
+                            state_dir=Path("."), session_id=session_id,
+                            backend="store", store=store,
+                        )
                     )
                     authority_reader = getattr(session, "effective_authority", None)
                     if callable(authority_reader):
@@ -1329,9 +1460,9 @@ class EnvironmentService:
                     if isinstance(recovered_checkout, dict):
                         working_checkout = recovered_checkout
 
-            state_key = str(self.state_dir.expanduser().resolve())
-            session_heads = self._session_snapshot_heads(store)
-            loaded_snapshots: dict[str, dict[str, Any] | None] = {}
+            binding_heads = self._session_binding_heads(store)
+            if binding_heads is not None:
+                session_heads, event_sigs = binding_heads
 
             def load_snapshot_once(target_session_id: str) -> dict[str, Any] | None:
                 if target_session_id in loaded_snapshots:
@@ -1404,7 +1535,7 @@ class EnvironmentService:
                     "ENVIRONMENT_SESSION_MISSING",
                     "selected Environment session is not present in canonical Store",
                 )
-            all_claims = store.read_claims()
+            all_claims = self._read_latest_claims(pkg, store)
             active_claims = pkg.claims.active_claims(all_claims)
             for claim in active_claims.values():
                 if isinstance(claim, dict):
@@ -1417,12 +1548,30 @@ class EnvironmentService:
             project_campaigns: set[str] = set()
             foreign_campaigns: set[str] = set()
             foreign_owner = False
+            needs_scope_grant_check = (
+                working_checkout is not None
+                and isinstance(definition_id, str) and bool(definition_id)
+                and isinstance(workspace_root, str) and bool(workspace_root)
+            )
+            can_check_scope_grants_fast = (
+                not needs_scope_grant_check or use_fast_scope_grants
+            )
             can_defer_unrelated = (
                 campaign_id is None
-                and task_identity is None
-                and not (isinstance(definition_id, str) and definition_id
-                         and isinstance(workspace_root, str) and workspace_root)
+                and can_check_scope_grants_fast
             )
+
+            def is_unrelated_session_meta(
+                target_session_id: str, meta: dict[str, Any],
+                *, foreign: bool = False,
+            ) -> bool:
+                if (repository in meta["static_repos"]
+                        or target_session_id in claims_by_session):
+                    return False
+                if foreign or not needs_scope_grant_check:
+                    return True
+                return repository not in scope_grant_repos_for_session(target_session_id)
+
             for session_id in session_ids:
                 meta = (
                     self._get_snapshot_meta(state_key, session_id, session_heads[session_id])
@@ -1436,10 +1585,12 @@ class EnvironmentService:
                         continue
                     if meta["lifecycle"] in _TERMINAL_LIFECYCLES:
                         continue
+                    is_foreign = meta["principal_id"] != self.authenticated_principal_id
                     if (can_defer_unrelated
-                            and repository not in meta["static_repos"]
-                            and session_id not in claims_by_session):
-                        if meta["principal_id"] != self.authenticated_principal_id:
+                            and is_unrelated_session_meta(
+                                session_id, meta, foreign=is_foreign,
+                            )):
+                        if is_foreign:
                             foreign_campaigns.add(meta["campaign_identity"])
                         else:
                             deferred_owned.setdefault(meta["campaign_identity"], []).append(
@@ -1482,16 +1633,19 @@ class EnvironmentService:
                 if references_project and checkout_matches:
                     project_campaigns.add(identity)
 
-            for cid in project_campaigns:
-                extra_sids = deferred_owned.get(cid)
+            def materialize_deferred_campaign(cid: str) -> None:
+                extra_sids = deferred_owned.pop(cid, None)
                 if not extra_sids:
-                    continue
+                    return
                 entries = owned_by_campaign.setdefault(cid, [])
                 for deferred_sid in extra_sids:
                     deferred_snapshot = load_snapshot_once(deferred_sid)
                     if isinstance(deferred_snapshot, dict):
                         entries.append((deferred_sid, deferred_snapshot))
                 entries.sort(key=lambda item: item[0])
+
+            for cid in project_campaigns:
+                materialize_deferred_campaign(cid)
 
             foreign_owner = foreign_owner or bool(project_campaigns & foreign_campaigns)
             if foreign_owner:
@@ -1539,6 +1693,11 @@ class EnvironmentService:
                             continue
                         if (not meta["campaign_identity"]
                                 or meta["campaign_identity"] in relevant_campaigns):
+                            continue
+                        if (can_check_scope_grants_fast
+                                and is_unrelated_session_meta(
+                                    candidate_session_id, meta, foreign=False,
+                                )):
                             continue
                     candidate_snapshot = load_snapshot_once(candidate_session_id)
                     if (not isinstance(candidate_snapshot, dict)
@@ -1814,7 +1973,16 @@ class EnvironmentService:
                     "next": "verify the campaign identity and that this repository belongs to its recorded work intent",
                 }
 
+            for cid in candidate_campaigns:
+                materialize_deferred_campaign(cid)
             results: list[dict[str, Any]] = []
+            has_more_results = False
+            cached_live_observation: dict[str, Any] | None = None
+            single_campaign_mode = (
+                campaign_id is not None
+                or task_identity is not None
+                or exact_session_id is not None
+            )
             for selected_campaign in candidate_campaigns:
                 matching = owned_by_campaign.get(selected_campaign, [])
                 if working_checkout is not None:
@@ -1837,6 +2005,9 @@ class EnvironmentService:
                 ]
                 if not project_sessions:
                     continue
+                if not single_campaign_mode and len(results) >= 16:
+                    has_more_results = True
+                    break
                 authoritative_session = None
                 authoritative_selection_basis = None
                 if exact_session_id is not None:
@@ -1942,7 +2113,9 @@ class EnvironmentService:
                     # the first row. Keep the conflicting owner-authorized
                     # session capsules visible so Environment can resume only
                     # after the caller selects the exact recorded context.
-                    live_observation = self._observe_project_checkout(repository)
+                    if cached_live_observation is None:
+                        cached_live_observation = self._observe_project_checkout(repository)
+                    live_observation = cached_live_observation
                     context_rows = [
                         {"definition_id": definition_id[:256] or None,
                          "workspace_root": workspace_root[:1000] or None}
@@ -1992,7 +2165,9 @@ class EnvironmentService:
                     })
                     continue
 
-                live_observation = self._observe_project_checkout(repository)
+                if cached_live_observation is None:
+                    cached_live_observation = self._observe_project_checkout(repository)
+                live_observation = cached_live_observation
                 continuations = [
                     self._continuation_capsule(
                         pkg, store, session_id, snapshot, repository,
@@ -2045,7 +2220,7 @@ class EnvironmentService:
                 "repository": repository,
                 "status": "ambiguous-campaigns",
                 "campaigns": results[:16],
-                "campaigns_truncated": len(results) > 16,
+                "campaigns_truncated": has_more_results or len(results) > 16,
                 "next": "select the intended campaign identity; Control will not choose between campaigns",
             }
             if task_selector_projection is not None:
@@ -2378,10 +2553,21 @@ class EnvironmentService:
         live_observation: dict[str, Any],
         *, working_checkout: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        session = pkg.sessions.Session.open(
-            state_dir=Path("."), session_id=session_id, backend="store", store=store,
+        session_cls = pkg.sessions.Session
+        use_projection = (
+            getattr(session_cls, "__module__", None) == "mncs_env.sessions"
+            and callable(getattr(session_cls, "continuation_capsule_projection", None))
         )
-        context = session.context()
+        if use_projection:
+            session = session_cls(store, session_id, _initial_snapshot=snapshot)
+            context = session.continuation_capsule_projection()
+            projected_campaign_state = context.get("campaign_state")
+        else:
+            session = session_cls.open(
+                state_dir=Path("."), session_id=session_id, backend="store", store=store,
+            )
+            context = session.context()
+            projected_campaign_state = None
         authority = context.get("authority", {})
         authority = authority if isinstance(authority, dict) else {}
         scope_grants = authority.get("scope_grants", [])
@@ -2589,10 +2775,15 @@ class EnvironmentService:
         campaign_identity = campaign.get("identity")
         charter_evidence = campaign_evidence
         campaign_state_reader = getattr(session, "campaign_state", None)
-        if isinstance(campaign_state_checkpoint_id, str) and callable(
-            campaign_state_reader
+        if isinstance(campaign_state_checkpoint_id, str) and (
+            isinstance(projected_campaign_state, dict)
+            or callable(campaign_state_reader)
         ):
-            campaign_state = campaign_state_reader()
+            campaign_state = (
+                projected_campaign_state
+                if isinstance(projected_campaign_state, dict)
+                else campaign_state_reader()
+            )
             if (
                 not isinstance(campaign_state, dict)
                 or campaign_state.get("campaign_identity") != campaign_identity
