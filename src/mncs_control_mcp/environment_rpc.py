@@ -241,9 +241,11 @@ class EnvironmentRPCServer:
     def __init__(
         self, config: Any, environment_service: Any, policy: Any,
         process_manager: Any | None = None, audit_log: Any | None = None,
+        *, owns_environment_service: bool = False,
     ) -> None:
         self.config = config
         self.environment_service = environment_service
+        self._owns_environment_service = bool(owns_environment_service)
         self.policy = policy
         self.process_manager = process_manager
         self.audit_log = audit_log
@@ -267,9 +269,23 @@ class EnvironmentRPCServer:
         self._socket: socket.socket | None = None
         self._socket_identity: tuple[int, int] | None = None
         self._thread: threading.Thread | None = None
+        self._connection_threads: set[threading.Thread] = set()
         self._closed = False
+        self._close_done = threading.Event()
+        self._closing_thread_id: int | None = None
 
     def start(self) -> None:
+        with self._lock:
+            if self._closed:
+                raise ControlError(
+                    "ENVIRONMENT_PERSISTENCE_UNAVAILABLE",
+                    "Environment RPC server is closed",
+                )
+            if self._socket is not None:
+                raise ControlError(
+                    "ENVIRONMENT_RPC_ALREADY_STARTED",
+                    "Environment RPC server is already started",
+                )
         self.socket_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         stat_result = self.socket_path.parent.stat()
         if stat_result.st_uid != os.getuid() or stat_result.st_mode & 0o077:
@@ -289,18 +305,51 @@ class EnvironmentRPCServer:
             except FileNotFoundError:
                 continue
         endpoint = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        old_umask = os.umask(0o177)
+        bound_path = False
         try:
-            endpoint.bind(str(self.socket_path))
-        finally:
-            os.umask(old_umask)
-        endpoint.listen(32)
-        endpoint.settimeout(0.5)
-        self._socket = endpoint
-        bound = self.socket_path.lstat()
-        self._socket_identity = (bound.st_dev, bound.st_ino)
-        self._thread = threading.Thread(target=self._serve, name="mncs-environment-rpc", daemon=True)
-        self._thread.start()
+            old_umask = os.umask(0o177)
+            try:
+                endpoint.bind(str(self.socket_path))
+                bound_path = True
+            finally:
+                os.umask(old_umask)
+            endpoint.listen(32)
+            endpoint.settimeout(0.5)
+            bound = self.socket_path.lstat()
+            socket_identity = (bound.st_dev, bound.st_ino)
+            serve_thread = threading.Thread(target=self._serve, name="mncs-environment-rpc", daemon=True)
+            with self._lock:
+                if self._closed:
+                    raise ControlError(
+                        "ENVIRONMENT_PERSISTENCE_UNAVAILABLE",
+                        "Environment RPC server is closed",
+                    )
+                if self._socket is not None:
+                    raise ControlError(
+                        "ENVIRONMENT_RPC_ALREADY_STARTED",
+                        "Environment RPC server is already started",
+                    )
+                self._socket = endpoint
+                self._socket_identity = socket_identity
+                self._thread = serve_thread
+                try:
+                    serve_thread.start()
+                except BaseException:
+                    self._socket = None
+                    self._socket_identity = None
+                    self._thread = None
+                    raise
+        except BaseException:
+            try:
+                endpoint.close()
+            except OSError:
+                pass
+            if bound_path:
+                try:
+                    self.socket_path.unlink()
+                except FileNotFoundError:
+                    pass
+            raise
 
     def status(self) -> dict[str, Any]:
         """Report whether the owner-bound endpoint is still the bound socket."""
@@ -430,6 +479,12 @@ class EnvironmentRPCServer:
                 "local MCP process identity could not be established",
             )
         with self._lock:
+            if self._closed or self._socket is None:
+                token_file.unlink(missing_ok=True)
+                raise ControlError(
+                    "ENVIRONMENT_PERSISTENCE_UNAVAILABLE",
+                    "Control Environment publication endpoint is unavailable",
+                )
             now = time.monotonic()
             expired = [
                 (digest, existing)
@@ -950,17 +1005,45 @@ class EnvironmentRPCServer:
             )
 
     def _serve(self) -> None:
-        assert self._socket is not None
+        with self._lock:
+            sock = self._socket
+        if sock is None:
+            return
         while not self._closed:
             try:
-                connection, _ = self._socket.accept()
+                connection, _ = sock.accept()
             except TimeoutError:
                 continue
             except OSError:
                 if self._closed:
                     break
                 continue
-            threading.Thread(target=self._serve_connection, args=(connection,), daemon=True).start()
+            worker = threading.Thread(target=self._run_connection, args=(connection,), daemon=True)
+            with self._lock:
+                if self._closed:
+                    try:
+                        connection.close()
+                    except OSError:
+                        pass
+                    break
+                self._connection_threads.add(worker)
+            try:
+                worker.start()
+            except BaseException:
+                with self._lock:
+                    self._connection_threads.discard(worker)
+                try:
+                    connection.close()
+                except OSError:
+                    pass
+                raise
+
+    def _run_connection(self, connection: socket.socket) -> None:
+        try:
+            self._serve_connection(connection)
+        finally:
+            with self._lock:
+                self._connection_threads.discard(threading.current_thread())
 
     @staticmethod
     def _peer_uid(connection: socket.socket) -> int | None:
@@ -7612,23 +7695,65 @@ class EnvironmentRPCServer:
         }}
 
     def close(self) -> None:
-        self._closed = True
-        if self._socket is not None:
-            self._socket.close()
-        if self._thread is not None:
-            self._thread.join(timeout=2.0)
+        current_thread = threading.current_thread()
+        current_ident = threading.get_ident()
+        close_done = self._close_done
         with self._lock:
-            grants = list(self._grants.values())
-            self._grants.clear()
-        for record in grants:
-            record.token_file.unlink(missing_ok=True)
+            if self._closed:
+                closing_self = self._closing_thread_id == current_ident
+                should_close = False
+            else:
+                should_close = True
+                self._closed = True
+                self._closing_thread_id = current_ident
+                socket_to_close = self._socket
+                self._socket = None
+                accept_thread = self._thread
+                self._thread = None
+                socket_identity = self._socket_identity
+                self._socket_identity = None
+                grants = list(self._grants.values())
+                self._grants.clear()
+        if not should_close:
+            if not closing_self:
+                close_done.wait(timeout=5.0)
+            return
         try:
-            observed = self.socket_path.lstat()
-            if (stat.S_ISSOCK(observed.st_mode) and observed.st_uid == os.getuid()
-                    and self._socket_identity == (observed.st_dev, observed.st_ino)):
-                self.socket_path.unlink()
-        except FileNotFoundError:
-            pass
-        close_service = getattr(self.environment_service, "close", None)
-        if callable(close_service):
-            close_service()
+            if socket_to_close is not None:
+                try:
+                    socket_to_close.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+                try:
+                    socket_to_close.close()
+                except OSError:
+                    pass
+            for record in grants:
+                record.token_file.unlink(missing_ok=True)
+            if socket_identity is not None:
+                try:
+                    observed = self.socket_path.lstat()
+                    if (stat.S_ISSOCK(observed.st_mode) and observed.st_uid == os.getuid()
+                            and socket_identity == (observed.st_dev, observed.st_ino)):
+                        self.socket_path.unlink()
+                except FileNotFoundError:
+                    pass
+            if accept_thread is not None and accept_thread is not current_thread:
+                accept_thread.join(timeout=2.0)
+            with self._lock:
+                workers = [
+                    thread for thread in self._connection_threads
+                    if thread is not current_thread
+                ]
+            deadline = time.monotonic() + 2.0
+            for worker in workers:
+                remaining = max(0.0, deadline - time.monotonic())
+                if remaining <= 0.0:
+                    break
+                worker.join(timeout=remaining)
+            if self._owns_environment_service:
+                close_service = getattr(self.environment_service, "close", None)
+                if callable(close_service):
+                    close_service()
+        finally:
+            close_done.set()

@@ -364,6 +364,7 @@ def test_project_bwrap_reconciles_checkpoint_after_control_rpc_restart(config) -
         if second_rpc is not None:
             second_rpc.revoke_grant(second_grant)
             second_rpc.close()
+        environment.close()
         shutil.rmtree(private_root, ignore_errors=True)
 
 

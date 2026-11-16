@@ -574,6 +574,8 @@ class EnvironmentService:
         return Path.home() / ".local" / "share" / "mncs-environment"
 
     def _pkg(self) -> Any:
+        if self._closed:
+            raise ControlError(ENVIRONMENT_UNAVAILABLE, "Environment service is closed")
         try:
             return _load_flat_package(PACKAGE, self.environment_path,
                                       ("sessions", "session_store", "entry", "claims",
@@ -659,6 +661,15 @@ class EnvironmentService:
                     self._scope_grant_meta_cache.clear()
             if backend is None:
                 backend = open_store(self.state_dir, "store")
+                with self._store_pool_lock:
+                    if self._closed:
+                        close_raced = backend
+                        backend = None
+                    else:
+                        close_raced = None
+                if close_raced is not None:
+                    self._close_store_quietly(close_raced)
+                    raise ControlError(ENVIRONMENT_UNAVAILABLE, "Environment service is closed")
             return _BorrowedStore(self, pool_key, backend)
         return pkg.session_store.open_store(self.state_dir, "store")
 
@@ -690,6 +701,13 @@ class EnvironmentService:
         return candidate
 
     def status(self) -> dict[str, Any]:
+        if self._closed:
+            return {
+                "available": False,
+                "error": ENVIRONMENT_UNAVAILABLE,
+                "message": "Environment service is closed",
+                "path": str(self._config.environment_path),
+            }
         try:
             pkg = self._pkg()
         except ControlError as exc:

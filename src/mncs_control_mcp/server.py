@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import sys
+import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -94,12 +95,33 @@ def build_server(config: ControlConfig | None = None) -> Any:
     environment_sessions = EnvironmentService(selected)
     environment_rpc = EnvironmentRPCServer(
         selected, environment_sessions, policy, process_manager=processes,
-        audit_log=audit,
+        audit_log=audit, owns_environment_service=True,
     )
-    environment_rpc.start()
+    shutdown_lock = threading.Lock()
+
+    def _shutdown_server() -> None:
+        with shutdown_lock:
+            atexit.unregister(_shutdown_server)
+            atexit.unregister(processes.cleanup)
+            resume_timer = getattr(experiments, "_resume_timer", None)
+            if resume_timer is not None:
+                resume_timer.cancel()
+            try:
+                processes.cleanup()
+            finally:
+                try:
+                    environment_rpc.close()
+                finally:
+                    environment_sessions.close()
+
+    try:
+        environment_rpc.start()
+    except BaseException:
+        _shutdown_server()
+        raise
     environment_sessions.authenticated_principal_id = environment_rpc.principal_id
     sandbox.environment_rpc = environment_rpc
-    atexit.register(environment_rpc.close)
+    atexit.register(_shutdown_server)
     control_plane = ControlPlaneService(
         selected, policy, sandbox, projects, git, integrations.tests, integrations, processes, journal_context
     )
@@ -1026,6 +1048,9 @@ def build_server(config: ControlConfig | None = None) -> Any:
         return invoke("control_job_stop", processes.stop_control, job_id)  # type: ignore[return-value]
 
     server._control_processes = processes
+    server._control_environment_rpc = environment_rpc
+    server._control_environment_sessions = environment_sessions
+    server._control_close = _shutdown_server
     return server
 
 
@@ -1040,7 +1065,13 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     _logging()
     config = load_config(args.config)
-    build_server(config).run(transport="stdio")
+    server = build_server(config)
+    try:
+        server.run(transport="stdio")
+    finally:
+        close_server = getattr(server, "_control_close", None)
+        if callable(close_server):
+            close_server()
     return 0
 
 
