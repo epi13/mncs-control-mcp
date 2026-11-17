@@ -1054,7 +1054,29 @@ def build_server(config: ControlConfig | None = None) -> Any:
     return server
 
 
+def _validate_isolated_probe_dir(raw_path: str) -> Path:
+    """Validate an owner-private temporary directory for isolated stdio probes."""
+    import stat
+
+    candidate = Path(raw_path).expanduser()
+    if candidate.is_symlink() or not candidate.is_dir():
+        raise ControlError(
+            "CONFIG_INVALID",
+            "isolated probe directory must be an existing non-symlink directory",
+        )
+    resolved = candidate.resolve(strict=True)
+    info = resolved.lstat()
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+        raise ControlError(
+            "CONFIG_INVALID",
+            "isolated probe directory must be user-owned with 0700 permissions",
+        )
+    return resolved
+
+
 def main(argv: list[str] | None = None) -> int:
+    from dataclasses import replace
+
     selected_argv = list(sys.argv[1:] if argv is None else argv)
     if selected_argv and selected_argv[0] == "doctor":
         from .doctor import doctor_main
@@ -1062,9 +1084,21 @@ def main(argv: list[str] | None = None) -> int:
         return doctor_main(selected_argv[1:])
     parser = argparse.ArgumentParser(prog="mncs-control-mcp")
     parser.add_argument("--config", help="path to a control TOML configuration")
+    parser.add_argument(
+        "--isolated-probe-dir",
+        help="run with an isolated probe runtime directory instead of canonical IPC state",
+    )
     args = parser.parse_args(argv)
     _logging()
     config = load_config(args.config)
+    if args.isolated_probe_dir:
+        probe_dir = _validate_isolated_probe_dir(args.isolated_probe_dir)
+        config = replace(
+            config,
+            environment_rpc_socket=probe_dir / "environment.sock",
+            audit_path=probe_dir / "audit.jsonl",
+            job_state_path=probe_dir / "jobs.json",
+        )
     server = build_server(config)
     try:
         server.run(transport="stdio")

@@ -1,15 +1,20 @@
 from __future__ import annotations
 
+import json
 import os
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
+from typing import Any
+from urllib.parse import urlparse
 
 from .security import redact_text, safe_host_probe_environment
 
 _DEFAULT_CONFIG_DIR = Path.home() / ".config" / "mncs-control-mcp"
+_GITHUB_SLUG_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 
 
 @dataclass(frozen=True)
@@ -222,6 +227,86 @@ def _parse_gh_status(output: str) -> tuple[str | None, str | None, tuple[str, ..
     return account, protocol, tuple(scopes)
 
 
+def parse_github_remote(url: str) -> tuple[str, str] | None:
+    """Return (transport, 'owner/repo') for a GitHub HTTPS or SSH remote URL."""
+    raw = url.strip()
+    if not raw or any(ch.isspace() for ch in raw) or "\x00" in raw:
+        return None
+    if raw.startswith("https://"):
+        parsed = urlparse(raw)
+        if (parsed.scheme != "https" or parsed.hostname != "github.com"
+                or parsed.username or parsed.password):
+            return None
+        path = parsed.path.strip("/")
+        if path.endswith(".git"):
+            path = path[:-4]
+        return ("https", path) if _GITHUB_SLUG_RE.fullmatch(path) else None
+    if raw.startswith("ssh://"):
+        parsed = urlparse(raw)
+        if parsed.scheme != "ssh" or parsed.hostname != "github.com" or parsed.username != "git":
+            return None
+        path = parsed.path.strip("/")
+        if path.endswith(".git"):
+            path = path[:-4]
+        return ("ssh", path) if _GITHUB_SLUG_RE.fullmatch(path) else None
+    if raw.startswith("git@github.com:"):
+        path = raw.split(":", 1)[1].strip("/")
+        if path.endswith(".git"):
+            path = path[:-4]
+        return ("ssh", path) if _GITHUB_SLUG_RE.fullmatch(path) else None
+    return None
+
+
+def repository_origin_remote(repo_root: Path) -> tuple[str | None, str | None]:
+    """Read origin's push/fetch URL without touching network or repo code."""
+    for key in ("remote.origin.pushurl", "remote.origin.url"):
+        code, stdout, stderr = _capture(
+            ["git", "-C", str(repo_root), "config", "--get", key],
+            timeout=5.0,
+        )
+        value = stdout.strip()
+        if code == 0 and value:
+            return redact_text(value), None
+        if code not in (0, 1):
+            return None, redact_text((stderr or stdout or "git config failed").strip())
+    return None, "missing"
+
+
+def github_repo_permissions(owner_repo: str) -> dict[str, Any]:
+    """Inspect repository push/pull permissions read-only without mutating GitHub."""
+    if not _GITHUB_SLUG_RE.fullmatch(owner_repo):
+        return {"status": "unknown", "detail": "invalid GitHub repository slug"}
+    gh = _gh_executable()
+    if gh is None:
+        return {"status": "unknown", "detail": "gh CLI is unavailable to confirm repository permissions"}
+    probe_env = safe_host_probe_environment()
+    file_token = _read_token_file(github_token_file())
+    if file_token and _host_gh_token() is None:
+        # Inject private file token only inside the read-only host gh probe subprocess
+        # when keyring gh auth is absent; never expose or log it.
+        probe_env["GH_TOKEN"] = file_token
+    code, stdout, stderr = _capture(
+        [gh, "api", f"repos/{owner_repo}", "--jq", "{push: .permissions.push, pull: .permissions.pull}"],
+        env=probe_env,
+        timeout=8.0,
+    )
+    if code == 0:
+        try:
+            payload = json.loads(stdout.strip())
+        except json.JSONDecodeError:
+            payload = None
+        if isinstance(payload, dict) and isinstance(payload.get("push"), bool) and isinstance(payload.get("pull"), bool):
+            return {"status": "confirmed", "push": payload["push"], "pull": payload["pull"]}
+        return {"status": "unknown", "detail": f"GitHub API did not expose permissions for {owner_repo}"}
+    combined = f"{stdout}\n{stderr}".strip()
+    lower = combined.lower()
+    if "404" in lower or "not found" in lower:
+        return {"status": "not_found", "detail": f"GitHub repository {owner_repo} was not found or is inaccessible"}
+    if "401" in lower or "403" in lower or "bad credentials" in lower or "requires authentication" in lower:
+        return {"status": "unauthorized", "detail": redact_text(combined[:240])}
+    return {"status": "unknown", "detail": redact_text(combined[:240] or f"gh api returned exit code {code}")}
+
+
 def github_auth_status() -> GitHubAuthStatus:
     file_token = _read_token_file(github_token_file()) is not None
     host_token = _host_gh_token() is not None
@@ -231,12 +316,15 @@ def github_auth_status() -> GitHubAuthStatus:
     protocol = None
     scopes: tuple[str, ...] = ()
     detail = "GitHub CLI is not authenticated in this environment"
+    host_auth_code: int | None = None
+    host_auth_output = ""
     if gh is not None:
-        code, stdout, stderr = _capture([gh, "auth", "status", "-h", "github.com"])
-        account, protocol, scopes = _parse_gh_status(stdout + "\n" + stderr)
-        if code == 0:
+        host_auth_code, stdout, stderr = _capture([gh, "auth", "status", "-h", "github.com"])
+        host_auth_output = f"{stdout}\n{stderr}".strip()
+        account, protocol, scopes = _parse_gh_status(host_auth_output)
+        if host_auth_code == 0:
             detail = "host gh reports an authenticated github.com login"
-        elif source:
+        elif file_token:
             detail = "a Control GitHub token is available even though host gh status failed"
         else:
             detail = redact_text((stderr or stdout).strip() or "gh auth status failed")
@@ -249,10 +337,22 @@ def github_auth_status() -> GitHubAuthStatus:
     required = {"repo"}
     pr_scopes = {"repo"}
     have = set(scopes)
-    if token_present and not have:
-        # File-sourced tokens may not expose scope metadata. Treat them as
-        # sufficient for the declared development operations until a live
-        # command proves otherwise.
+    if source == "host-gh" and host_auth_code not in (None, 0):
+        lower = host_auth_output.lower()
+        network_markers = ("timed out", "could not resolve", "connection", "eof", "tls", "temporary failure")
+        if any(marker in lower for marker in network_markers):
+            can_git = False
+            can_pr = False
+            state = "unknown"
+            detail = "host gh token is configured, but github.com reachability could not be verified"
+        else:
+            can_git = False
+            can_pr = False
+            state = "unavailable"
+            source = None
+    elif token_present and not have:
+        # File-sourced or fine-grained tokens may not expose scope metadata.
+        # Per-repository API permission checks still validate target write access.
         can_git = True
         can_pr = True
         state = "available"

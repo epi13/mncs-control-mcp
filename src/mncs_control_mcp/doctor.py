@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+import errno
 import importlib
 import json
 import os
 import select
 import shutil
+import socket
+import stat
+import struct
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -126,80 +131,275 @@ def _read_json_response(
 def probe_mcp_stdio(
     executable: Path, config_path: Path, *, timeout: float = 20.0
 ) -> dict[str, Any]:
-    """Perform a real initialize/tools-list exchange against the local executable."""
+    """Perform a real initialize/tools-list exchange against the local executable.
 
+    The handshake runs in a temporary 0700 probe directory so it does not
+    collide with an active canonical Environment RPC endpoint or write probe
+    events into the live service's audit and job files.
+    """
     environment = safe_host_probe_environment()
-    if executable.is_file():
-        command = [str(executable), "--config", str(config_path)]
-        cwd = None
-    else:
-        # A project test can run inside /workspace where the host's .venv path
-        # is not mounted.  Use the interpreter that is actually executing the
-        # probe and expose the checked-out source, rather than inventing a
-        # host/sandbox path.
-        command = [sys.executable, "-m", "mncs_control_mcp", "--config", str(config_path)]
-        cwd = Path.cwd()
-        environment["PYTHONPATH"] = str(cwd / "src")
-    process = subprocess.Popen(
-        command,
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        env=environment,
-        cwd=cwd,
-        start_new_session=True,
-    )
-    try:
-        assert process.stdin is not None and process.stdout is not None
-        initialize = {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "initialize",
-            "params": {
-                "protocolVersion": "2025-11-25",
-                "capabilities": {},
-                "clientInfo": {"name": "mncs-control-doctor", "version": "1"},
-            },
-        }
-        process.stdin.write(json.dumps(initialize) + "\n")
-        process.stdin.flush()
-        init_response = _read_json_response(process.stdout, process, 1, timeout)
-        if "error" in init_response:
-            raise RuntimeError("initialize returned an MCP error")
-        process.stdin.write(
-            json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}})
-            + "\n"
+    with tempfile.TemporaryDirectory(prefix="mncs-control-probe-") as tmpdir:
+        probe_dir = Path(tmpdir)
+        os.chmod(probe_dir, 0o700)
+        base_args = ["--config", str(config_path), "--isolated-probe-dir", str(probe_dir)]
+        if executable.is_file():
+            command = [str(executable), *base_args]
+            cwd = None
+        else:
+            # A project test can run inside /workspace where the host's .venv
+            # path is not mounted. Use the running interpreter and checked-out
+            # source rather than inventing a host/sandbox path.
+            command = [sys.executable, "-m", "mncs_control_mcp", *base_args]
+            cwd = Path.cwd()
+            environment["PYTHONPATH"] = str(cwd / "src")
+        process = subprocess.Popen(
+            command,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=environment,
+            cwd=cwd,
+            start_new_session=True,
         )
-        process.stdin.write(
-            json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}) + "\n"
-        )
-        process.stdin.flush()
-        tools_response = _read_json_response(process.stdout, process, 2, timeout)
-        if "error" in tools_response:
-            raise RuntimeError("tools/list returned an MCP error")
-        tools = tools_response.get("result", {}).get("tools", [])
-        names = {item.get("name") for item in tools if isinstance(item, dict)}
-        missing = sorted(_REQUIRED_TOOLS - names)
-        if missing:
-            raise RuntimeError("missing tools: " + ", ".join(missing))
-        return {
-            **tool_surface_manifest(str(name) for name in names if name),
-            "required_tools": sorted(_REQUIRED_TOOLS),
-        }
-    finally:
-        if process.stdin is not None:
-            try:
-                process.stdin.close()
-            except OSError:
-                pass
-        if process.poll() is None:
-            process.terminate()
         try:
-            process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait(timeout=5)
+            assert process.stdin is not None and process.stdout is not None
+            initialize = {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-11-25",
+                    "capabilities": {},
+                    "clientInfo": {"name": "mncs-control-doctor", "version": "1"},
+                },
+            }
+            process.stdin.write(json.dumps(initialize) + "\n")
+            process.stdin.flush()
+            init_response = _read_json_response(process.stdout, process, 1, timeout)
+            if "error" in init_response:
+                raise RuntimeError("initialize returned an MCP error")
+            process.stdin.write(
+                json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}})
+                + "\n"
+            )
+            process.stdin.write(
+                json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}) + "\n"
+            )
+            process.stdin.flush()
+            tools_response = _read_json_response(process.stdout, process, 2, timeout)
+            if "error" in tools_response:
+                raise RuntimeError("tools/list returned an MCP error")
+            tools = tools_response.get("result", {}).get("tools", [])
+            names = {item.get("name") for item in tools if isinstance(item, dict)}
+            missing = sorted(_REQUIRED_TOOLS - names)
+            if missing:
+                raise RuntimeError("missing tools: " + ", ".join(missing))
+            return {
+                **tool_surface_manifest(str(name) for name in names if name),
+                "required_tools": sorted(_REQUIRED_TOOLS),
+            }
+        finally:
+            if process.stdin is not None:
+                try:
+                    process.stdin.close()
+                except OSError:
+                    pass
+            if process.poll() is None:
+                process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+
+
+def _proc_endpoint_identity(pid: int) -> tuple[str, str]:
+    """Return bounded process cmdline and cgroup text for one local listener PID."""
+    cmdline = ""
+    cgroup = ""
+    try:
+        cmdline = (
+            Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\x00", b" ").decode(errors="ignore").strip()
+        )
+    except OSError:
+        pass
+    try:
+        cgroup = Path(f"/proc/{pid}/cgroup").read_text(encoding="utf-8", errors="ignore").strip()
+    except OSError:
+        pass
+    return redact_text(cmdline[:300]), cgroup[:300]
+
+
+def _service_matches_config(config_path: Path) -> bool:
+    """Return True when the active tunnel service runs this Control configuration."""
+    if shutil.which("systemctl") is None:
+        return False
+    code, cgroup_dir = _capture(
+        ["systemctl", "--user", "show", "-p", "ControlGroup", "--value", "mncs-control-tunnel.service"]
+    )
+    if code != 0 or not cgroup_dir.strip():
+        return False
+    procs_file = Path("/sys/fs/cgroup") / cgroup_dir.strip().lstrip("/") / "cgroup.procs"
+    resolved_cfg = str(config_path.expanduser().resolve())
+    try:
+        pids = [int(line) for line in procs_file.read_text(encoding="utf-8").splitlines() if line.strip().isdigit()]
+    except OSError:
+        return False
+    for pid in pids:
+        cmdline, _ = _proc_endpoint_identity(pid)
+        if "mncs-control-mcp" in cmdline or "mncs_control_mcp" in cmdline:
+            if resolved_cfg in cmdline:
+                return True
+    return False
+
+
+def _environment_rpc_socket_check(
+    config: ControlConfig, config_path: Path, service_status: str,
+) -> Check:
+    """Inspect canonical Environment RPC socket ownership, liveness, and conflicts."""
+    socket_path = config.environment_rpc_socket.expanduser()
+    service_owns_config = service_status == "OK" and _service_matches_config(config_path)
+    try:
+        observed = socket_path.lstat()
+    except FileNotFoundError:
+        parent = socket_path.parent
+        if parent.exists():
+            try:
+                pstat = parent.lstat()
+                if (
+                    stat.S_ISLNK(pstat.st_mode)
+                    or not stat.S_ISDIR(pstat.st_mode)
+                    or pstat.st_uid != os.getuid()
+                    or (pstat.st_mode & 0o077)
+                ):
+                    return Check(
+                        "Environment RPC socket",
+                        "FAIL",
+                        f"unsafe directory permissions or ownership for {parent}",
+                        required=True,
+                    )
+            except OSError as exc:
+                return Check(
+                    "Environment RPC socket",
+                    "FAIL",
+                    f"could not inspect {parent}: {redact_text(str(exc))}",
+                    required=True,
+                )
+        if service_owns_config:
+            return Check(
+                "Environment RPC socket",
+                "FAIL",
+                f"missing active socket at {socket_path} while mncs-control-tunnel.service is active",
+                required=True,
+            )
+        return Check(
+            "Environment RPC socket",
+            "WARNING",
+            f"not listening at {socket_path} (tunnel service not managing this config)",
+        )
+    except OSError as exc:
+        return Check(
+            "Environment RPC socket",
+            "FAIL",
+            f"could not inspect {socket_path}: {redact_text(str(exc))}",
+            required=True,
+        )
+
+    if (
+        stat.S_ISLNK(observed.st_mode)
+        or not stat.S_ISSOCK(observed.st_mode)
+        or observed.st_uid != os.getuid()
+    ):
+        return Check(
+            "Environment RPC socket",
+            "FAIL",
+            f"conflicting or non-owned endpoint at {socket_path}",
+            required=True,
+        )
+    if observed.st_mode & 0o077:
+        return Check(
+            "Environment RPC socket",
+            "FAIL",
+            f"unsafe group/world permissions ({oct(observed.st_mode & 0o777)}) on {socket_path}",
+            required=True,
+        )
+
+    probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        probe.settimeout(0.5)
+        probe.connect(str(socket_path))
+        peer_creds: tuple[int, int] | None = None
+        if hasattr(socket, "SO_PEERCRED"):
+            pid, uid, _ = struct.unpack(
+                "3i", probe.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i"))
+            )
+            peer_creds = (pid, uid)
+    except OSError as exc:
+        if exc.errno == errno.ECONNREFUSED:
+            return Check(
+                "Environment RPC socket",
+                "FAIL",
+                f"stale unresponsive socket at {socket_path}",
+                required=True,
+            )
+        return Check(
+            "Environment RPC socket",
+            "FAIL",
+            f"endpoint check failed at {socket_path}: {redact_text(str(exc))}",
+            required=True,
+        )
+    finally:
+        probe.close()
+
+    if peer_creds is None:
+        return Check(
+            "Environment RPC socket",
+            "OK",
+            f"{socket_path} (active user-owned endpoint)",
+            required=True,
+        )
+    pid, uid = peer_creds
+    if uid != os.getuid() or pid < 1:
+        return Check(
+            "Environment RPC socket",
+            "FAIL",
+            f"conflicting endpoint peer uid={uid} pid={pid} at {socket_path}",
+            required=True,
+        )
+    cmdline, cgroup = _proc_endpoint_identity(pid)
+    is_control = (
+        "mncs-control-mcp" in cmdline
+        or "mncs_control_mcp" in cmdline
+    )
+    if not is_control:
+        return Check(
+            "Environment RPC socket",
+            "FAIL",
+            f"conflicting non-Control process pid={pid} owns {socket_path}",
+            required=True,
+        )
+    in_tunnel_unit = "mncs-control-tunnel.service" in cgroup
+    if service_status == "OK" and service_owns_config:
+        if in_tunnel_unit:
+            return Check(
+                "Environment RPC socket",
+                "OK",
+                f"{socket_path} (active, owned by mncs-control-tunnel.service pid={pid})",
+                required=True,
+            )
+        return Check(
+            "Environment RPC socket",
+            "FAIL",
+            f"endpoint conflict: {socket_path} is held by pid={pid} outside active mncs-control-tunnel.service",
+            required=True,
+        )
+    return Check(
+        "Environment RPC socket",
+        "OK",
+        f"{socket_path} (active standalone endpoint pid={pid})",
+        required=True,
+    )
 
 
 def _service_state() -> tuple[str, str]:
@@ -439,6 +639,11 @@ def run_doctor(
         )
 
     ssh_status, ssh_detail = _ssh_state()
+    from .github_auth import github_auth_status
+
+    gh_status = github_auth_status()
+    if ssh_status == "WARNING" and gh_status.can_git_https and gh_status.git_protocol != "ssh":
+        ssh_detail = f"{ssh_detail} (optional; HTTPS GitHub authentication is active)"
     checks.append(Check("SSH agent", ssh_status, ssh_detail))
 
     if config is not None:
@@ -583,6 +788,8 @@ def run_doctor(
 
     service_status, service_detail = _service_state()
     checks.append(Check("Tunnel systemd service", service_status, service_detail))
+    if config is not None:
+        checks.append(_environment_rpc_socket_check(config, config_path, service_status))
     if not any(check.name == "Remote connector" for check in checks):
         checks.append(
             Check(

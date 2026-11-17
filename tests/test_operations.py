@@ -19,7 +19,11 @@ from mncs_control_mcp.deployment import (
     repository_revision,
     runtime_environment,
 )
-from mncs_control_mcp.doctor import probe_mcp_stdio, run_doctor
+from mncs_control_mcp.doctor import (
+    _environment_rpc_socket_check,
+    probe_mcp_stdio,
+    run_doctor,
+)
 from mncs_control_mcp.manifest import tool_surface_manifest
 from mncs_control_mcp.security import safe_host_probe_environment
 from mncs_control_mcp.tooling import ToolchainResolver
@@ -335,3 +339,250 @@ def test_doctor_mcp_probe_performs_real_stdio_handshake(
     assert result["tool_names_sha256"].startswith("sha256:")
     assert result["experiment_tools_present"] is True
     assert "workspace_info" in result["required_tools"]
+
+
+def test_probe_mcp_stdio_isolated_does_not_collide_with_active_rpc_listener(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from mncs_control_mcp.config import ControlConfig
+    from mncs_control_mcp.environment_rpc import EnvironmentRPCServer
+    from mncs_control_mcp.environment_sessions import EnvironmentService
+
+    workspace = tmp_path / "projects"
+    workspace.mkdir()
+    sock = tmp_path / "rpc" / "environment.sock"
+    config_file = tmp_path / "control.toml"
+    config_file.write_text(
+        f"[workspace]\nroot = {str(workspace)!r}\n"
+        f"[integration]\nenvironment_rpc_socket = {str(sock)!r}\n",
+        encoding="utf-8",
+    )
+    cfg = ControlConfig(
+        workspace_root=workspace,
+        sandbox_home=tmp_path / "sandbox",
+        job_state_path=tmp_path / "jobs.json",
+        audit_path=tmp_path / "audit.jsonl",
+        environment_rpc_socket=sock,
+        environment_state_dir=tmp_path / "env-state",
+    )
+    svc = EnvironmentService(cfg)
+    rpc = EnvironmentRPCServer(cfg, svc, object())
+    rpc.start()
+    try:
+        # Run from worktree root with non-existent executable path to exercise
+        # worktree `python -m mncs_control_mcp --isolated-probe-dir` directly.
+        monkeypatch.chdir(Path(__file__).parents[1])
+        result = probe_mcp_stdio(Path("/nonexistent/mncs-control-mcp"), config_file)
+        assert result["tool_count"] >= 50
+        assert result["tool_names_sha256"].startswith("sha256:")
+        assert rpc.status()["available"] is True
+    finally:
+        rpc.close()
+        svc.close()
+
+
+def test_doctor_environment_rpc_socket_health_and_conflict_detection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import socket as std_socket
+
+    import mncs_control_mcp.doctor as doctor_mod
+    from mncs_control_mcp.config import ControlConfig
+
+    sock = tmp_path / "rpc" / "environment.sock"
+    cfg_path = tmp_path / "control.toml"
+    cfg_path.write_text("", encoding="utf-8")
+    cfg = ControlConfig(workspace_root=tmp_path, environment_rpc_socket=sock)
+
+    # 1. Missing socket while active service manages this config -> FAIL
+    monkeypatch.setattr(doctor_mod, "_service_matches_config", lambda _p: True)
+    missing = _environment_rpc_socket_check(cfg, cfg_path, "OK")
+    assert missing.status == "FAIL" and missing.required is True
+
+    # 2. Missing socket when service does not manage this config -> WARNING (advisory)
+    monkeypatch.setattr(doctor_mod, "_service_matches_config", lambda _p: False)
+    unmanaged = _environment_rpc_socket_check(cfg, cfg_path, "WARNING")
+    assert unmanaged.status == "WARNING" and unmanaged.required is False
+
+    # 3. Non-socket path on canonical socket -> FAIL
+    sock.parent.mkdir(parents=True, mode=0o700)
+    sock.write_text("not a socket", encoding="utf-8")
+    bad_file = _environment_rpc_socket_check(cfg, cfg_path, "OK")
+    assert bad_file.status == "FAIL" and bad_file.required is True
+    sock.unlink()
+
+    # 4. Stale unresponsive AF_UNIX socket -> FAIL
+    listener = std_socket.socket(std_socket.AF_UNIX, std_socket.SOCK_STREAM)
+    listener.bind(str(sock))
+    sock.chmod(0o600)
+    listener.close()
+    stale = _environment_rpc_socket_check(cfg, cfg_path, "OK")
+    assert stale.status == "FAIL" and "stale" in stale.detail
+
+    # 5. Live socket: inspect cgroup & process ownership
+    sock.unlink()
+    listener = std_socket.socket(std_socket.AF_UNIX, std_socket.SOCK_STREAM)
+    listener.bind(str(sock))
+    sock.chmod(0o600)
+    listener.listen(8)
+    try:
+        monkeypatch.setattr(doctor_mod, "_service_matches_config", lambda _p: True)
+        # Healthy service owner
+        monkeypatch.setattr(
+            doctor_mod, "_proc_endpoint_identity",
+            lambda _pid: ("/venv/bin/python /venv/bin/mncs-control-mcp --config ...", "0::/user.slice/mncs-control-tunnel.service"),
+        )
+        healthy = _environment_rpc_socket_check(cfg, cfg_path, "OK")
+        assert healthy.status == "OK" and healthy.required is True
+
+        # Rogue Control process outside active tunnel unit -> FAIL conflict
+        monkeypatch.setattr(
+            doctor_mod, "_proc_endpoint_identity",
+            lambda _pid: ("/venv/bin/python /venv/bin/mncs-control-mcp", "0::/user.slice/session-99.scope"),
+        )
+        conflict = _environment_rpc_socket_check(cfg, cfg_path, "OK")
+        assert conflict.status == "FAIL" and "conflict" in conflict.detail
+
+        # Non-Control rogue process squatting on endpoint -> FAIL
+        monkeypatch.setattr(
+            doctor_mod, "_proc_endpoint_identity",
+            lambda _pid: ("nc -U -l environment.sock", "0::/user.slice/mncs-control-tunnel.service"),
+        )
+        non_control = _environment_rpc_socket_check(cfg, cfg_path, "OK")
+        assert non_control.status == "FAIL" and "non-Control" in non_control.detail
+    finally:
+        listener.close()
+
+
+def test_developer_readiness_https_and_per_repo_permissions_accuracy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from dataclasses import replace
+    from types import SimpleNamespace
+
+    import mncs_control_mcp.developer as developer_mod
+    import mncs_control_mcp.github_auth as github_mod
+    from mncs_control_mcp.config import ControlConfig
+    from mncs_control_mcp.github_auth import GitHubAuthStatus
+
+    workspace = tmp_path / "projects"
+    workspace.mkdir()
+    for name, url in (
+        ("https-rw", "https://github.com/epi13/https-rw.git"),
+        ("https-ro", "https://github.com/octocat/https-ro.git"),
+        ("ssh-repo", "git@github.com:epi13/ssh-repo.git"),
+        ("no-remote", None),
+    ):
+        repo = workspace / name
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        if url is not None:
+            subprocess.run(["git", "-C", str(repo), "remote", "add", "origin", url], check=True)
+
+    cfg = ControlConfig(workspace_root=workspace)
+    sandbox_ok = SimpleNamespace(
+        backend="bwrap",
+        run=lambda cmd, **_k: SimpleNamespace(
+            exit_code=0,
+            stdout="/usr/bin/gh\nLogged in to github.com account epi13\n" if "gh" in cmd else "/usr/bin/git\n",
+            stderr="",
+        ),
+    )
+
+    https_only_no_ssh_keys = GitHubAuthStatus(
+        available=True, state="available", source="host-gh", account="epi13",
+        git_protocol="https", scopes=("repo",), can_git_https=True, can_pull_request=True,
+        ssh_agent=True, ssh_identities=0, ssh_github="unavailable",
+        detail="host gh reports an authenticated github.com login",
+    )
+    monkeypatch.setattr(developer_mod, "github_auth_status", lambda: https_only_no_ssh_keys)
+
+    # 1. Repo-agnostic readiness: empty ssh-agent does NOT invalidate valid HTTPS workflow
+    general = developer_mod.developer_readiness_payload(cfg, sandbox=sandbox_ok)
+    assert general["ready_for_development"] is True
+    assert general["ready_for_pull_request"] is True
+    assert general["capabilities"]["github.push"]["state"] == "available"
+    assert general["capabilities"]["github.push"]["authorized"] is True
+    ssh_row = next(item for item in general["checks"] if item["name"] == "ssh.agent")
+    assert ssh_row["state"] == "optional"
+
+    # 2. Specific HTTPS repo with push=True -> available even without SSH keys
+    monkeypatch.setattr(
+        developer_mod, "github_repo_permissions",
+        lambda slug: {"status": "confirmed", "push": slug.endswith("https-rw"), "pull": True},
+    )
+    rw = developer_mod.developer_readiness_payload(cfg, sandbox=sandbox_ok, repository="https-rw")
+    assert rw["ready_for_development"] is True
+    assert rw["ready_for_pull_request"] is True
+    assert rw["capabilities"]["github.push"]["state"] == "available"
+
+    # 3. Specific HTTPS repo with push=False -> authenticated_insufficient (never false PASS!)
+    ro = developer_mod.developer_readiness_payload(cfg, sandbox=sandbox_ok, repository="https-ro")
+    assert ro["ready_for_development"] is False
+    assert ro["ready_for_pull_request"] is False
+    assert ro["capabilities"]["github.push"]["state"] == "authenticated_insufficient"
+    assert ro["capabilities"]["github.push"]["authorized"] is False
+
+    # 4. SSH remote repo without loaded SSH keys -> unavailable even when HTTPS gh login exists
+    ssh_blocked = developer_mod.developer_readiness_payload(cfg, sandbox=sandbox_ok, repository="ssh-repo")
+    assert ssh_blocked["ready_for_development"] is False
+    assert ssh_blocked["capabilities"]["github.push"]["authorized"] is False
+    assert ssh_blocked["capabilities"]["github.push"]["state"] in {"unavailable", "degraded"}
+
+    # 5. SSH remote repo WITH authenticated SSH key -> available
+    ssh_authed = replace(https_only_no_ssh_keys, ssh_identities=1, ssh_github="authenticated")
+    monkeypatch.setattr(developer_mod, "github_auth_status", lambda: ssh_authed)
+    monkeypatch.setattr(
+        developer_mod, "github_repo_permissions",
+        lambda _slug: {"status": "confirmed", "push": True, "pull": True},
+    )
+    ssh_ok = developer_mod.developer_readiness_payload(cfg, sandbox=sandbox_ok, repository="ssh-repo")
+    assert ssh_ok["ready_for_development"] is True
+    assert ssh_ok["capabilities"]["github.push"]["state"] == "available"
+
+    # 6. No origin remote -> UNKNOWN (not available!)
+    monkeypatch.setattr(developer_mod, "github_auth_status", lambda: https_only_no_ssh_keys)
+    no_rem = developer_mod.developer_readiness_payload(cfg, sandbox=sandbox_ok, repository="no-remote")
+    assert no_rem["ready_for_development"] is False
+    assert no_rem["capabilities"]["github.push"]["state"] == "unknown"
+    assert no_rem["capabilities"]["github.pull_request.write"]["state"] == "unknown"
+
+    # 7. HTTPS repo when API check is offline/unknown -> UNKNOWN (not masked by sandbox.gh)
+    monkeypatch.setattr(
+        developer_mod, "github_repo_permissions",
+        lambda _slug: {"status": "unknown", "detail": "network unreachable"},
+    )
+    unverified = developer_mod.developer_readiness_payload(cfg, sandbox=sandbox_ok, repository="https-rw")
+    assert unverified["ready_for_development"] is False
+    assert unverified["capabilities"]["github.push"]["state"] == "unknown"
+    assert unverified["capabilities"]["github.pull_request.write"]["state"] == "unknown"
+
+    # 8. git.allow_push = false policy -> unavailable
+    no_push_cfg = replace(cfg, git_allow_push=False)
+    policy_denied = developer_mod.developer_readiness_payload(no_push_cfg, sandbox=sandbox_ok, repository="https-rw")
+    assert policy_denied["ready_for_development"] is False
+    assert policy_denied["capabilities"]["github.push"]["state"] == "unavailable"
+
+    # 9. Expired host gh token detected cleanly even if keyring returns stale token string
+    monkeypatch.setattr(github_mod, "_read_token_file", lambda _p: None)
+    monkeypatch.setattr(github_mod, "_host_gh_token", lambda: "gho_" + "x" * 36)
+    monkeypatch.setattr(github_mod, "_gh_executable", lambda: "/usr/bin/gh")
+    monkeypatch.setattr(github_mod, "ssh_agent_status", lambda: (False, 0, "no agent"))
+    monkeypatch.setattr(
+        github_mod, "_capture",
+        lambda *_a, **_k: (1, "", "The token in default is invalid"),
+    )
+    expired = github_mod.github_auth_status()
+    assert expired.state == "unavailable"
+    assert expired.can_git_https is False
+    assert expired.can_pull_request is False
+
+    # Network failure during online gh validation -> unknown
+    monkeypatch.setattr(
+        github_mod, "_capture",
+        lambda *_a, **_k: (1, "", "error connecting to api.github.com: timed out"),
+    )
+    offline = github_mod.github_auth_status()
+    assert offline.state == "unknown"
+    assert offline.can_git_https is False
+

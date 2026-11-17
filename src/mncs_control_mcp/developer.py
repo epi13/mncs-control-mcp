@@ -6,7 +6,13 @@ from pathlib import Path
 from typing import Any
 
 from .config import ControlConfig
-from .github_auth import github_auth_status
+from .github_auth import (
+    GitHubAuthStatus,
+    github_auth_status,
+    github_repo_permissions,
+    parse_github_remote,
+    repository_origin_remote,
+)
 from .sandbox import Sandbox
 from .security import redact_text
 from .workspace import WorkspacePolicy
@@ -76,6 +82,216 @@ def _sandbox_probe(
     return result.exit_code if result.exit_code is not None else 127, redact_text(output)
 
 
+def _evaluate_github_repo_checks(
+    config: ControlConfig,
+    github: GitHubAuthStatus,
+    gh_state: str,
+    repository: str | None,
+) -> tuple[DeveloperCheck, DeveloperCheck, DeveloperCheck]:
+    """Evaluate github.push, github.pull_request.write, and advisory ssh.agent.
+
+    An optional empty SSH agent must not invalidate a working HTTPS GitHub
+    workflow, while a repo configured with an SSH remote or read-only/missing
+    remote permissions must not inherit a false PASS from general host login.
+    """
+    repo_transport: str | None = None
+    owner_repo: str | None = None
+    remote_url: str | None = None
+    remote_error: str | None = None
+    repo_invalid_detail: str | None = None
+
+    if repository is not None:
+        try:
+            policy = WorkspacePolicy(config)
+            repo_root = policy.resolve(repository, must_exist=True, expect="directory")
+            if not ((repo_root / ".git").is_dir() or (repo_root / ".git").is_file()):
+                repo_invalid_detail = f"not a Git repository: {repository}"
+            else:
+                remote_url, remote_error = repository_origin_remote(repo_root)
+                if remote_url:
+                    parsed = parse_github_remote(remote_url)
+                    if parsed is not None:
+                        repo_transport, owner_repo = parsed
+        except Exception as exc:
+            repo_invalid_detail = redact_text(str(exc))
+
+    ssh_required = (
+        repo_transport == "ssh"
+        or (repository is None and not github.can_git_https and config.git_allow_push)
+    )
+    if github.ssh_agent and github.ssh_identities:
+        ssh_state = "available" if github.ssh_github == "authenticated" else "degraded"
+    elif ssh_required:
+        ssh_state = "unavailable" if not github.ssh_agent else "degraded"
+    else:
+        ssh_state = "optional"
+    ssh_detail = (
+        f"{github.detail}; github_ssh={github.ssh_github}"
+        if ssh_required or github.ssh_identities
+        else f"SSH agent has no loaded identities (optional; GitHub HTTPS credentials via {github.source or 'none'})"
+    )
+    ssh_check = DeveloperCheck(
+        "ssh.agent",
+        ssh_state,
+        ssh_detail,
+        capability="github.push" if ssh_required else None,
+    )
+
+    # Determine github.push & github.pull_request.write truthfully
+    perms: dict[str, Any] | None = None
+    if owner_repo is not None and (github.source is not None or github.ssh_github == "authenticated"):
+        perms = github_repo_permissions(owner_repo)
+
+    push_state: str
+    push_detail: str
+    pr_state: str
+    pr_detail: str
+
+    if not config.git_allow_push:
+        push_state = "unavailable"
+        push_detail = "Git push is disabled by Control configuration (git.allow_push=false)"
+    elif repo_invalid_detail is not None:
+        push_state = "unavailable"
+        push_detail = repo_invalid_detail
+    elif repository is not None and not remote_url:
+        push_state = "unknown"
+        push_detail = (
+            f"repository {repository} origin remote is unreadable: {remote_error}"
+            if remote_error and remote_error != "missing"
+            else f"repository {repository} has no 'origin' remote configured for GitHub push"
+        )
+    elif repository is not None and owner_repo is None:
+        push_state = "unknown"
+        push_detail = f"repository {repository} origin remote does not target github.com"
+    elif repository is not None and owner_repo is not None and repo_transport == "ssh":
+        if not config.git_use_ssh_agent:
+            push_state = "unavailable"
+            push_detail = f"repository {repository} uses SSH remote ({owner_repo}), but git.use_ssh_agent is disabled"
+        elif github.ssh_github != "authenticated":
+            push_state = (
+                "authenticated_insufficient"
+                if github.ssh_github == "publickey_rejected"
+                else "unavailable"
+            )
+            push_detail = (
+                f"repository {repository} uses SSH remote ({owner_repo}), "
+                f"but ssh_github={github.ssh_github}; load an SSH key or switch origin to HTTPS"
+            )
+        elif perms is not None and perms.get("status") == "confirmed":
+            if perms.get("push") is True:
+                push_state = "available"
+                push_detail = f"SSH authentication and push permission confirmed for {owner_repo}"
+            else:
+                push_state = "authenticated_insufficient"
+                push_detail = f"GitHub account {github.account or 'current'} lacks push permission for {owner_repo}"
+        elif perms is not None and perms.get("status") in {"unauthorized", "not_found"}:
+            push_state = (
+                "authenticated_insufficient"
+                if perms.get("status") == "unauthorized"
+                else "unavailable"
+            )
+            push_detail = str(perms.get("detail") or f"repository {owner_repo} is inaccessible")
+        else:
+            push_state = "unknown"
+            push_detail = (
+                f"SSH auth to github.com succeeded, but write access to {owner_repo} could not be confirmed read-only"
+            )
+    elif repository is not None and owner_repo is not None and repo_transport == "https":
+        if github.state == "unknown":
+            push_state = "unknown"
+            push_detail = github.detail
+        elif not github.can_git_https:
+            push_state = github.state
+            push_detail = github.detail
+        elif gh_state != "available":
+            push_state = gh_state
+            push_detail = "sandbox gh is unavailable or misconfigured for HTTPS GitHub push"
+        elif perms is not None and perms.get("status") == "confirmed":
+            if perms.get("push") is True:
+                push_state = "available"
+                push_detail = f"HTTPS credentials and repository push permission confirmed for {owner_repo}"
+            else:
+                push_state = "authenticated_insufficient"
+                push_detail = f"GitHub account {github.account or 'current'} lacks push permission for {owner_repo}"
+        elif perms is not None and perms.get("status") == "unauthorized":
+            push_state = "authenticated_insufficient"
+            push_detail = str(perms.get("detail") or f"GitHub API denied access to {owner_repo}")
+        elif perms is not None and perms.get("status") == "not_found":
+            push_state = "unavailable"
+            push_detail = str(perms.get("detail") or f"GitHub repository {owner_repo} was not found")
+        else:
+            reason = str((perms or {}).get("detail") or "read-only API check failed")
+            push_state = "unknown"
+            push_detail = f"HTTPS credentials exist, but push permission for {owner_repo} could not be verified read-only ({reason})"
+    else:
+        # Repository-agnostic check (e.g. `doctor`): report configured transport readiness cleanly.
+        if github.can_git_https and gh_state == "available":
+            push_state = "available"
+            push_detail = (
+                "HTTPS git can use host gh credentials inside networked sandboxes "
+                "(target repository permission is checked when repository is supplied)"
+            )
+        elif config.git_use_ssh_agent and github.ssh_github == "authenticated":
+            push_state = "available"
+            push_detail = "SSH agent GitHub authentication is ready"
+        elif github.can_git_https and gh_state != "available":
+            push_state = gh_state
+            push_detail = "host GitHub token exists, but sandbox gh is unavailable or misconfigured"
+        elif github.state == "unknown":
+            push_state = "unknown"
+            push_detail = github.detail
+        else:
+            push_state = github.state
+            push_detail = f"GitHub push is not ready ({github.ssh_github})"
+
+    # Evaluate pull-request write readiness
+    if repo_invalid_detail is not None:
+        pr_state = "unavailable"
+        pr_detail = repo_invalid_detail
+    elif repository is not None and (not remote_url or owner_repo is None):
+        pr_state = "unknown"
+        pr_detail = f"repository {repository} has no github.com 'origin' remote for pull requests"
+    elif not github.can_pull_request:
+        pr_state = github.state if github.state != "available" else "authenticated_insufficient"
+        pr_detail = github.detail
+    elif gh_state != "available":
+        pr_state = gh_state
+        pr_detail = "sandbox gh is unavailable or misconfigured for GitHub pull requests"
+    elif repository is not None and owner_repo is not None:
+        if perms is not None and perms.get("status") == "confirmed":
+            if perms.get("push") is True and perms.get("pull") is True:
+                pr_state = "available"
+                pr_detail = f"gh API token and repository access confirmed for {owner_repo} ({github.account or 'authenticated'})"
+            elif perms.get("pull") is True:
+                pr_state = "authenticated_insufficient"
+                pr_detail = f"GitHub account {github.account or 'current'} lacks push permission for branch PRs on {owner_repo}"
+            else:
+                pr_state = "unavailable"
+                pr_detail = f"GitHub account lacks pull/push access on {owner_repo}"
+        elif perms is not None and perms.get("status") == "unauthorized":
+            pr_state = "authenticated_insufficient"
+            pr_detail = str(perms.get("detail") or f"GitHub API denied access to {owner_repo}")
+        elif perms is not None and perms.get("status") == "not_found":
+            pr_state = "unavailable"
+            pr_detail = str(perms.get("detail") or f"GitHub repository {owner_repo} was not found")
+        else:
+            pr_state = "unknown"
+            pr_detail = f"gh API token is present, but access to {owner_repo} could not be confirmed read-only"
+    else:
+        pr_state = "available"
+        pr_detail = (
+            f"gh API token is present for account {github.account}"
+            if github.account
+            else github.detail
+        )
+
+    return (
+        DeveloperCheck("github.push", push_state, push_detail, capability="github.push", required=True),
+        DeveloperCheck("github.pull_request.write", pr_state, pr_detail, capability="github.pull_request.write", required=True),
+        ssh_check,
+    )
+
+
 def collect_developer_checks(
     config: ControlConfig,
     *,
@@ -125,55 +341,6 @@ def collect_developer_checks(
             )
         )
 
-    github = github_auth_status()
-    checks.append(
-        DeveloperCheck(
-            "github.authentication",
-            github.state,
-            github.detail,
-            capability="github.read",
-            required=True,
-        )
-    )
-    checks.append(
-        DeveloperCheck(
-            "github.push",
-            "available"
-            if github.can_git_https or github.ssh_github == "authenticated"
-            else github.state,
-            (
-                "HTTPS git can use host gh credentials inside networked sandboxes"
-                if github.can_git_https
-                else f"GitHub push is not ready ({github.ssh_github})"
-            ),
-            capability="github.push",
-            required=True,
-        )
-    )
-    checks.append(
-        DeveloperCheck(
-            "github.pull_request.write",
-            "available" if github.can_pull_request else github.state,
-            (
-                f"gh API token is present for account {github.account}"
-                if github.can_pull_request and github.account
-                else github.detail
-            ),
-            capability="github.pull_request.write",
-            required=True,
-        )
-    )
-    checks.append(
-        DeveloperCheck(
-            "ssh.agent",
-            "available"
-            if github.ssh_agent and github.ssh_identities
-            else ("degraded" if github.ssh_agent else "optional"),
-            f"{github.detail}; github_ssh={github.ssh_github}",
-            capability="github.push",
-        )
-    )
-
     if sandbox is None:
         try:
             sandbox = Sandbox(config, WorkspacePolicy(config))
@@ -184,15 +351,13 @@ def collect_developer_checks(
         sandbox,
         'command -v git && git --version && test -n "${GIT_TERMINAL_PROMPT:-}" && echo askpass-guarded',
     )
-    checks.append(
-        DeveloperCheck(
-            "sandbox.git",
-            "available" if code == 0 else "unavailable",
-            output.splitlines()[0] if output else "git is not visible inside the sandbox",
-            capability="git.read",
-            required=True,
-            observed_from="sandbox",
-        )
+    sandbox_git_check = DeveloperCheck(
+        "sandbox.git",
+        "available" if code == 0 else "unavailable",
+        output.splitlines()[0] if output else "git is not visible inside the sandbox",
+        capability="git.read",
+        required=True,
+        observed_from="sandbox",
     )
 
     code, output = _sandbox_probe(
@@ -206,16 +371,29 @@ def collect_developer_checks(
         if code == 0 and "Logged in" in output
         else ("misconfigured" if code == 0 else "unavailable")
     )
+    sandbox_gh_check = DeveloperCheck(
+        "sandbox.gh",
+        gh_state,
+        output.splitlines()[0] if output else "gh is not authenticated inside the sandbox",
+        capability="github.pull_request.write",
+        required=True,
+        observed_from="sandbox",
+    )
+
+    github = github_auth_status()
     checks.append(
         DeveloperCheck(
-            "sandbox.gh",
-            gh_state,
-            output.splitlines()[0] if output else "gh is not authenticated inside the sandbox",
-            capability="github.pull_request.write",
+            "github.authentication",
+            github.state,
+            github.detail,
+            capability="github.read",
             required=True,
-            observed_from="sandbox",
         )
     )
+    push_check, pr_check, ssh_check = _evaluate_github_repo_checks(
+        config, github, gh_state, repository,
+    )
+    checks.extend([push_check, pr_check, ssh_check, sandbox_git_check, sandbox_gh_check])
 
     if integrations is not None:
         fabric = integrations.fabric.status()
@@ -395,8 +573,12 @@ def capability_map(checks: list[DeveloperCheck]) -> dict[str, dict[str, object]]
             state = "authenticated_insufficient"
         elif "degraded" in states:
             state = "degraded"
-        elif states <= {"available", "optional", "unknown"}:
-            state = "available" if "available" in states else next(iter(states))
+        elif "unknown" in states:
+            state = "unknown"
+        elif "available" in states:
+            state = "available"
+        elif "optional" in states:
+            state = "optional"
         else:
             state = next(iter(states))
         result[name] = {
