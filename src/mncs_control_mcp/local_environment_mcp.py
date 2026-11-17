@@ -34,6 +34,15 @@ SESSION_OPERATIONS = frozenset({
     "environmental_capability", "session_updates", "artifact_read", "store_generation", "scope_grant",
 })
 SESSION_SELECTOR_FIELDS = frozenset({"campaign_id", "task_identity", "session_id"})
+_RECOVERABLE_GRANT_MESSAGES = frozenset({
+    "Environment capability is expired or unknown",
+    "Environment capability is no longer active",
+    "Environment capability file is unavailable",
+})
+_STALE_SESSION_ERROR_CODES = frozenset({
+    "ENVIRONMENT_SESSION_MISSING",
+    "ENVIRONMENT_SESSION_UNKNOWN",
+})
 
 
 @dataclass
@@ -43,6 +52,7 @@ class _ProjectContext:
     selected_session_id: str | None = None
     expires_at: float | None = None
     repository_identity: str | None = None
+    grant_session_bound: bool = True
 
 
 class _OwnerRPCError(Exception):
@@ -730,9 +740,11 @@ class LocalEnvironmentMCP:
         else:
             # Keep the already authenticated session selector in this object;
             # it is only a selector and every subsequent operation remains
-            # authorized by the new Control-issued grant.
+            # authorized by the new Control-issued grant (rebound via
+            # continuation before any session-scoped command).
             context.grant = token
             context.sandbox_cwd = sandbox_cwd
+            context.grant_session_bound = False
         context.repository_identity = repository_identity
         context.expires_at = time.monotonic() + expires_in_seconds
         self._contexts[(project, cwd)] = context
@@ -769,6 +781,7 @@ class LocalEnvironmentMCP:
                 "repository", "expected_version", "version", "session_id",
                 "selected_session_id", "required_project", "action", "target",
                 "reason", "publication_completed", "conflict_kind", "stage",
+                "error_category", "recoverable",
             }
             compact_details: dict[str, Any] = {}
             for key in allowed:
@@ -1046,22 +1059,47 @@ class LocalEnvironmentMCP:
             "stderr": str(result.get("stderr", ""))[:2048],
         }
 
+    @staticmethod
+    def _is_recoverable_grant_error(error: Any) -> bool:
+        """Return True only when Control failed local grant authentication."""
+        if not isinstance(error, dict) or error.get("code") != "ENVIRONMENT_AUTHORITY_DENIED":
+            return False
+        details = error.get("details")
+        if isinstance(details, dict):
+            if "recoverable" in details:
+                return (
+                    details.get("recoverable") is True
+                    and details.get("error_category") == "authentication"
+                )
+            return False
+        return error.get("message") in _RECOVERABLE_GRANT_MESSAGES
+
     def _select_session(
         self, context: _ProjectContext, project: str, values: dict[str, Any],
-        cwd: str = "",
+        cwd: str = "", *, allow_grant_refresh: bool = True,
     ) -> dict[str, Any] | None:
         campaign_id = values.get("campaign_id")
         task_identity = values.get("task_identity")
         requested_session_id = values.get("session_id")
         if (context.selected_session_id
+                and context.grant_session_bound
                 and SESSION_RE.fullmatch(context.selected_session_id)
                 and campaign_id is None and task_identity is None
                 and requested_session_id in (None, context.selected_session_id)):
             return None
-        # A fresh MCP process may not retain its in-memory session cache.
-        # Rebind through Control's authenticated project continuation whenever
-        # the caller supplies an exact session, campaign, or task selector.
+        prior_selected_session = (
+            context.selected_session_id
+            if (context.selected_session_id
+                and SESSION_RE.fullmatch(context.selected_session_id)
+                and campaign_id is None and task_identity is None
+                and requested_session_id is None)
+            else None
+        )
+        # A fresh MCP process or refreshed grant may not retain its server-side
+        # session binding. Rebind through Control's authenticated project
+        # continuation whenever the selector or grant binding changed.
         context.selected_session_id = None
+        context.grant_session_bound = False
         argv = ["continuation"]
         for field, flag in (("campaign_id", "--campaign-id"),
                             ("task_identity", "--task-identity"),
@@ -1069,6 +1107,8 @@ class LocalEnvironmentMCP:
             if field in values:
                 max_length = 128 if field == "session_id" else 256
                 argv.extend([flag, _string(values[field], field, max_length=max_length)])
+        if prior_selected_session is not None:
+            argv.extend(["--session-id", prior_selected_session])
         request = {
             "grant": context.grant,
             "request_id": "req_" + secrets.token_hex(16),
@@ -1077,11 +1117,11 @@ class LocalEnvironmentMCP:
         }
         response = _rpc(self.socket_path, request)
         error = response.get("error")
-        if (response.get("ok") is not True and isinstance(error, dict)
-                and error.get("code") == "ENVIRONMENT_AUTHORITY_DENIED"):
-            # Campaign/session selection is the first RPC on a fresh context.
-            # Recover the grant here as well as after ordinary session calls,
-            # then repeat the read-only continuation with the same selector.
+        if (allow_grant_refresh
+                and response.get("ok") is not True
+                and self._is_recoverable_grant_error(error)):
+            # Recover only expired or unknown local grants here; deterministic
+            # authorization denials must surface immediately without re-bootstrap.
             self._refresh_context(project, cwd, context)
             request["grant"] = context.grant
             request["request_id"] = "req_" + secrets.token_hex(16)
@@ -1093,6 +1133,7 @@ class LocalEnvironmentMCP:
         session_id = self._selected_session(payload)
         if session_id is not None:
             context.selected_session_id = session_id
+            context.grant_session_bound = True
             return None
         return {
             "ok": False,
@@ -1120,6 +1161,8 @@ class LocalEnvironmentMCP:
             if cwd:
                 cwd = _relative_path(cwd, "cwd")
             context = self._context(project, cwd)
+            grant_before_select = context.grant
+            selector_values: dict[str, Any] = {}
             if operation in SESSION_OPERATIONS:
                 values = _fields(arguments, {
                     "session_id", "live", "progress", "remaining", "campaign_base_checkpoint",
@@ -1166,6 +1209,7 @@ class LocalEnvironmentMCP:
             else:
                 values = arguments or {}
                 operation_values = values
+            grant_refreshed_in_call = context.grant != grant_before_select
             argv, uses_session = _build_argv(
                 operation, operation_values, context, project,
                 project_identity=context.repository_identity,
@@ -1179,23 +1223,20 @@ class LocalEnvironmentMCP:
                 "argv": argv,
             }
             response = _rpc(self.socket_path, request)
-            if response.get("ok") is True:
-                payload = self._payload(response)
-                if operation in {"enter", "continuation"} and isinstance(payload, dict):
-                    candidate = self._selected_session(payload)
-                    if candidate is not None:
-                        context.selected_session_id = candidate
-            else:
+            if response.get("ok") is not True:
                 error = response.get("error")
-                if isinstance(error, dict) and error.get("code") == "ENVIRONMENT_AUTHORITY_DENIED":
-                    # A Control restart or grant expiry is repaired by obtaining
-                    # a new owner-issued grant. Rebind the continuation before
-                    # any session-scoped operation is attempted again.
+                if (not grant_refreshed_in_call
+                        and self._is_recoverable_grant_error(error)):
+                    # A Control restart or expired local grant is repaired once
+                    # by obtaining a new owner-issued grant and rebinding the
+                    # continuation; authorization denials are never retried.
                     self._refresh_context(project, cwd, context)
                     if uses_session:
                         context.selected_session_id = None
+                        context.grant_session_bound = False
                         selected_error = self._select_session(
-                            context, project, values, cwd,
+                            context, project, selector_values, cwd,
+                            allow_grant_refresh=False,
                         )
                         if selected_error is not None:
                             return self._response_error(selected_error)
@@ -1207,6 +1248,22 @@ class LocalEnvironmentMCP:
                     )
                     request["argv"] = argv
                     response = _rpc(self.socket_path, request)
+            if response.get("ok") is True:
+                payload = self._payload(response)
+                if operation in {"enter", "continuation"} and isinstance(payload, dict):
+                    candidate = self._selected_session(payload)
+                    if candidate is not None:
+                        context.selected_session_id = candidate
+                        context.grant_session_bound = True
+            else:
+                error = response.get("error")
+                if (uses_session
+                        and isinstance(error, dict)
+                        and error.get("code") in _STALE_SESSION_ERROR_CODES):
+                    # Drop the dead cached session selector so future calls do
+                    # not stay pinned to a missing or unknown session.
+                    context.selected_session_id = None
+                    context.grant_session_bound = False
             return self._present(operation, response, detailed_inspection=(
                 operation == "inspect" and ("section" in operation_values or operation_values.get("compact") is True)
             ), binding_detail=(operation == "capabilities" and "capability" in operation_values))

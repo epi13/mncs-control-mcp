@@ -603,19 +603,46 @@ class EnvironmentRPCServer:
             )),
         }
 
+    @staticmethod
+    def _grant_auth_error(
+        message: str, reason: str, *, recoverable: bool,
+    ) -> ControlError:
+        """Build a local-grant authentication failure with recovery classification."""
+        return ControlError(
+            "ENVIRONMENT_AUTHORITY_DENIED",
+            message,
+            details={
+                "error_category": "authentication",
+                "reason": reason,
+                "recoverable": recoverable,
+            },
+        )
+
     def grant_mount_source(self, grant: EnvironmentRPCGrant) -> Path:
         """Return the private host file for an active, Control-issued grant."""
         with self._lock:
             record = self._grants.get(grant.token_digest)
         if record is None or record.grant_id != grant.grant_id:
-            raise ControlError("ENVIRONMENT_AUTHORITY_DENIED", "Environment capability is no longer active")
+            raise self._grant_auth_error(
+                "Environment capability is no longer active",
+                "grant_inactive",
+                recoverable=True,
+            )
         try:
             observed = record.token_file.lstat()
         except FileNotFoundError as error:
-            raise ControlError("ENVIRONMENT_AUTHORITY_DENIED", "Environment capability file is unavailable") from error
+            raise self._grant_auth_error(
+                "Environment capability file is unavailable",
+                "grant_file_unavailable",
+                recoverable=True,
+            ) from error
         if (not stat.S_ISREG(observed.st_mode) or observed.st_uid != os.getuid()
                 or observed.st_mode & 0o077 or record.token_file.resolve() != grant.token_file.resolve()):
-            raise ControlError("ENVIRONMENT_AUTHORITY_DENIED", "Environment capability file failed validation")
+            raise self._grant_auth_error(
+                "Environment capability file failed validation",
+                "grant_file_invalid",
+                recoverable=False,
+            )
         return record.token_file
 
     def revoke_grant(self, grant: EnvironmentRPCGrant | None) -> None:
@@ -1262,19 +1289,28 @@ class EnvironmentRPCServer:
     ) -> _GrantRecord:
         token = request.get("grant")
         if not isinstance(token, str) or len(token) > 128:
-            raise ControlError("ENVIRONMENT_AUTHORITY_DENIED", "Environment capability is missing")
+            raise self._grant_auth_error(
+                "Environment capability is missing",
+                "grant_missing",
+                recoverable=False,
+            )
         token_digest = hashlib.sha256(token.encode()).hexdigest()
         with self._lock:
             record = self._grants.get(token_digest)
         if record is None or record.uid != peer_uid or time.monotonic() >= record.expires_at:
-            raise ControlError("ENVIRONMENT_AUTHORITY_DENIED", "Environment capability is expired or unknown")
+            raise self._grant_auth_error(
+                "Environment capability is expired or unknown",
+                "grant_expired_or_unknown",
+                recoverable=True,
+            )
         if record.client_pid is not None and (
             peer_pid != record.client_pid
             or self._proc_start_ticks(record.client_pid) != record.client_start_ticks
         ):
-            raise ControlError(
-                "ENVIRONMENT_AUTHORITY_DENIED",
+            raise self._grant_auth_error(
                 "local Environment capability belongs to another MCP process execution",
+                "grant_process_mismatch",
+                recoverable=False,
             )
         return record
 

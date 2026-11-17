@@ -1724,3 +1724,591 @@ def test_compiler_bootstrap_has_a_fixed_canonical_route(project, capability):
     ]:
         with pytest.raises(ValueError):
             _build_argv("invoke", arguments, context, project)
+
+
+def _setup_authority_rpc_project(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    project_name: str = "mncs-store",
+    workspace_repos: list[str] | None = None,
+    protected_repos: list[str] | None = None,
+    workspace_root: str | None = None,
+    declared_toolchain: str | None = "mncs-language",
+    environment_service: object | None = None,
+) -> tuple[EnvironmentRPCServer, LocalEnvironmentMCP, Path, list[dict[str, object]]]:
+    workspace = tmp_path / "projects"
+    project = workspace / project_name
+    metadata = project / ".mncs"
+    metadata.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(project)], check=True)
+    subprocess.run(
+        ["git", "-C", str(project), "-c", "user.name=Test", "-c", "user.email=test@example.com",
+         "commit", "--allow-empty", "-q", "-m", "init"],
+        check=True,
+    )
+    if declared_toolchain is not None:
+        toolchain_dir = workspace / declared_toolchain
+        toolchain_dir.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["git", "init", "-q", str(toolchain_dir)], check=True)
+        subprocess.run(
+            ["git", "-C", str(toolchain_dir), "-c", "user.name=Test", "-c", "user.email=test@example.com",
+             "commit", "--allow-empty", "-q", "-m", "init"],
+            check=True,
+        )
+        (metadata / "project.json").write_text(json.dumps({
+            "repository": project_name,
+            "contracts": {
+                "provides": [{
+                    "contract": f"{project_name}:status",
+                    "invocation": {
+                        "toolchain": {"repository": declared_toolchain, "path": "bin/tool"},
+                    },
+                }],
+                "tests": [],
+            },
+        }), encoding="utf-8")
+    else:
+        (metadata / "project.json").write_text(json.dumps({
+            "repository": project_name,
+            "contracts": {"provides": [], "tests": []},
+        }), encoding="utf-8")
+    intent: dict[str, object] = {
+        "goal": "test project scope authority",
+        "repositories": [project_name],
+    }
+    if protected_repos is not None:
+        intent["protected_repositories"] = protected_repos
+    definition: dict[str, object] = {
+        "name": f"{project_name}-test-env",
+        "workspace_scope": {
+            "kind": "workspace",
+            "repositories": workspace_repos if workspace_repos is not None else [project_name],
+        },
+        "intent": intent,
+        "services": [],
+    }
+    if workspace_root is not None:
+        definition["workspace_root"] = workspace_root
+    def_path = metadata / "environment.json"
+    def_path.write_text(json.dumps(definition), encoding="utf-8")
+
+    env_root = (
+        Path(subprocess.check_output(
+            ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            cwd=Path(__file__).resolve().parent,
+            text=True,
+        ).strip()).resolve().parent.parent / "mncs-environment"
+    )
+    cfg = ControlConfig(
+        workspace_root=workspace,
+        repositories={"environment": str(env_root)},
+        sandbox_home=tmp_path / "home",
+        job_state_path=tmp_path / "state" / "jobs.json",
+        audit_path=tmp_path / "state" / "audit.jsonl",
+        fabric_registry=tmp_path / "state" / "workers.json",
+        fabric_state=tmp_path / "state" / "fabric.jsonl",
+        environment_rpc_socket=tmp_path / "rpc" / "environment.sock",
+        fabric_mode="embedded",
+        fabric_execution_mode="embedded-direct",
+        environment_state_dir=tmp_path / "env-state",
+    )
+    if environment_service is None:
+        from mncs_control_mcp.environment_sessions import EnvironmentService
+        environment_service = EnvironmentService(cfg)
+    server = EnvironmentRPCServer(cfg, environment_service, object())
+    if hasattr(environment_service, "bind_principal"):
+        environment_service.bind_principal(server.principal_id)
+    elif hasattr(environment_service, "authenticated_principal_id"):
+        environment_service.authenticated_principal_id = server.principal_id
+    server.start()
+    monkeypatch.setattr(server, "_peer_process_cwd", lambda _pid: project)
+
+    bridge = LocalEnvironmentMCP()
+    bridge.socket_path = server.socket_path
+    trace: list[dict[str, object]] = []
+    real_rpc = local_environment_mcp._rpc
+
+    def traced_rpc(socket_path: Path, request: dict[str, object]) -> dict[str, object]:
+        trace.append({"action": request.get("action"), "argv": request.get("argv")})
+        return real_rpc(socket_path, request)
+
+    monkeypatch.setattr(local_environment_mcp, "_rpc", traced_rpc)
+    return server, bridge, def_path, trace
+
+
+def test_deterministic_scope_and_escape_denials_never_rebootstrap_or_replay(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    server, bridge, def_path, trace = _setup_authority_rpc_project(
+        tmp_path,
+        monkeypatch,
+        project_name="alpha",
+        workspace_repos=["mncs-environment", "mncs-language", "alpha"],
+        protected_repos=None,
+        workspace_root="../..",
+    )
+    try:
+        # Scenario 2: undeclared sibling repo / missing protected_repositories on continuation
+        denied = bridge.invoke("alpha", "continuation")
+        assert denied["ok"] is False
+        assert denied["error"]["code"] == "ENVIRONMENT_AUTHORITY_DENIED"
+        assert [(item["action"], item["argv"]) for item in trace] == [
+            ("local-project-grant", None),
+            (None, ["continuation"]),
+        ]
+
+        # Scenario 3: host workspace_root escape on enter reuses valid grant without replay
+        trace.clear()
+        escape = bridge.invoke("alpha", "enter")
+        assert escape["ok"] is False
+        assert escape["error"]["code"] == "ENVIRONMENT_WORKSPACE_ESCAPE"
+        assert [(item["action"], item["argv"]) for item in trace] == [
+            (None, ["enter"]),
+        ]
+
+        # Scenario 2 (session-scoped operation): inspect fails on continuation without retry
+        trace.clear()
+        denied_inspect = bridge.invoke("alpha", "inspect")
+        assert denied_inspect["ok"] is False
+        assert denied_inspect["error"]["code"] == "ENVIRONMENT_AUTHORITY_DENIED"
+        assert [(item["action"], item["argv"]) for item in trace] == [
+            (None, ["continuation"]),
+        ]
+
+        # Scenario 12 & 1: no stuck negative cache; fixing definition unblocks continuation & enter cleanly
+        fixed = {
+            "name": "alpha-test-env",
+            "workspace_scope": {"kind": "workspace", "repositories": ["alpha", "mncs-language"]},
+            "intent": {
+                "goal": "test project scope authority",
+                "repositories": ["alpha"],
+                "protected_repositories": ["mncs-language"],
+            },
+            "services": [],
+        }
+        def_path.write_text(json.dumps(fixed), encoding="utf-8")
+        trace.clear()
+        cont_ok = bridge.invoke("alpha", "continuation")
+        assert cont_ok["ok"] is True
+        assert cont_ok["result"]["status"] == "not-found"
+        assert [(item["action"], item["argv"]) for item in trace] == [(None, ["continuation"])]
+
+        trace.clear()
+        enter_ok = bridge.invoke("alpha", "enter")
+        assert enter_ok["ok"] is True
+        assert enter_ok["exit_code"] == 0
+        assert enter_ok["result"]["protected_repositories"] == ["mncs-language"]
+        assert [(item["action"], item["argv"]) for item in trace] == [(None, ["enter"])]
+    finally:
+        server.close()
+        server.environment_service.close()
+
+
+def test_principal_mismatch_cross_session_and_capability_denials_do_not_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class StubService:
+        def __init__(self) -> None:
+            self.state_dir = tmp_path / "canonical"
+            self.authenticated_principal_id = "other-principal"
+            self.sessions = {"ses_selected": {"authenticated_principal_id": "principal-agent"}}
+
+        def campaign_continuation(self, *args, **kwargs):  # pragma: no cover
+            raise AssertionError("principal mismatch should fail before continuation")
+
+        def session_snapshot(self, session_id: str, **_kwargs):
+            return self.sessions[session_id]
+
+        def close(self) -> None:
+            return None
+
+    stub = StubService()
+    server, bridge, _def_path, trace = _setup_authority_rpc_project(
+        tmp_path,
+        monkeypatch,
+        workspace_repos=["mncs-store", "mncs-language"],
+        protected_repos=["mncs-language"],
+        environment_service=stub,
+    )
+    try:
+        # Undo _setup bind so server principal mismatches StubService principal
+        stub.authenticated_principal_id = "different-principal"
+
+        # Scenario 4: principal mismatch on continuation
+        denied_principal = bridge.invoke("mncs-store", "continuation")
+        assert denied_principal["ok"] is False
+        assert denied_principal["error"]["code"] == "ENVIRONMENT_AUTHORITY_DENIED"
+        assert [(item["action"], item["argv"]) for item in trace] == [
+            ("local-project-grant", None),
+            (None, ["continuation"]),
+        ]
+
+        # Align principal and pre-bind a grant to ses_selected
+        stub.authenticated_principal_id = server.principal_id
+        stub.sessions["ses_selected"]["authenticated_principal_id"] = server.principal_id
+        monkeypatch.setattr(server, "_authorize_session", lambda sid, _p: stub.sessions[sid])
+        context = bridge._context("mncs-store", "")
+        context.selected_session_id = "ses_selected"
+        with server._lock:
+            record = next(iter(server._grants.values()))
+            record.bound_session_id = "ses_other"
+
+        # Scenario 5: cross-session mutation denial does NOT refresh grant or replay
+        trace.clear()
+        wrong_session = bridge.invoke("mncs-store", "checkpoint", {"progress": "done"})
+        assert wrong_session["ok"] is False
+        assert wrong_session["error"]["code"] == "ENVIRONMENT_AUTHORITY_DENIED"
+        assert "exact session selected" in wrong_session["error"]["message"]
+        assert [(item["action"], item["argv"]) for item in trace] == [
+            (None, ["checkpoint", "ses_selected", "--progress", "done"]),
+        ]
+
+        # Scenario 6: unauthorized artifact_read & scope_grant denial do NOT refresh or replay
+        with server._lock:
+            record.bound_session_id = "ses_selected"
+        trace.clear()
+        bad_artifact = bridge.invoke(
+            "mncs-store", "artifact_read",
+            {"capability": "mncs-environment:retirement-prune",
+             "binding_id": "cap_0123456789abcdef", "path": "out.json"},
+        )
+        assert bad_artifact["ok"] is False
+        assert bad_artifact["error"]["code"] == "ENVIRONMENT_AUTHORITY_DENIED"
+        assert [(item["action"], item["argv"]) for item in trace] == [
+            (None, ["artifact-read", "ses_selected", "mncs-environment:retirement-prune",
+                    "cap_0123456789abcdef", "out.json"]),
+        ]
+
+        trace.clear()
+        rev = "0" * 64
+        bad_scope = bridge.invoke(
+            "mncs-store", "scope_grant",
+            {"repository": "mncs-compiler", "approval_reference": "ref_missing",
+             "campaign_id": "cmp_1", "expected_authority_revision": rev},
+        )
+        assert bad_scope["ok"] is False
+        assert bad_scope["error"]["code"] == "ENVIRONMENT_AUTHORITY_DENIED"
+        assert [(item["action"], item["argv"]) for item in trace] == [
+            (None, ["scope-grant", "ses_selected", "--campaign-id", "cmp_1",
+                    "--repository", "mncs-compiler",
+                    "--expected-authority-revision", rev,
+                    "--approval-reference", "ref_missing"]),
+        ]
+    finally:
+        server.close()
+
+
+def test_missing_unknown_terminal_and_invalid_project_states_preserved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class StubService:
+        state_dir = tmp_path / "canonical"
+        authenticated_principal_id = "uninitialized"
+        def close(self) -> None:
+            return None
+
+    server, bridge, _def_path, trace = _setup_authority_rpc_project(
+        tmp_path,
+        monkeypatch,
+        workspace_repos=["mncs-store", "mncs-language"],
+        protected_repos=["mncs-language"],
+        environment_service=StubService(),
+    )
+    try:
+        # Scenario 8a: unknown/invalid project fails at local-project-grant with 1 RPC
+        unknown = bridge.invoke("missing-project", "continuation")
+        assert unknown["ok"] is False
+        assert unknown["error"]["code"] == "ENVIRONMENT_RPC_INVALID_REQUEST"
+        assert [(item["action"], item["argv"]) for item in trace] == [("local-project-grant", None)]
+
+        # Scenario 8b: valid project without session returns selection required, 0 retries
+        trace.clear()
+        server.environment_service.campaign_continuation = lambda *_a, **_k: {
+            "status": "not-found", "repository": "mncs-store", "continuations": [],
+        }
+        no_session = bridge.invoke("mncs-store", "inspect")
+        assert no_session["ok"] is False
+        assert no_session["error"]["code"] == "ENVIRONMENT_SESSION_SELECTION_REQUIRED"
+        assert [(item["action"], item["argv"]) for item in trace] == [
+            ("local-project-grant", None),
+            (None, ["continuation"]),
+        ]
+
+        # Scenario 7: missing / unknown session clears cached selected_session_id and never retries
+        context = bridge._context("mncs-store", "")
+        context.selected_session_id = "ses_stale"
+        context.grant_session_bound = True
+        monkeypatch.setattr(
+            server,
+            "_authorize_session",
+            lambda _sid, _p: (_ for _ in ()).throw(
+                ControlError("ENVIRONMENT_SESSION_MISSING", "Environment session is missing")
+            ),
+        )
+        trace.clear()
+        missing = bridge.invoke("mncs-store", "inspect")
+        assert missing["ok"] is False
+        assert missing["error"]["code"] == "ENVIRONMENT_SESSION_MISSING"
+        assert context.selected_session_id is None
+        assert [(item["action"], item["argv"]) for item in trace] == [
+            (None, ["inspect", "ses_stale"]),
+        ]
+
+        context.selected_session_id = "ses_unknown"
+        context.grant_session_bound = True
+        monkeypatch.setattr(
+            server,
+            "_authorize_session",
+            lambda _sid, _p: (_ for _ in ()).throw(
+                ControlError("ENVIRONMENT_SESSION_UNKNOWN", "Environment session is not present in canonical Store")
+            ),
+        )
+        trace.clear()
+        unk_ses = bridge.invoke("mncs-store", "inspect")
+        assert unk_ses["ok"] is False
+        assert unk_ses["error"]["code"] == "ENVIRONMENT_SESSION_UNKNOWN"
+        assert context.selected_session_id is None
+        assert [(item["action"], item["argv"]) for item in trace] == [
+            (None, ["inspect", "ses_unknown"]),
+        ]
+
+        # Terminal session preserves code & never triggers grant retry
+        context.selected_session_id = "ses_done"
+        context.grant_session_bound = True
+        monkeypatch.setattr(
+            server,
+            "_authorize_session",
+            lambda _sid, _p: (_ for _ in ()).throw(
+                ControlError("ENVIRONMENT_SESSION_TERMINAL", "Environment session is already completed")
+            ),
+        )
+        trace.clear()
+        term = bridge.invoke("mncs-store", "checkpoint", {"progress": "late"})
+        assert term["ok"] is False
+        assert term["error"]["code"] == "ENVIRONMENT_SESSION_TERMINAL"
+        assert [(item["action"], item["argv"]) for item in trace] == [
+            (None, ["checkpoint", "ses_done", "--progress", "late"]),
+        ]
+    finally:
+        server.close()
+
+
+def test_real_control_grant_expiry_server_restart_and_bounded_recovery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    server, bridge, _def_path, trace = _setup_authority_rpc_project(
+        tmp_path,
+        monkeypatch,
+        project_name="alpha",
+        workspace_repos=["alpha", "mncs-language"],
+        protected_repos=["mncs-language"],
+    )
+    try:
+        # Seed initial valid context + enter session
+        entered = bridge.invoke("alpha", "enter")
+        assert entered["ok"] is True
+        selected_sid = entered["result"]["session_id"]
+
+        # Direct Control rejection of an expired grant sets recoverable authentication details
+        with server._lock:
+            token_digest, grant_record = next(iter(server._grants.items()))
+            grant_record.expires_at = 0.0
+        context = bridge._context("alpha", "")
+        direct_expired = _rpc(server.socket_path, {
+            "grant": context.grant,
+            "request_id": "req_direct_expired",
+            "cwd": context.sandbox_cwd,
+            "argv": ["continuation"],
+        })
+        assert direct_expired["ok"] is False
+        assert direct_expired["error"]["code"] == "ENVIRONMENT_AUTHORITY_DENIED"
+        assert direct_expired["error"]["details"] == {
+            "error_category": "authentication",
+            "reason": "grant_expired_or_unknown",
+            "recoverable": True,
+        }
+
+        # Scenario 9a: LocalEnvironmentMCP recovers once via _refresh_context on expired grant
+        trace.clear()
+        monkeypatch.setattr(server, "_authorize_session", lambda _sid, _p: {"authenticated_principal_id": server.principal_id})
+        monkeypatch.setattr(
+            server.environment_service,
+            "inspect",
+            lambda sid, **_k: {"session_id": sid, "lifecycle": "active", "claims": []},
+        )
+        inspected = bridge.invoke("alpha", "inspect")
+        assert inspected["ok"] is True
+        assert inspected["result"]["session_id"] == selected_sid
+        assert [(item["action"], item["argv"]) for item in trace] == [
+            (None, ["inspect", selected_sid]),
+            ("local-project-grant", None),
+            (None, ["continuation"]),
+            (None, ["inspect", selected_sid]),
+        ]
+
+        # Scenario 9b: Proactive client-side TTL expiry (_grant_needs_refresh) also rebinds
+        # continuation once for the new unbound grant instead of failing bound_session_id check
+        trace.clear()
+        context.expires_at = 0.0
+        inspected_ttl = bridge.invoke("alpha", "inspect")
+        assert inspected_ttl["ok"] is True
+        assert [(item["action"], item["argv"]) for item in trace] == [
+            ("local-project-grant", None),
+            (None, ["continuation", "--session-id", selected_sid]),
+            (None, ["inspect", selected_sid]),
+        ]
+
+        # Scenario 9c: Real Control server restart (fresh _grants map on same socket)
+        cfg = server.config
+        env_svc = server.environment_service
+        server.close()
+        restarted = EnvironmentRPCServer(cfg, env_svc, object())
+        env_svc.bind_principal(restarted.principal_id) if hasattr(env_svc, "bind_principal") else setattr(env_svc, "authenticated_principal_id", restarted.principal_id)
+        restarted.start()
+        monkeypatch.setattr(restarted, "_peer_process_cwd", lambda _pid: cfg.workspace_root / "alpha")
+        server = restarted
+        trace.clear()
+        restarted_cont = bridge.invoke("alpha", "continuation")
+        assert restarted_cont["ok"] is True
+        assert restarted_cont["result"]["selected_session_id"] == selected_sid
+        assert [(item["action"], item["argv"]) for item in trace] == [
+            (None, ["continuation"]),
+            ("local-project-grant", None),
+            (None, ["continuation"]),
+        ]
+
+        # Cross-process grant mismatch (recoverable=False) is NOT retried even on local-auth message
+        trace.clear()
+        monkeypatch.setattr(
+            local_environment_mcp, "_rpc",
+            lambda _sp, _req: {"ok": False, "error": {
+                "code": "ENVIRONMENT_AUTHORITY_DENIED",
+                "message": "local Environment capability belongs to another MCP process execution",
+                "details": {"error_category": "authentication", "reason": "grant_process_mismatch", "recoverable": False},
+            }},
+        )
+        cross_proc = bridge.invoke("alpha", "continuation")
+        assert cross_proc["ok"] is False
+        assert cross_proc["error"]["details"]["reason"] == "grant_process_mismatch"
+    finally:
+        server.close()
+        server.environment_service.close()
+
+
+def test_transport_error_and_double_grant_failure_never_loop_or_replay_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bridge = object.__new__(LocalEnvironmentMCP)
+    bridge.socket_path = tmp_path / "unused.sock"
+    context = _ProjectContext("grant-1", "/workspace/mncs-store", selected_session_id="ses_1", expires_at=10**12)
+    bridge._contexts = {("mncs-store", ".worktrees/a"): context}
+    calls: list[dict[str, object]] = []
+
+    # Scenario 10: transport ConnectionError on mutating checkpoint returns failure with 0 replays
+    def fail_transport(_sp: Path, req: dict[str, object]) -> dict[str, object]:
+        calls.append(dict(req))
+        raise ConnectionError("socket reset mid-flight")
+
+    monkeypatch.setattr(local_environment_mcp, "_rpc", fail_transport)
+    failed = bridge.invoke("mncs-store", "checkpoint", {"progress": "step-1"}, cwd=".worktrees/a")
+    assert failed["ok"] is False
+    assert failed["error"]["code"] == "ENVIRONMENT_LOCAL_BRIDGE_FAILED"
+    assert len(calls) == 1
+
+    # Scenario 12: double recoverable grant failure refreshes at most ONCE per invoke
+    calls.clear()
+    refresh_n = 0
+
+    def always_expired(_sp: Path, req: dict[str, object]) -> dict[str, object]:
+        nonlocal refresh_n
+        calls.append({"action": req.get("action"), "argv": req.get("argv")})
+        if req.get("action") == "local-project-grant":
+            refresh_n += 1
+            return {"ok": True, "result": {
+                "grant": f"{refresh_n}" * 40,
+                "sandbox_cwd": "/workspace/mncs-store/.worktrees/a",
+                "expires_in_seconds": 315,
+            }}
+        return {"ok": False, "error": {
+            "code": "ENVIRONMENT_AUTHORITY_DENIED",
+            "message": "Environment capability is expired or unknown",
+            "details": {"error_category": "authentication", "reason": "grant_expired_or_unknown", "recoverable": True},
+        }}
+
+    monkeypatch.setattr(local_environment_mcp, "_rpc", always_expired)
+    context.selected_session_id = None
+    bounded = bridge.invoke("mncs-store", "inspect", cwd=".worktrees/a")
+    assert bounded["ok"] is False
+    assert bounded["error"]["code"] == "ENVIRONMENT_AUTHORITY_DENIED"
+    assert refresh_n == 1
+    assert calls == [
+        {"action": None, "argv": ["continuation"]},
+        {"action": "local-project-grant", "argv": None},
+        {"action": None, "argv": ["continuation"]},
+    ]
+
+    # Scenario 9d: scope_grant recovery preserves selector_values (strips campaign_id
+    # before _select_session on grant refresh so reselection does not fail)
+    calls.clear()
+    stage = 0
+
+    def scope_grant_expired_rpc(_sp: Path, req: dict[str, object]) -> dict[str, object]:
+        nonlocal stage
+        calls.append({"action": req.get("action"), "argv": req.get("argv")})
+        if req.get("action") == "local-project-grant":
+            return {"ok": True, "result": {
+                "grant": "s" * 40,
+                "sandbox_cwd": "/workspace/mncs-store/.worktrees/a",
+                "expires_in_seconds": 315,
+            }}
+        argv = req.get("argv")
+        if argv == ["continuation"]:
+            return {"ok": True, "result": {
+                "stdout": json.dumps({"status": "selected", "selected_session_id": "ses_1"}),
+                "stderr": "", "exit_code": 0,
+            }}
+        if isinstance(argv, list) and argv[0] == "scope-grant":
+            stage += 1
+            if stage == 1:
+                return {"ok": False, "error": {
+                    "code": "ENVIRONMENT_AUTHORITY_DENIED",
+                    "message": "Environment capability is expired or unknown",
+                    "details": {"error_category": "authentication", "reason": "grant_expired_or_unknown", "recoverable": True},
+                }}
+            return {"ok": True, "result": {"stdout": json.dumps({"status": "granted"}), "stderr": "", "exit_code": 0}}
+        raise AssertionError(f"unexpected RPC (did campaign_id leak into continuation?): {req}")
+
+    monkeypatch.setattr(local_environment_mcp, "_rpc", scope_grant_expired_rpc)
+    context.selected_session_id = "ses_1"
+    context.grant_session_bound = True
+    rev = "0" * 64
+    sg = bridge.invoke(
+        "mncs-store", "scope_grant",
+        {"repository": "mncs-compiler", "approval_reference": "ref_ok",
+         "campaign_id": "cmp_1", "expected_authority_revision": rev},
+        cwd=".worktrees/a",
+    )
+    assert sg["ok"] is True
+    assert calls == [
+        {"action": None, "argv": ["scope-grant", "ses_1", "--campaign-id", "cmp_1",
+                                  "--repository", "mncs-compiler",
+                                  "--expected-authority-revision", rev,
+                                  "--approval-reference", "ref_ok"]},
+        {"action": "local-project-grant", "argv": None},
+        {"action": None, "argv": ["continuation"]},
+        {"action": None, "argv": ["scope-grant", "ses_1", "--campaign-id", "cmp_1",
+                                  "--repository", "mncs-compiler",
+                                  "--expected-authority-revision", rev,
+                                  "--approval-reference", "ref_ok"]},
+    ]
+
+    # Scenario 11: worktree boundary isolation keeps separate contexts and requires cwd once multiple exist
+    bridge._contexts[("mncs-store", ".worktrees/b")] = _ProjectContext(
+        "grant-b", "/workspace/mncs-store/.worktrees/b", selected_session_id="ses_b", expires_at=10**12,
+    )
+    ambiguous = bridge.invoke("mncs-store", "inspect")
+    assert ambiguous["ok"] is False
+    assert ambiguous["error"]["code"] == "ENVIRONMENT_LOCAL_BRIDGE_FAILED"
+    assert "cwd is required" in ambiguous["error"]["message"]
+
