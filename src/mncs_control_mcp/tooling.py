@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import json
 import os
 import platform
+import re
 import shutil
+import stat
 import sys
 import tomllib
 from dataclasses import dataclass
@@ -13,8 +16,10 @@ from .config import ControlConfig
 from .errors import ControlError
 from .git_adapter import GitService
 from .sandbox import Sandbox
-from .security import safe_host_probe_environment
+from .security import redact_text, safe_host_probe_environment
 from .workspace import WorkspacePolicy
+
+_SAFE_PROJECT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
 _TOOLS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("git", ("--version",)), ("gh", ("--version",)), ("bash", ("--version",)),
@@ -278,35 +283,331 @@ class ProjectService:
             "disk": {"total_bytes": usage.total, "free_bytes": usage.free} if usage else None,
         }
 
-    def list_projects(self, *, limit: int = 500) -> dict[str, object]:
-        rows = []
+    @staticmethod
+    def _inspect_mncs_metadata(project_dir: Path, entry_names: set[str]) -> dict[str, object]:
+        """Read bounded MNCS manifest identity without executing repository code."""
+        if ".mncs" not in entry_names:
+            return {"mncs_repository": None, "has_mncs_environment": False}
+        mncs_dir = project_dir / ".mncs"
+        try:
+            mncs_stat = mncs_dir.lstat()
+        except OSError:
+            return {"mncs_repository": None, "has_mncs_environment": False}
+        if stat.S_ISLNK(mncs_stat.st_mode) or not stat.S_ISDIR(mncs_stat.st_mode):
+            return {"mncs_repository": None, "has_mncs_environment": False}
+        has_env = False
+        for env_name in ("environment.json", "project-environment.json"):
+            candidate = mncs_dir / env_name
+            try:
+                cstat = candidate.lstat()
+                if stat.S_ISREG(cstat.st_mode) and not stat.S_ISLNK(cstat.st_mode):
+                    has_env = True
+                    break
+            except OSError:
+                continue
+        manifest_path = mncs_dir / "project.json"
+        mncs_repository: str | None = None
+        try:
+            pstat = manifest_path.lstat()
+            if (
+                stat.S_ISREG(pstat.st_mode)
+                and not stat.S_ISLNK(pstat.st_mode)
+                and pstat.st_size <= 256 * 1024
+            ):
+                loaded = json.loads(manifest_path.read_text(encoding="utf-8"))
+                repo = loaded.get("repository") if isinstance(loaded, dict) else None
+                if isinstance(repo, str) and repo and len(repo) <= 128:
+                    mncs_repository = repo
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            pass
+        return {
+            "mncs_repository": mncs_repository,
+            "has_mncs_environment": has_env,
+        }
+
+    @staticmethod
+    def _inspect_local_git_metadata(
+        workspace_root: Path, project_dir: Path, entry_names: set[str],
+    ) -> dict[str, object]:
+        """Inspect non-symlink .git HEAD/worktree metadata without spawning Git."""
+        if ".git" not in entry_names:
+            return {"is_git": False}
+        dot_git = project_dir / ".git"
+        try:
+            gstat = dot_git.lstat()
+        except OSError as exc:
+            return {
+                "is_git": False,
+                "git_status": "inaccessible",
+                "diagnostic": redact_text(str(exc))[:300],
+            }
+        if stat.S_ISLNK(gstat.st_mode):
+            return {
+                "is_git": False,
+                "git_status": "inaccessible",
+                "diagnostic": "git marker traverses a symbolic link",
+            }
+        resolved_workspace = workspace_root.resolve()
+        common_repo: str | None = None
+        worktree_count: int | None = None
+        if stat.S_ISDIR(gstat.st_mode):
+            git_dir = dot_git
+            common_dir = dot_git
+            common_repo = project_dir.name
+        elif stat.S_ISREG(gstat.st_mode) and gstat.st_size <= 4096:
+            try:
+                raw_gitdir = dot_git.read_text(encoding="utf-8", errors="ignore").strip()
+            except OSError as exc:
+                return {
+                    "is_git": True,
+                    "git_status": "unavailable",
+                    "diagnostic": redact_text(str(exc))[:300],
+                }
+            if not raw_gitdir.startswith("gitdir:"):
+                return {
+                    "is_git": True,
+                    "git_status": "unavailable",
+                    "diagnostic": "invalid .git file metadata",
+                }
+            target = raw_gitdir.split(":", 1)[1].strip()
+            candidate_dir = Path(target)
+            if not candidate_dir.is_absolute():
+                candidate_dir = project_dir / candidate_dir
+            try:
+                git_dir = candidate_dir.resolve(strict=True)
+                git_dir.relative_to(resolved_workspace)
+            except (OSError, ValueError):
+                return {
+                    "is_git": False,
+                    "git_status": "inaccessible",
+                    "diagnostic": "gitdir target is unavailable or escapes the workspace",
+                }
+            if git_dir.parent.name == "worktrees" and git_dir.parent.parent.name == ".git":
+                common_dir = git_dir.parent.parent
+                if common_dir.parent.parent == resolved_workspace:
+                    common_repo = common_dir.parent.name
+            else:
+                common_dir = git_dir
+        else:
+            return {
+                "is_git": False,
+                "git_status": "unavailable",
+                "diagnostic": "unsupported .git entry type or size",
+            }
+
+        head_path = git_dir / "HEAD"
+        branch: str | None = None
+        head_oid: str | None = None
+        try:
+            hstat = head_path.lstat()
+            if stat.S_ISLNK(hstat.st_mode) or not stat.S_ISREG(hstat.st_mode) or hstat.st_size > 4096:
+                raise OSError("HEAD must be a small non-symlink regular file")
+            head_raw = head_path.read_text(encoding="utf-8").strip()
+            if head_raw.startswith("ref: "):
+                ref_name = head_raw[5:].strip()
+                branch = ref_name.removeprefix("refs/heads/")
+                if not ref_name.startswith("/") and ".." not in Path(ref_name).parts:
+                    ref_file = common_dir / ref_name
+                    try:
+                        rstat = ref_file.lstat()
+                        if stat.S_ISREG(rstat.st_mode) and not stat.S_ISLNK(rstat.st_mode) and rstat.st_size <= 256:
+                            candidate_sha = ref_file.read_text(encoding="utf-8").strip()
+                            if re.fullmatch(r"[0-9a-f]{40,64}", candidate_sha):
+                                head_oid = candidate_sha
+                    except OSError:
+                        pass
+            elif re.fullmatch(r"[0-9a-f]{40,64}", head_raw):
+                head_oid = head_raw
+                branch = f"HEAD detached at {head_raw[:8]}"
+            else:
+                branch = head_raw[:120] or None
+        except OSError as exc:
+            return {
+                "is_git": True,
+                "branch": None,
+                "dirty": None,
+                "git_status": "unavailable",
+                "diagnostic": redact_text(str(exc))[:300],
+            }
+
+        worktrees_dir = common_dir / "worktrees"
+        try:
+            if worktrees_dir.is_dir() and not worktrees_dir.is_symlink():
+                linked = sum(
+                    1 for entry in os.scandir(worktrees_dir)
+                    if entry.is_dir(follow_symlinks=False)
+                )
+                worktree_count = 1 + linked
+            elif common_repo is not None:
+                worktree_count = 1
+        except OSError:
+            pass
+
+        result: dict[str, object] = {
+            "is_git": True,
+            "branch": branch,
+            "dirty": None,
+            "git_status": "not_requested",
+        }
+        if head_oid is not None:
+            result["head"] = head_oid
+        if common_repo is not None:
+            result["common_repository"] = common_repo
+        if worktree_count is not None:
+            result["worktree_count"] = worktree_count
+        return result
+
+    def list_projects(
+        self,
+        *,
+        limit: int = 500,
+        include_status: bool = False,
+        include_worktrees: bool = False,
+        projects: list[str] | None = None,
+    ) -> dict[str, object]:
         aliases = {value: key for key, value in self.config.repositories.items()}
         if not self.policy.root.is_dir():
             return {"projects": [], "workspace_exists": False}
-        for child in sorted(self.policy.root.iterdir(), key=lambda item: item.name.casefold()):
-            if len(rows) >= min(limit, 1000):
-                break
-            if not child.is_dir() or child.is_symlink() or child.name.startswith("."):
-                continue
-            indicators = sorted({kind for filename, kind in _INDICATORS.items() if (child / filename).exists()})
-            git_info: dict[str, object] = {"is_git": (child / ".git").exists()}
-            if git_info["is_git"]:
+        bounded_limit = max(1, min(int(limit), 1000))
+        candidates: list[tuple[str, Path | None, str | None]] = []
+        truncated = False
+        if projects is not None:
+            if not isinstance(projects, list) or len(projects) > 1000:
+                raise ControlError("INVALID_INPUT", "projects must be a list of at most 1000 repository names")
+            unique_names = list(dict.fromkeys(projects))
+            if len(unique_names) > bounded_limit:
+                truncated = True
+                unique_names = unique_names[:bounded_limit]
+            for name in unique_names:
+                if not isinstance(name, str) or not _SAFE_PROJECT_RE.fullmatch(name):
+                    raise ControlError("INVALID_INPUT", f"invalid project name: {name!r}")
+                child = self.policy.root / name
                 try:
-                    status = self.git.status(child.name)
-                    git_info.update({"branch": status.get("branch_summary"), "dirty": not status.get("clean", False)})
+                    cstat = child.lstat()
+                except FileNotFoundError:
+                    candidates.append((name, None, "missing"))
+                    continue
+                except OSError as exc:
+                    candidates.append((name, child, redact_text(str(exc))[:300]))
+                    continue
+                if stat.S_ISLNK(cstat.st_mode) or not stat.S_ISDIR(cstat.st_mode):
+                    candidates.append((name, child, "path is missing, a symbolic link, or not a directory"))
+                    continue
+                candidates.append((name, child, None))
+        else:
+            try:
+                dir_entries = sorted(
+                    (
+                        entry for entry in os.scandir(self.policy.root)
+                        if not entry.name.startswith(".")
+                        and not entry.is_symlink()
+                        and entry.is_dir(follow_symlinks=False)
+                    ),
+                    key=lambda item: item.name.casefold(),
+                )
+            except OSError as exc:
+                return {
+                    "workspace": str(self.policy.root),
+                    "workspace_exists": False,
+                    "projects": [],
+                    "diagnostic": redact_text(str(exc))[:500],
+                }
+            if len(dir_entries) > bounded_limit:
+                truncated = True
+                dir_entries = dir_entries[:bounded_limit]
+            candidates = [(entry.name, Path(entry.path), None) for entry in dir_entries]
+
+        rows = []
+        status_cache: dict[str, dict[str, object]] = {}
+        worktrees_cache: dict[str, dict[str, object]] = {}
+        for name, child, error_kind in candidates:
+            if error_kind == "missing" or child is None:
+                rows.append({
+                    "name": name,
+                    "path": name,
+                    "exists": False,
+                    "status": "missing",
+                    "is_git": False,
+                    "git_status": "missing",
+                    "project_types": [],
+                    "mncs_project": name in aliases,
+                    "mncs_alias": aliases.get(name),
+                })
+                continue
+            if error_kind is not None:
+                rows.append({
+                    "name": name,
+                    "path": name,
+                    "exists": False,
+                    "status": "inaccessible",
+                    "is_git": False,
+                    "git_status": "inaccessible",
+                    "diagnostic": error_kind,
+                    "project_types": [],
+                    "mncs_project": name in aliases,
+                    "mncs_alias": aliases.get(name),
+                })
+                continue
+            try:
+                entry_names = set(os.listdir(child))
+            except OSError as exc:
+                rows.append({
+                    "name": name,
+                    "path": name,
+                    "exists": True,
+                    "status": "inaccessible",
+                    "is_git": (child / ".git").exists(),
+                    "git_status": "inaccessible",
+                    "diagnostic": redact_text(str(exc))[:500],
+                    "project_types": [],
+                    "mncs_project": name in aliases,
+                    "mncs_alias": aliases.get(name),
+                })
+                continue
+            indicators = sorted({kind for filename, kind in _INDICATORS.items() if filename in entry_names})
+            mncs_meta = self._inspect_mncs_metadata(child, entry_names)
+            git_info = self._inspect_local_git_metadata(self.policy.root, child, entry_names)
+            if git_info.get("is_git") and include_status:
+                try:
+                    if name not in status_cache:
+                        status_cache[name] = self.git.status(name)
+                    status = status_cache[name]
+                    git_info.update({
+                        "branch": status.get("branch_summary"),
+                        "dirty": not status.get("clean", False),
+                        "git_status": "observed",
+                    })
                 except Exception as exc:
-                    git_info["diagnostic"] = str(exc)[:500]
+                    git_info["git_status"] = "unavailable"
+                    git_info["dirty"] = None
+                    git_info["diagnostic"] = redact_text(str(exc))[:500]
+            if git_info.get("is_git") and include_worktrees:
+                try:
+                    if name not in worktrees_cache:
+                        worktrees_cache[name] = self.git.worktree_list(name)
+                    wt_list = worktrees_cache[name].get("worktrees", [])
+                    git_info["worktrees"] = wt_list
+                    if isinstance(wt_list, list):
+                        git_info["worktree_count"] = len(wt_list)
+                except Exception as exc:
+                    git_info["worktrees_diagnostic"] = redact_text(str(exc))[:500]
             rows.append(
                 {
-                    "name": child.name,
-                    "path": child.name,
+                    "name": name,
+                    "path": name,
                     **git_info,
                     "project_types": indicators,
-                    "mncs_project": child.name in aliases,
-                    "mncs_alias": aliases.get(child.name),
+                    "mncs_project": name in aliases,
+                    "mncs_alias": aliases.get(name),
+                    **mncs_meta,
                 }
             )
-        return {"workspace": str(self.policy.root), "projects": rows, "truncated": len(rows) >= min(limit, 1000)}
+        return {
+            "workspace": str(self.policy.root),
+            "projects": rows,
+            "truncated": truncated,
+            "status_observed": bool(include_status),
+        }
 
     def info(self, project: str) -> dict[str, object]:
         path = self.policy.project_path(project)

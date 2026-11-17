@@ -346,3 +346,133 @@ def test_tool_inventory_reports_project_local_candidate_when_system_wrapper_is_b
     assert item["status"] == "healthy"
     assert item["scope"] == "project"
     assert any(row["scope"] == "project" for row in item["candidates"])
+
+
+def test_list_projects_routine_skips_git_status_and_preserves_metadata(
+    config, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import json
+
+    policy = WorkspacePolicy(config)
+    sandbox = Sandbox(config, policy)
+    git = GitService(config, policy, sandbox)
+    projects = ProjectService(config, policy, sandbox, git)
+
+    # Create primary repo with .mncs manifest, linked worktree, and dirty file
+    main_repo = config.workspace_root / "alpha"
+    main_repo.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main", str(main_repo)], check=True)
+    subprocess.run(
+        ["git", "-C", str(main_repo), "-c", "user.name=T", "-c", "user.email=t@e.invalid",
+         "commit", "--allow-empty", "-q", "-m", "init"],
+        check=True,
+    )
+    (main_repo / "pyproject.toml").write_text("[project]\nname='alpha'\nversion='0.1.0'\n", encoding="utf-8")
+    (main_repo / ".mncs").mkdir()
+    (main_repo / ".mncs" / "project.json").write_text(json.dumps({"repository": "alpha"}), encoding="utf-8")
+    (main_repo / ".mncs" / "environment.json").write_text("{}", encoding="utf-8")
+
+    # Add linked worktree outside alpha root (at top-level workspace child alpha-wt)
+    wt_dir = config.workspace_root / "alpha-wt"
+    subprocess.run(["git", "-C", str(main_repo), "worktree", "add", "-q", "-b", "feat/wt", str(wt_dir)], check=True)
+
+    # Non-git directory and symlink-escaped .git directory
+    plain_dir = config.workspace_root / "plain-docs"
+    plain_dir.mkdir()
+    escaped_git = config.workspace_root / "symlink-git"
+    escaped_git.mkdir()
+    (escaped_git / ".git").symlink_to(main_repo / ".git")
+
+    # Ensure ZERO git/sandbox subprocesses run on routine list_projects()
+    status_calls: list[str] = []
+    wt_calls: list[str] = []
+
+    def fail_if_called(*_a, **_k):  # pragma: no cover
+        pytest.fail("routine list_projects() should not spawn sandbox subprocesses")
+
+    monkeypatch.setattr(sandbox, "run", fail_if_called)
+    orig_status = git.status
+    orig_wt = git.worktree_list
+    monkeypatch.setattr(git, "status", lambda repo: (status_calls.append(repo), orig_status(repo))[1])
+    monkeypatch.setattr(git, "worktree_list", lambda repo: (wt_calls.append(repo), orig_wt(repo))[1])
+
+    listed = projects.list_projects()
+    assert listed["status_observed"] is False
+    assert status_calls == []
+    assert wt_calls == []
+    by_name = {row["name"]: row for row in listed["projects"]}
+
+    alpha = by_name["alpha"]
+    assert alpha["is_git"] is True
+    assert alpha["branch"] == "main"
+    assert alpha["dirty"] is None  # Never falsely claim clean when status wasn't run
+    assert alpha["git_status"] == "not_requested"
+    assert alpha["worktree_count"] == 2
+    assert alpha["common_repository"] == "alpha"
+    assert alpha["mncs_repository"] == "alpha"
+    assert alpha["has_mncs_environment"] is True
+    assert "python" in alpha["project_types"]
+
+    alpha_wt = by_name["alpha-wt"]
+    assert alpha_wt["is_git"] is True
+    assert alpha_wt["branch"] == "feat/wt"
+    assert alpha_wt["dirty"] is None
+    assert alpha_wt["common_repository"] == "alpha"
+
+    assert by_name["plain-docs"]["is_git"] is False
+    assert by_name["symlink-git"]["is_git"] is False
+    assert by_name["symlink-git"]["git_status"] == "inaccessible"
+
+    # Concurrent branch switch reflects immediately with zero stale cache
+    subprocess.run(["git", "-C", str(main_repo), "checkout", "-q", "-b", "feat/next"], check=True)
+    listed2 = projects.list_projects(projects=["alpha"])
+    assert listed2["projects"][0]["branch"] == "feat/next"
+
+
+@pytest.mark.requires_bwrap_namespace
+@pytest.mark.skipif(shutil.which("bwrap") is None, reason="bubblewrap is not installed")
+def test_list_projects_explicit_status_selective_and_missing_distinction(config, monkeypatch: pytest.MonkeyPatch) -> None:
+    policy = WorkspacePolicy(config)
+    sandbox = Sandbox(config, policy)
+    git = GitService(config, policy, sandbox)
+    projects = ProjectService(config, policy, sandbox, git)
+
+    for repo_name in ("clean-repo", "other-repo"):
+        repo = config.workspace_root / repo_name
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+        subprocess.run(
+            ["git", "-C", str(repo), "-c", "user.name=T", "-c", "user.email=t@e.invalid",
+             "commit", "--allow-empty", "-q", "-m", "init"],
+            check=True,
+        )
+
+    calls: list[str] = []
+    orig_status = git.status
+    monkeypatch.setattr(git, "status", lambda r: (calls.append(r), orig_status(r))[1])
+
+    # Selective include_status inspects only requested existing repo once (even if repeated)
+    res1 = projects.list_projects(
+        projects=["clean-repo", "clean-repo", "missing-repo"],
+        include_status=True,
+    )
+    assert res1["status_observed"] is True
+    assert calls == ["clean-repo"]
+    by_name = {row["name"]: row for row in res1["projects"]}
+    assert by_name["clean-repo"]["dirty"] is False
+    assert by_name["clean-repo"]["git_status"] == "observed"
+    assert by_name["missing-repo"]["exists"] is False
+    assert by_name["missing-repo"]["status"] == "missing"
+
+    # Dirtying tree concurrently immediately invalidates any prior clean observation
+    (config.workspace_root / "clean-repo" / "untracked.txt").write_text("dirty\n", encoding="utf-8")
+    calls.clear()
+    res2 = projects.list_projects(
+        projects=["clean-repo"], include_status=True, include_worktrees=True,
+    )
+    assert calls == ["clean-repo"]
+    row = res2["projects"][0]
+    assert row["dirty"] is True
+    assert row["git_status"] == "observed"
+    assert len(row["worktrees"]) == 1
+

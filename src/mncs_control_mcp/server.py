@@ -279,9 +279,23 @@ def build_server(config: ControlConfig | None = None) -> Any:
             audit_metadata={"plan_id": plan_id, "confirmed": confirm},
         )  # type: ignore[return-value]
 
-    @server.tool(name="list_projects", description="Dynamically discover immediate workspace projects and build/Git indicators.", annotations=ro, structured_output=True)
-    def list_projects(limit: int = 500) -> dict[str, object]:
-        return invoke("list_projects", projects.list_projects, limit=limit)  # type: ignore[return-value]
+    project_service = projects
+
+    @server.tool(name="list_projects", description="Dynamically discover immediate workspace projects and build/Git metadata without running working-tree status unless requested.", annotations=ro, structured_output=True)
+    def list_projects(
+        limit: int = 500,
+        include_status: bool = False,
+        include_worktrees: bool = False,
+        projects: list[str] | None = None,
+    ) -> dict[str, object]:
+        return invoke(
+            "list_projects",
+            project_service.list_projects,
+            limit=limit,
+            include_status=include_status,
+            include_worktrees=include_worktrees,
+            projects=projects,
+        )  # type: ignore[return-value]
 
     @server.tool(name="project_info", description="Inspect one dynamically discovered workspace project.", annotations=ro, structured_output=True)
     def project_info(project: str) -> dict[str, object]:

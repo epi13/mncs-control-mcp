@@ -447,6 +447,12 @@ fabric_execution_mode = "unavailable-until-service-support"
         assert "limit" in by_name["fabric_work_list"]["inputSchema"]["properties"]
         assert client.call("workspace_info", {})["root"] == str(workspace)
         assert isinstance(client.call("list_projects", {})["projects"], list)
+        filtered = client.call(
+            "list_projects",
+            {"projects": ["missing-probe"], "include_status": False, "include_worktrees": False},
+        )
+        assert filtered["projects"][0]["status"] == "missing"
+        assert filtered["status_observed"] is False
         capabilities = client.call("control_capabilities", {})
         assert capabilities["server"]["fabric_mode"] == "service"
         assert capabilities["fabric"]["authority"].startswith("persistent-controller")
